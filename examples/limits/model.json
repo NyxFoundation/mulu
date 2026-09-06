@@ -1,0 +1,533 @@
+{
+  "schema_version": 1,
+  "kind": "finite-product",
+  "description": "Limits (docs/08 §3) hand-written finite model. Spec limit-bound: limit <= 1000 at successful transaction end; initial limit = 0. Predicates p1: x<=100, p2: x<=1000, p3: limit<=1000. Argument regions X0: x<=100, X1: 100<x<=1000, X2: x>1000 cover uint256 and are disjoint; p1 and not p2 is infeasible (discharged by hand for this model, 'trusted-solver' in a generated one). Storage region L0: limit<=1000, L1: limit>1000. The monitor moves to bad at TxReturn when limit>1000.",
+  "states": [
+    "idle",
+    "sL_A_X0",
+    "sL_A_X1",
+    "sL_A_X2",
+    "sL_B_X0",
+    "sL_W_X0",
+    "sL_end",
+    "sL_rev",
+    "fS_W_X0",
+    "fS_W_X1",
+    "fS_W_X2",
+    "fS_end_L0",
+    "fS_end_L1",
+    "bad"
+  ],
+  "initial": "idle",
+  "marked": [
+    "idle",
+    "sL_end",
+    "sL_rev",
+    "fS_end_L0",
+    "fS_end_L1"
+  ],
+  "bad": [
+    "bad"
+  ],
+  "events": [
+    {
+      "id": "call_setLimit_X0",
+      "control": "uncontrollable",
+      "description": "CallRequest(setLimit, x in X0)"
+    },
+    {
+      "id": "call_setLimit_X1",
+      "control": "uncontrollable",
+      "description": "CallRequest(setLimit, x in X1)"
+    },
+    {
+      "id": "call_setLimit_X2",
+      "control": "uncontrollable",
+      "description": "CallRequest(setLimit, x in X2)"
+    },
+    {
+      "id": "call_forceSet_X0",
+      "control": "uncontrollable",
+      "description": "CallRequest(forceSet, x in X0)"
+    },
+    {
+      "id": "call_forceSet_X1",
+      "control": "uncontrollable",
+      "description": "CallRequest(forceSet, x in X1)"
+    },
+    {
+      "id": "call_forceSet_X2",
+      "control": "uncontrollable",
+      "description": "CallRequest(forceSet, x in X2)"
+    },
+    {
+      "id": "A_pass",
+      "control": "uncontrollable",
+      "description": "GuardResult(A, true)"
+    },
+    {
+      "id": "A_fail",
+      "control": "uncontrollable",
+      "description": "GuardResult(A, false)"
+    },
+    {
+      "id": "B_pass",
+      "control": "uncontrollable",
+      "description": "GuardResult(B, true)"
+    },
+    {
+      "id": "B_fail",
+      "control": "uncontrollable",
+      "description": "GuardResult(B, false)"
+    },
+    {
+      "id": "store",
+      "control": "uncontrollable",
+      "description": "InternalStep(limit := x)"
+    },
+    {
+      "id": "ret",
+      "control": "uncontrollable",
+      "description": "TxReturn"
+    },
+    {
+      "id": "revert",
+      "control": "uncontrollable",
+      "description": "TxRevert"
+    }
+  ],
+  "transitions": [
+    {
+      "from": "idle",
+      "event": "call_setLimit_X0",
+      "to": "sL_A_X0"
+    },
+    {
+      "from": "idle",
+      "event": "call_setLimit_X1",
+      "to": "sL_A_X1"
+    },
+    {
+      "from": "idle",
+      "event": "call_setLimit_X2",
+      "to": "sL_A_X2"
+    },
+    {
+      "from": "sL_A_X0",
+      "event": "A_pass",
+      "to": "sL_B_X0"
+    },
+    {
+      "from": "sL_A_X1",
+      "event": "A_fail",
+      "to": "sL_rev"
+    },
+    {
+      "from": "sL_A_X2",
+      "event": "A_fail",
+      "to": "sL_rev"
+    },
+    {
+      "from": "sL_B_X0",
+      "event": "B_pass",
+      "to": "sL_W_X0"
+    },
+    {
+      "from": "sL_W_X0",
+      "event": "store",
+      "to": "sL_end"
+    },
+    {
+      "from": "sL_end",
+      "event": "ret",
+      "to": "idle"
+    },
+    {
+      "from": "sL_rev",
+      "event": "revert",
+      "to": "idle"
+    },
+    {
+      "from": "idle",
+      "event": "call_forceSet_X0",
+      "to": "fS_W_X0"
+    },
+    {
+      "from": "idle",
+      "event": "call_forceSet_X1",
+      "to": "fS_W_X1"
+    },
+    {
+      "from": "idle",
+      "event": "call_forceSet_X2",
+      "to": "fS_W_X2"
+    },
+    {
+      "from": "fS_W_X0",
+      "event": "store",
+      "to": "fS_end_L0"
+    },
+    {
+      "from": "fS_W_X1",
+      "event": "store",
+      "to": "fS_end_L0"
+    },
+    {
+      "from": "fS_W_X2",
+      "event": "store",
+      "to": "fS_end_L1"
+    },
+    {
+      "from": "fS_end_L0",
+      "event": "ret",
+      "to": "idle"
+    },
+    {
+      "from": "fS_end_L1",
+      "event": "ret",
+      "to": "bad"
+    }
+  ],
+  "checks": [
+    {
+      "id": "A",
+      "pass_event": "A_pass",
+      "fail_event": "A_fail",
+      "description": "require(x <= 100, \"cap\")"
+    },
+    {
+      "id": "B",
+      "pass_event": "B_pass",
+      "fail_event": "B_fail",
+      "depends_on": [
+        "A"
+      ],
+      "description": "require(x <= 1000, \"bound\")"
+    }
+  ],
+  "control_plant": {
+    "states": [
+      "idle",
+      "A_X0",
+      "A_X1",
+      "A_X2",
+      "B_X0",
+      "B_X1",
+      "B_X2",
+      "W_X0",
+      "W_X1",
+      "W_X2",
+      "end_L0",
+      "end_L1",
+      "rev",
+      "F_X0",
+      "F_X1",
+      "F_X2",
+      "fW_X0",
+      "fW_X1",
+      "fW_X2",
+      "fend_L0",
+      "fend_L1",
+      "bad"
+    ],
+    "initial": "idle",
+    "marked": [
+      "idle",
+      "end_L0",
+      "end_L1",
+      "rev",
+      "fend_L0",
+      "fend_L1"
+    ],
+    "accepting": [
+      "end_L0",
+      "end_L1",
+      "fend_L0",
+      "fend_L1"
+    ],
+    "bad": [
+      "bad"
+    ],
+    "events": [
+      {
+        "id": "call_setLimit_X0",
+        "control": "uncontrollable"
+      },
+      {
+        "id": "call_setLimit_X1",
+        "control": "uncontrollable"
+      },
+      {
+        "id": "call_setLimit_X2",
+        "control": "uncontrollable"
+      },
+      {
+        "id": "call_forceSet_X0",
+        "control": "uncontrollable"
+      },
+      {
+        "id": "call_forceSet_X1",
+        "control": "uncontrollable"
+      },
+      {
+        "id": "call_forceSet_X2",
+        "control": "uncontrollable"
+      },
+      {
+        "id": "cont_A",
+        "control": "controllable",
+        "description": "Continue(site A)"
+      },
+      {
+        "id": "rej_A",
+        "control": "uncontrollable",
+        "description": "Reject(site A): always possible in the conservative plant"
+      },
+      {
+        "id": "cont_B",
+        "control": "controllable",
+        "description": "Continue(site B)"
+      },
+      {
+        "id": "rej_B",
+        "control": "uncontrollable",
+        "description": "Reject(site B)"
+      },
+      {
+        "id": "cont_F",
+        "control": "controllable",
+        "description": "Continue(site F): a new check site at the forceSet entry"
+      },
+      {
+        "id": "rej_F",
+        "control": "uncontrollable",
+        "description": "Reject(site F)"
+      },
+      {
+        "id": "store",
+        "control": "uncontrollable"
+      },
+      {
+        "id": "ret",
+        "control": "uncontrollable"
+      },
+      {
+        "id": "revert",
+        "control": "uncontrollable"
+      }
+    ],
+    "transitions": [
+      {
+        "from": "idle",
+        "event": "call_setLimit_X0",
+        "to": "A_X0"
+      },
+      {
+        "from": "idle",
+        "event": "call_setLimit_X1",
+        "to": "A_X1"
+      },
+      {
+        "from": "idle",
+        "event": "call_setLimit_X2",
+        "to": "A_X2"
+      },
+      {
+        "from": "A_X0",
+        "event": "cont_A",
+        "to": "B_X0"
+      },
+      {
+        "from": "A_X0",
+        "event": "rej_A",
+        "to": "rev"
+      },
+      {
+        "from": "B_X0",
+        "event": "cont_B",
+        "to": "W_X0"
+      },
+      {
+        "from": "B_X0",
+        "event": "rej_B",
+        "to": "rev"
+      },
+      {
+        "from": "A_X1",
+        "event": "cont_A",
+        "to": "B_X1"
+      },
+      {
+        "from": "A_X1",
+        "event": "rej_A",
+        "to": "rev"
+      },
+      {
+        "from": "B_X1",
+        "event": "cont_B",
+        "to": "W_X1"
+      },
+      {
+        "from": "B_X1",
+        "event": "rej_B",
+        "to": "rev"
+      },
+      {
+        "from": "A_X2",
+        "event": "cont_A",
+        "to": "B_X2"
+      },
+      {
+        "from": "A_X2",
+        "event": "rej_A",
+        "to": "rev"
+      },
+      {
+        "from": "B_X2",
+        "event": "cont_B",
+        "to": "W_X2"
+      },
+      {
+        "from": "B_X2",
+        "event": "rej_B",
+        "to": "rev"
+      },
+      {
+        "from": "W_X0",
+        "event": "store",
+        "to": "end_L0"
+      },
+      {
+        "from": "W_X1",
+        "event": "store",
+        "to": "end_L0"
+      },
+      {
+        "from": "W_X2",
+        "event": "store",
+        "to": "end_L1"
+      },
+      {
+        "from": "end_L0",
+        "event": "ret",
+        "to": "idle"
+      },
+      {
+        "from": "end_L1",
+        "event": "ret",
+        "to": "bad"
+      },
+      {
+        "from": "rev",
+        "event": "revert",
+        "to": "idle"
+      },
+      {
+        "from": "idle",
+        "event": "call_forceSet_X0",
+        "to": "F_X0"
+      },
+      {
+        "from": "idle",
+        "event": "call_forceSet_X1",
+        "to": "F_X1"
+      },
+      {
+        "from": "idle",
+        "event": "call_forceSet_X2",
+        "to": "F_X2"
+      },
+      {
+        "from": "F_X0",
+        "event": "cont_F",
+        "to": "fW_X0"
+      },
+      {
+        "from": "F_X0",
+        "event": "rej_F",
+        "to": "rev"
+      },
+      {
+        "from": "F_X1",
+        "event": "cont_F",
+        "to": "fW_X1"
+      },
+      {
+        "from": "F_X1",
+        "event": "rej_F",
+        "to": "rev"
+      },
+      {
+        "from": "F_X2",
+        "event": "cont_F",
+        "to": "fW_X2"
+      },
+      {
+        "from": "F_X2",
+        "event": "rej_F",
+        "to": "rev"
+      },
+      {
+        "from": "fW_X0",
+        "event": "store",
+        "to": "fend_L0"
+      },
+      {
+        "from": "fW_X1",
+        "event": "store",
+        "to": "fend_L0"
+      },
+      {
+        "from": "fW_X2",
+        "event": "store",
+        "to": "fend_L1"
+      },
+      {
+        "from": "fend_L0",
+        "event": "ret",
+        "to": "idle"
+      },
+      {
+        "from": "fend_L1",
+        "event": "ret",
+        "to": "bad"
+      }
+    ],
+    "sites": [
+      {
+        "id": "A",
+        "check": "A",
+        "continue_event": "cont_A",
+        "pairs": [
+          {
+            "plant_state": "A_X0",
+            "impl_state": "sL_A_X0"
+          },
+          {
+            "plant_state": "A_X1",
+            "impl_state": "sL_A_X1"
+          },
+          {
+            "plant_state": "A_X2",
+            "impl_state": "sL_A_X2"
+          }
+        ]
+      },
+      {
+        "id": "B",
+        "check": "B",
+        "continue_event": "cont_B",
+        "pairs": [
+          {
+            "plant_state": "B_X0",
+            "impl_state": "sL_B_X0"
+          }
+        ]
+      },
+      {
+        "id": "F",
+        "continue_event": "cont_F"
+      }
+    ]
+  }
+}

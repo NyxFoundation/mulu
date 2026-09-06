@@ -1,0 +1,19 @@
+[package]
+name = "mulu-cli"
+description = "mulu: supervisory-control based static analyzer — command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mulu"
+path = "src/main.rs"
+
+[dependencies]
+mulu-model = { path = "../mulu-model" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+sha2.workspace = true
+hex.workspace = true

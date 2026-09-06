@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "finite-product",
+  "description": "docs/09 §2 third fixture: no bad edge; q1 has no path back to a marked state. Expected: nonblocking removes q1 (winning={q0}), safety keeps it (winning={q0,q1,q2}).",
+  "states": ["q0", "q1", "q2"],
+  "initial": "q0",
+  "marked": ["q0"],
+  "bad": [],
+  "events": [
+    {"id": "c", "control": "controllable"},
+    {"id": "u", "control": "uncontrollable"}
+  ],
+  "transitions": [
+    {"from": "q0", "event": "c", "to": "q1"},
+    {"from": "q1", "event": "u", "to": "q1"}
+  ]
+}

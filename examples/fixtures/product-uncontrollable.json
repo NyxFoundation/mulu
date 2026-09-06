@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "finite-product",
+  "description": "docs/09 §2 fixture with c uncontrollable. Expected: winning={}, status=unrealizable.",
+  "states": ["q0", "q1", "bad"],
+  "initial": "q0",
+  "marked": ["q0"],
+  "bad": ["bad"],
+  "events": [
+    {"id": "c", "control": "uncontrollable"},
+    {"id": "u", "control": "uncontrollable"}
+  ],
+  "transitions": [
+    {"from": "q0", "event": "c", "to": "q1"},
+    {"from": "q1", "event": "u", "to": "bad"}
+  ]
+}

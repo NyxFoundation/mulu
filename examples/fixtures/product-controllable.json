@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "finite-product",
+  "description": "docs/09 §2 fixture: q0 -c-> q1 -u-> bad with c controllable. Expected: winning={q0}, disabled={(q0,c)}, status=complete.",
+  "states": ["q0", "q1", "bad"],
+  "initial": "q0",
+  "marked": ["q0"],
+  "bad": ["bad"],
+  "events": [
+    {"id": "c", "control": "controllable"},
+    {"id": "u", "control": "uncontrollable"}
+  ],
+  "transitions": [
+    {"from": "q0", "event": "c", "to": "q1"},
+    {"from": "q1", "event": "u", "to": "bad"}
+  ]
+}

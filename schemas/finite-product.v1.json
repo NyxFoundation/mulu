@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NyxFoundation/mulu/schemas/finite-product.v1.json",
+  "title": "mulu finite-product model, version 1",
+  "description": "A finite plant already multiplied with a total specification monitor (bad states). Not a Solidity input: the P0 core fixture format. Unknown fields are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "states", "initial", "marked", "bad", "events", "transitions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "kind": {"const": "finite-product"},
+    "description": {"type": "string"},
+    "states": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "initial": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "minItems": 1}]},
+    "marked": {"type": "array", "items": {"type": "string"}},
+    "bad": {"type": "array", "items": {"type": "string"}},
+    "events": {"type": "array", "items": {"$ref": "#/$defs/event"}},
+    "transitions": {"type": "array", "items": {"$ref": "#/$defs/transition"}},
+    "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+    "control_plant": {"$ref": "#/$defs/controlPlant"}
+  },
+  "$defs": {
+    "event": {
+      "type": "object", "additionalProperties": false, "required": ["id", "control"],
+      "properties": {"id": {"type": "string"}, "control": {"enum": ["controllable", "uncontrollable"]}, "description": {"type": "string"}}
+    },
+    "transition": {
+      "type": "object", "additionalProperties": false, "required": ["from", "event", "to"],
+      "properties": {"from": {"type": "string"}, "event": {"type": "string"}, "to": {"type": "string"}},
+      "$comment": "The same (from, event) may not appear with two different targets (partial determinism)."
+    },
+    "check": {
+      "type": "object", "additionalProperties": false, "required": ["id", "pass_event", "fail_event"],
+      "properties": {"id": {"type": "string"}, "pass_event": {"type": "string"}, "fail_event": {"type": "string"},
+                     "depends_on": {"type": "array", "items": {"type": "string"}}, "description": {"type": "string"}}
+    },
+    "sitePair": {
+      "type": "object", "additionalProperties": false, "required": ["plant_state", "impl_state"],
+      "properties": {"plant_state": {"type": "string"}, "impl_state": {"type": "string"}}
+    },
+    "controlSite": {
+      "type": "object", "additionalProperties": false, "required": ["id", "continue_event"],
+      "properties": {"id": {"type": "string"}, "check": {"type": "string"}, "continue_event": {"type": "string"},
+                     "pairs": {"type": "array", "items": {"$ref": "#/$defs/sitePair"}}}
+    },
+    "controlPlant": {
+      "type": "object", "additionalProperties": false,
+      "required": ["states", "initial", "marked", "bad", "events", "transitions"],
+      "properties": {
+        "states": {"type": "array", "items": {"type": "string"}},
+        "initial": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "minItems": 1}]},
+        "marked": {"type": "array", "items": {"type": "string"}},
+        "accepting": {"type": "array", "items": {"type": "string"}, "description": "Marked states meaning successful completion (default: all marked)."},
+        "bad": {"type": "array", "items": {"type": "string"}},
+        "events": {"type": "array", "items": {"$ref": "#/$defs/event"}},
+        "transitions": {"type": "array", "items": {"$ref": "#/$defs/transition"}},
+        "sites": {"type": "array", "items": {"$ref": "#/$defs/controlSite"}}
+      }
+    }
+  }
+}
