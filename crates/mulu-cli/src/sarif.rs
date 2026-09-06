@@ -163,6 +163,20 @@ fn message(d: &Diagnostic) -> String {
         ("open", _) => s.push_str("  mulu could not decide this."),
         _ => {}
     }
+    // What the EVM said. docs/08 section 5: a replay that does not reproduce
+    // is not evidence the counterexample was spurious, so the finding keeps
+    // its status; the disagreement is a gap the reviewer has to see.
+    match d.reproduction.as_ref().and_then(|r| r["status"].as_str()) {
+        Some("reproduced") => s.push_str("  The trace was replayed on a local EVM and reproduced."),
+        Some("not-reproduced") => s.push_str(
+            "  The replay on a local EVM did not reproduce this, which is a disagreement between \
+             the model and the EVM rather than a reason to dismiss the finding.",
+        ),
+        Some("unsupported") => {
+            s.push_str("  mulu could not turn this into concrete calls, so it was not replayed.")
+        }
+        _ => {}
+    }
     if d.scope == "abstract-model" && d.status != "not-requested" {
         s.push_str(
             "  The claim is about the finite model mulu generated, not yet about the Solidity \

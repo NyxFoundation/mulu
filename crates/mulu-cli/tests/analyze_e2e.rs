@@ -580,6 +580,14 @@ fn sarif_says_what_was_proven_and_what_was_only_suspected() {
     // the envelope is an answer, not a defect
     assert_eq!(by_rule("envelope")["kind"], "informational");
 
+    // what the EVM said travels with the finding, since the SARIF message is
+    // the only line a reviewer sees
+    assert!(
+        v["message"]["text"].as_str().unwrap().contains("replayed on a local EVM and reproduced"),
+        "{}",
+        v["message"]["text"]
+    );
+
     // the scope the whole tool rests on is in every message and in properties
     for r in &results {
         assert_eq!(r["properties"]["scope"], "abstract-model");
