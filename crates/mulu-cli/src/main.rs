@@ -485,6 +485,16 @@ pub fn analyze_model_at(
 
     // P1-06: the same findings in SARIF, for a code-scanning viewer. It is a
     // second rendering of report.json, never a second analysis.
+    // With no Solidity there is still something a finding is about: the model
+    // file itself. Pointing at it beats pointing at nothing, and it carries
+    // the digest the claim is bound to.
+    let fallback_site = fallback_site.or_else(|| {
+        Some(build::Site {
+            path: build::source_uri(Path::new("."), &model.display().to_string()),
+            sha256: model_hash.clone(),
+            region: None,
+        })
+    });
     let doc = sarif::build(
         &ctx.diags,
         &sites,
@@ -539,9 +549,11 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
         });
         return Ok(());
     }
-    if status == "partial" || status == "error" {
-        // Saying "no bad state is reachable" here would be reporting a search
-        // that did not run as a search that found nothing.
+    if status != "complete" {
+        // Anything but `complete` means the search did not decide: partial,
+        // unsupported, error, or a status a newer worker invented. Saying "no
+        // bad state is reachable" here would report a search that did not run
+        // as a search that found nothing.
         ctx.diags.push(Diagnostic {
             id: "safety".into(),
             kind: "spec-violation",
@@ -550,8 +562,8 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             scope: "abstract-model",
             severity: "INFO",
             message: format!(
-                "the violation search did not run: {}",
-                a["reason"].as_str().unwrap_or("the analysis was cut off")
+                "the violation search did not decide ({status}): {}",
+                a["reason"].as_str().unwrap_or("no reason was given")
             ),
             check_id: None,
             depends_on: vec![],
@@ -591,10 +603,19 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             id: "model-safe".into(),
             kind: "model-safe",
             claim: "bad-unreachable",
-            status: if checked && status == "complete" { "proven" } else { "unknown" },
+            status: if checked { "proven" } else { "unknown" },
             scope: "abstract-model",
             severity: "INFO",
-            message: "no bad state is reachable (checked invariant avoids all bad states)".into(),
+            // The message has to follow the status. An invariant the worker
+            // did not re-check is not a reason to say no bad state is
+            // reachable, and the message is the part a reader sees.
+            message: if checked {
+                "no bad state is reachable (checked invariant avoids all bad states)".into()
+            } else {
+                "the search found no bad state and the invariant it produced did not check, so \
+                 this says nothing about whether one is reachable"
+                    .to_string()
+            },
             check_id: None,
             depends_on: vec![],
             assumptions: MODEL_ASSUMPTIONS.to_vec(),
@@ -613,7 +634,7 @@ fn handle_redundancy(ctx: &mut Ctx, fp: &FiniteProduct, n: &Normalized, a: &Valu
     ctx.status("redundancy", &status);
     let mut fails = vec![];
     let reach = reference::reach(&n.core);
-    if status == "partial" || status == "error" {
+    if status != "complete" {
         // The checks exist; they were not examined. Saying nothing about them
         // reads as having nothing to say.
         for decl in &fp.checks {
@@ -625,9 +646,9 @@ fn handle_redundancy(ctx: &mut Ctx, fp: &FiniteProduct, n: &Normalized, a: &Valu
                 scope: "abstract-model",
                 severity: "INFO",
                 message: format!(
-                    "check {} was not examined: {}",
+                    "check {} was not examined ({status}): {}",
                     decl.id,
-                    a["reason"].as_str().unwrap_or("the analysis was cut off")
+                    a["reason"].as_str().unwrap_or("no reason was given")
                 ),
                 check_id: Some(decl.id.clone()),
                 depends_on: decl.depends_on.clone(),

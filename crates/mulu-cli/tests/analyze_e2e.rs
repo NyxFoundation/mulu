@@ -458,6 +458,8 @@ fn a_run_that_was_cut_off_never_reads_as_a_clean_one() {
         // and it says why, so the reader can raise the limit
         let msg = d["message"].as_str().unwrap();
         assert!(msg.contains("limit is 5"), "{id} gives no reason: {msg}");
+        // and the message never asserts what the status says was not decided
+        assert!(!msg.contains("never fails"), "{id} asserts on an undecided run: {msg}");
     }
 
     // the same three questions are still asked, so nothing silently vanished

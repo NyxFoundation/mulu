@@ -172,6 +172,21 @@ fn message(d: &Diagnostic) -> String {
     s
 }
 
+/// A viewer shows a message in a panel, and an envelope over a large model
+/// names every winning state. Past this the text stops being read and starts
+/// being scrolled, and report.json has all of it anyway.
+const MAX_MESSAGE: usize = 1200;
+
+fn truncate(mut s: String) -> String {
+    if s.chars().count() <= MAX_MESSAGE {
+        return s;
+    }
+    let cut = s.char_indices().nth(MAX_MESSAGE).map(|(i, _)| i).unwrap_or(s.len());
+    s.truncate(cut);
+    s.push_str(" … (truncated; the full text is in report.json)");
+    s
+}
+
 /// Build the SARIF document for one run.
 pub fn build(
     diags: &[Diagnostic],
@@ -209,7 +224,7 @@ pub fn build(
         }
         r.insert("kind".into(), json!(kind));
         r.insert("level".into(), json!(level_of(d, kind)));
-        r.insert("message".into(), json!({"text": message(d)}));
+        r.insert("message".into(), json!({"text": truncate(message(d))}));
         if let Some(s) = site {
             artifacts.insert((s.path.clone(), s.sha256.clone()), ());
             r.insert("locations".into(), json!([location(s)]));
@@ -310,6 +325,16 @@ pub fn check_against(report: &Value, doc: &Value) -> Vec<String> {
             results.len(),
             diags.len()
         ));
+    }
+    // Findings are matched by id, so two findings sharing one would let a
+    // second, different result pass as the first.
+    let mut seen: std::collections::BTreeSet<&str> = Default::default();
+    for d in &diags {
+        if let Some(id) = d["id"].as_str() {
+            if !seen.insert(id) {
+                bad.push(format!("report.json has two findings called {id}"));
+            }
+        }
     }
     for d in &diags {
         let id = d["id"].as_str().unwrap_or("?");
