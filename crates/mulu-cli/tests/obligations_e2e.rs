@@ -362,3 +362,25 @@ fn deleting_the_sarif_does_not_skip_the_check() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("results.sarif is missing"));
     let _ = std::fs::remove_dir_all(&out);
 }
+
+#[test]
+fn verify_notes_an_analysis_that_did_not_run_whatever_it_is_called() {
+    if !ready() {
+        return;
+    }
+    // The note existed so "verify: OK" would not read as "this analysis is
+    // fine". It listed the status names partial and unsupported, which is the
+    // pattern the exit-code rule was changed away from: a status nobody
+    // enumerated went unmentioned.
+    let out = analysed("odd-status");
+    let path = out.join("report.json");
+    let mut report = json(&path);
+    report["summary"]["analyses"][0]["status"] = serde_json::json!("error");
+    std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+
+    let o = mulu().args(["verify", out.to_str().unwrap(), "--no-kernel"]).output().unwrap();
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert!(text.contains("decided nothing about"), "{text}");
+    assert!(text.contains("(error)"), "{text}");
+    let _ = std::fs::remove_dir_all(&out);
+}

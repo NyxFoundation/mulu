@@ -724,8 +724,20 @@ fn handle_redundancy(ctx: &mut Ctx, fp: &FiniteProduct, n: &Normalized, a: &Valu
         // A claim is `proven` because a certificate was checked, not because
         // the worker said so. `unreachable` used to come back proven with no
         // evidence at all: its certificate was thrown away and never re-run
-        // under the kernel.
-        let dstatus = if dstatus == "proven" && ev.is_none() { "candidate" } else { dstatus };
+        // under the kernel. The message goes with it, since a reader who
+        // takes only the sentence would otherwise read the original claim.
+        let (dstatus, message) = if dstatus == "proven" && ev.is_none() {
+            (
+                "candidate",
+                format!(
+                    "the worker reports check {} as {claim} and produced no certificate that \
+                     checked, so this is not proven",
+                    decl.id
+                ),
+            )
+        } else {
+            (dstatus, message)
+        };
         ctx.diags.push(Diagnostic {
             id: format!("check-{}", decl.id),
             kind: Box::leak(kind.to_string().into_boxed_str()),
@@ -1099,7 +1111,12 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
             .and_then(|r| r["summary"]["analyses"].as_array().cloned())
             .unwrap_or_default()
             .iter()
-            .filter(|a| a["status"] == "partial" || a["status"] == "unsupported")
+            // The same question the exit code asks, not a list of status
+            // names: a name nobody enumerated must not read as "decided".
+            .filter(|a| {
+                let s = a["status"].as_str().unwrap_or("");
+                s != "complete" && s != "unrealizable" && s != "not-requested"
+            })
             .map(|a| format!("{} ({})", a["analysis"].as_str().unwrap_or("?"), a["status"].as_str().unwrap_or("?")))
             .collect();
         if !cut.is_empty() {
