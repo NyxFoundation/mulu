@@ -65,6 +65,14 @@ pub fn compile_and_lower(
         in_modifier: index.modifier_at(file_id, start, end).is_some(),
     };
 
+    let selectors = c.selectors();
+    if selectors.is_empty() {
+        eprintln!(
+            "warning: solc reported no method identifiers for {}; entrypoint signatures fall \
+             back to name matching, which cannot tell overloads apart",
+            c.name
+        );
+    }
     let ir = mulu_yul::lower_contract_with(
         &c.name,
         &c.source_path,
@@ -72,7 +80,7 @@ pub fn compile_and_lower(
         &c.ir,
         &c.abi,
         c.storage_layout.clone(),
-        Some(&lookup),
+        mulu_yul::SolcFacts { origins: Some(&lookup), selectors },
     )
     .with_context(|| format!("lowering the Yul of {}", c.name))?;
     Ok((bundle, selected, ir))

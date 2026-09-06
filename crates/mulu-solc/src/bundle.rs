@@ -57,12 +57,29 @@ pub struct ContractArtifact {
     pub source_path: String,
     pub abi: serde_json::Value,
     pub storage_layout: serde_json::Value,
+    /// solc's own selector table: signature -> 4-byte selector, lowercase hex
+    /// without a prefix. This is the authority on which entry a selector is,
+    /// which matters as soon as a function is overloaded.
+    #[serde(default)]
+    pub method_identifiers: BTreeMap<String, String>,
+    /// solc's metadata blob, which pins the settings that produced this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<String>,
     pub ir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytecode: Option<String>,
 }
 
 impl ContractArtifact {
+    /// Selector to signature, the inverse of solc's table. Selectors are
+    /// normalised to eight lowercase hex digits with no prefix.
+    pub fn selectors(&self) -> BTreeMap<String, String> {
+        self.method_identifiers
+            .iter()
+            .map(|(sig, sel)| (normalise_selector(sel), sig.clone()))
+            .collect()
+    }
+
     /// `(name, selector)` for every externally callable entry in the ABI,
     /// compiler-generated getters included.
     pub fn entrypoints(&self) -> Vec<String> {
@@ -82,6 +99,12 @@ impl ContractArtifact {
             })
             .unwrap_or_default()
     }
+}
+
+/// Eight lowercase hex digits, no prefix, whether the input had one or not.
+pub fn normalise_selector(text: &str) -> String {
+    let t = text.trim().trim_start_matches("0x").trim_start_matches("0X").to_ascii_lowercase();
+    format!("{:0>8}", t)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

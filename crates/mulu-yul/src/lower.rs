@@ -39,6 +39,8 @@ pub struct Lowering<'a> {
     aliases: BTreeMap<String, (Vec<String>, Expr)>,
     /// name -> (slot param index, value param index) for whole-slot store helpers
     store_helpers: BTreeMap<String, (usize, usize)>,
+    /// selector (8 lowercase hex digits) -> signature, from the compiler
+    selectors: BTreeMap<String, String>,
 }
 
 fn loc(s: Option<SrcSpan>) -> Option<Location> {
@@ -124,6 +126,12 @@ impl<'a> Lowering<'a> {
         self
     }
 
+    /// solc's selector table, which decides which overload a selector is.
+    pub fn with_selectors(mut self, selectors: BTreeMap<String, String>) -> Self {
+        self.selectors = selectors;
+        self
+    }
+
     pub fn new(contract: &'a str, source_path: &'a str, compiler: &'a str) -> Self {
         Self {
             origins: None,
@@ -139,6 +147,7 @@ impl<'a> Lowering<'a> {
             guards: BTreeMap::new(),
             aliases: BTreeMap::new(),
             store_helpers: BTreeMap::new(),
+            selectors: BTreeMap::new(),
         }
     }
 
@@ -1138,12 +1147,23 @@ impl<'a> Lowering<'a> {
             .unwrap_or_default();
         out.into_iter()
             .map(|(selector, external_function)| {
-                let sol = solidity_name(&external_function).unwrap_or_default();
-                let signature = sigs
-                    .iter()
-                    .find(|(n, _)| *n == sol)
-                    .map(|(_, s)| s.clone())
-                    .unwrap_or_else(|| format!("{sol}(?)"));
+                let key = normalise_selector(&selector);
+                // The compiler's own table first. Name matching cannot tell
+                // two overloads apart, and the argument type follows from
+                // which one this is.
+                let signature = match self.selectors.get(&key) {
+                    Some(sig) => sig.clone(),
+                    None => {
+                        let sol = solidity_name(&external_function).unwrap_or_default();
+                        let candidates: Vec<&(String, String)> =
+                            sigs.iter().filter(|(n, _)| *n == sol).collect();
+                        match candidates.as_slice() {
+                            [(_, sig)] => sig.clone(),
+                            [] => format!("{sol}(?)"),
+                            _ => format!("{sol}(?overloaded)"),
+                        }
+                    }
+                };
                 Entrypoint { signature, selector, external_function }
             })
             .collect()
@@ -1199,6 +1219,12 @@ fn successors(t: &Terminator) -> Vec<BlockId> {
         }
         _ => vec![],
     }
+}
+
+/// Eight lowercase hex digits, no prefix.
+fn normalise_selector(text: &str) -> String {
+    let t = text.trim().trim_start_matches("0x").trim_start_matches("0X").to_ascii_lowercase();
+    format!("{t:0>8}")
 }
 
 /// A, B, ... Z, AA, AB, ...

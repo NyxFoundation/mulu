@@ -29,11 +29,29 @@ pub fn lower_contract(
     abi: &serde_json::Value,
     storage_layout: serde_json::Value,
 ) -> Result<ProgramIr, ParseError> {
-    lower_contract_with(contract, source_path, compiler, yul, abi, storage_layout, None)
+    lower_contract_with(
+        contract,
+        source_path,
+        compiler,
+        yul,
+        abi,
+        storage_layout,
+        SolcFacts::default(),
+    )
 }
 
-/// As `lower_contract`, with an AST lookup so checks carry the contract and
-/// modifier they were written in.
+/// What the compiler knows that the Yul alone does not say.
+#[derive(Default)]
+pub struct SolcFacts<'a> {
+    /// Where a source span sits, from the AST.
+    pub origins: Option<lower::OriginLookup<'a>>,
+    /// Selector to signature, from `evm.methodIdentifiers`. Without it the
+    /// pairing has to be guessed from the dispatcher and the ABI, which is
+    /// wrong as soon as a function is overloaded.
+    pub selectors: std::collections::BTreeMap<String, String>,
+}
+
+/// As `lower_contract`, using what the compiler reported alongside the Yul.
 #[allow(clippy::too_many_arguments)]
 pub fn lower_contract_with(
     contract: &str,
@@ -42,12 +60,13 @@ pub fn lower_contract_with(
     yul: &str,
     abi: &serde_json::Value,
     storage_layout: serde_json::Value,
-    origins: Option<lower::OriginLookup<'_>>,
+    facts: SolcFacts<'_>,
 ) -> Result<ProgramIr, ParseError> {
     let parsed = parse_object(yul)?;
     let mut lowering = lower::Lowering::new(contract, source_path, compiler);
-    if let Some(o) = origins {
+    if let Some(o) = facts.origins {
         lowering = lowering.with_origins(o);
     }
+    lowering = lowering.with_selectors(facts.selectors);
     Ok(lowering.run(&parsed.object, parsed.use_src, storage_layout, abi))
 }

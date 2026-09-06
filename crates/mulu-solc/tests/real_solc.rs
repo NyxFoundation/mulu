@@ -141,3 +141,34 @@ fn the_ast_index_locates_a_modifier_across_files() {
     let inside = b.ast_index.modifier_at(m.file_id, m.start + 10, m.start + 20).unwrap();
     assert_eq!(inside.name, "capped");
 }
+
+#[test]
+fn the_selector_table_comes_from_the_compiler() {
+    let Some(solc) = solc() else { return };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let b = solc
+        .compile_files(
+            &root.join("examples/overload"),
+            &[root.join("examples/overload/Over.sol")],
+            &CompileOptions::default(),
+        )
+        .unwrap();
+    let c = b.contract("Over").unwrap();
+
+    // solc's own table, which is the only thing that tells overloads apart
+    assert_eq!(c.method_identifiers.get("set(uint256)").map(String::as_str), Some("60fe47b1"));
+    assert_eq!(c.method_identifiers.get("set(uint8)").map(String::as_str), Some("24b8ba5f"));
+
+    let by_selector = c.selectors();
+    assert_eq!(by_selector.get("60fe47b1").map(String::as_str), Some("set(uint256)"));
+    assert_eq!(by_selector.get("24b8ba5f").map(String::as_str), Some("set(uint8)"));
+    assert!(c.metadata.is_some(), "metadata pins the settings that produced this");
+}
+
+#[test]
+fn selectors_normalise_whatever_form_they_arrive_in() {
+    assert_eq!(mulu_solc::normalise_selector("0x27EA6F2B"), "27ea6f2b");
+    assert_eq!(mulu_solc::normalise_selector("27ea6f2b"), "27ea6f2b");
+    // short forms are padded, so a table lookup cannot miss by width
+    assert_eq!(mulu_solc::normalise_selector("0xa4d66d"), "00a4d66d");
+}

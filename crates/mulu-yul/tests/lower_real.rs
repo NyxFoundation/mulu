@@ -41,6 +41,15 @@ fn access_fixtures_match_their_example_contracts() {
 }
 
 #[test]
+fn overload_fixture_matches_its_example_contract() {
+    assert_eq!(
+        include_str!("fixtures/overload-Over.sol"),
+        include_str!("../../../examples/overload/Over.sol"),
+        "examples/overload/Over.sol changed; rerun tools/regen-yul-fixtures.sh"
+    );
+}
+
+#[test]
 fn typed_fixture_matches_its_example_contract() {
     assert_eq!(
         include_str!("fixtures/typed-Meter.sol"),

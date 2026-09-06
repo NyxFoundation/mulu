@@ -67,6 +67,10 @@ mulu analyze examples/access/Vault.sol --contract Vault \
 mulu analyze examples/typed/Meter.sol --contract Meter \
      --spec examples/typed/meter.spec.json --out analysis-meter
 
+# two entrypoints sharing a name stay two entrypoints
+mulu analyze examples/overload/Over.sol --contract Over \
+     --spec examples/overload/over.spec.json --out analysis-over
+
 # P1-01 alone: stop at the ProgramIR
 mulu ir examples/limits/Limits.sol --contract Limits --out ir-limits
 
@@ -152,6 +156,14 @@ Treating both as uint256 would invent a region above 255 that no call to
 `record` can reach. Storage domains come from the layout's type table the same
 way, and a variable that shares its slot with another is refused rather than
 written whole.
+
+Which entry a selector is comes from solc's `evm.methodIdentifiers`, not from
+matching the dispatcher against ABI names. With an overload, name matching
+hands one selector the other's argument type, and the type is what fixes the
+domain, so calls disappear from the model. `examples/overload` has two `set`
+functions, one `uint256` and one `uint8`; they get separate states, separate
+call events and separate domains. Without the table the pairing is reported as
+ambiguous rather than guessed.
 
 Reading the type also settles the cleanups solc inserts. Storing a `uint8`
 into a `uint256` slot lowers to `and(x, 0xff)`, and comparing one lowers to

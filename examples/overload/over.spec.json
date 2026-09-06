@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "properties": [{
+    "id": "limit-bound",
+    "contract": "Over",
+    "when": "successful-transaction-end",
+    "assert": {
+      "op": "ule",
+      "left": {"storage": "limit"},
+      "right": {"uint256": "1000"}
+    }
+  }]
+}

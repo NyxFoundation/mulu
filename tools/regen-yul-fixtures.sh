@@ -29,4 +29,13 @@ cp "$OUT/.build/build/abi.json" "$OUT/Meter.abi.json"
 cp "$OUT/.build/build/storage-layout.json" "$OUT/Meter.storage.json"
 rm -rf "$OUT/.build"
 
+# the overload example: only solc's selector table tells the two apart
+cargo run --quiet -p mulu-cli -- ir examples/overload/Over.sol --contract Over --out "$OUT/.build" >/dev/null
+cp examples/overload/Over.sol "$OUT/overload-Over.sol"
+cp "$OUT/.build/build/Over.yul" "$OUT/Over.yul"
+cp "$OUT/.build/build/abi.json" "$OUT/Over.abi.json"
+cp "$OUT/.build/build/storage-layout.json" "$OUT/Over.storage.json"
+cargo run --quiet -p mulu-cli -- ir examples/overload/Over.sol --contract Over --out "$OUT/.build2" >/dev/null
+rm -rf "$OUT/.build" "$OUT/.build2"
+
 echo "regenerated $OUT from examples/ using $(solc --version | tail -1)"

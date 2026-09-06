@@ -95,7 +95,10 @@ impl Solc {
     }
 
     fn settings(&self, opts: &CompileOptions) -> Value {
-        let mut outputs = vec!["abi", "storageLayout", "ir"];
+        // `evm.methodIdentifiers` is solc's own selector table. Deriving the
+        // pairing from the dispatcher and the ABI instead gets overloaded
+        // functions wrong, and the argument type follows from the pairing.
+        let mut outputs = vec!["abi", "storageLayout", "ir", "evm.methodIdentifiers", "metadata"];
         if opts.include_bytecode {
             outputs.push("evm.bytecode.object");
         }
@@ -226,11 +229,23 @@ impl Solc {
                     codeless.push(name);
                     continue;
                 }
+                let method_identifiers = c["evm"]["methodIdentifiers"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(sig, sel)| {
+                                Some((sig.clone(), sel.as_str()?.to_string()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 contracts.push(ContractArtifact {
                     name,
                     source_path: source_path.clone(),
                     abi: c["abi"].clone(),
                     storage_layout: c["storageLayout"].clone(),
+                    method_identifiers,
+                    metadata: c["metadata"].as_str().map(|s| s.to_string()),
                     ir,
                     bytecode: c["evm"]["bytecode"]["object"].as_str().map(|s| s.to_string()),
                 });

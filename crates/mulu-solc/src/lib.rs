@@ -17,5 +17,5 @@ mod driver;
 pub mod imports;
 
 pub use ast::{AstIndex, AstKind, AstNode};
-pub use bundle::{BuildBundle, ContractArtifact, SourceFile};
+pub use bundle::{normalise_selector, BuildBundle, ContractArtifact, SourceFile};
 pub use driver::{select_contract as driver_select, CompileOptions, Solc, SolcError};

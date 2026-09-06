@@ -40,6 +40,10 @@ analyze: build
 	  --spec examples/typed/meter.spec.json --out analysis-meter; \
 	  code=$$?; [ $$code -le 1 ] || exit $$code
 	./target/release/mulu verify analysis-meter
+	./target/release/mulu analyze examples/overload/Over.sol --contract Over \
+	  --spec examples/overload/over.spec.json --out analysis-over; \
+	  code=$$?; [ $$code -le 1 ] || exit $$code
+	./target/release/mulu verify analysis-over
 
 fixtures: build
 	@for f in examples/fixtures/*.json examples/limits/model.json; do \

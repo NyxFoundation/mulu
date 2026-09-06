@@ -326,7 +326,8 @@ impl<'a> Builder<'a> {
     }
 
     pub fn build(mut self) -> Abstraction {
-        let entries = self.entries();
+        let mut entries = self.entries();
+        disambiguate(&mut entries);
 
         // --- storage partition, one per slot, refined by the specification
         let mut storage_preds: Vec<PredicateInfo> = Vec::new();
@@ -1021,6 +1022,24 @@ impl<'a> Walk<'a> {
             }
         }
         false
+    }
+}
+
+/// Overloaded functions share a Solidity name, so the states and events built
+/// from it would merge two different control flows into one. Give each the
+/// parameter types that tell them apart.
+fn disambiguate(entries: &mut [Entry]) {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for e in entries.iter() {
+        *counts.entry(e.solidity_name.clone()).or_default() += 1;
+    }
+    for e in entries.iter_mut() {
+        if counts.get(&e.solidity_name).copied().unwrap_or(0) > 1 {
+            let params = signature_params(&e.signature).join("_");
+            if !params.is_empty() {
+                e.solidity_name = format!("{}_{params}", e.solidity_name);
+            }
+        }
     }
 }
 
