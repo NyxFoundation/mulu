@@ -18,6 +18,8 @@ inductive Certificate where
   | reachability (R : List Nat)
   /-- `R` invariant, and check `c` never fails on it. -/
   | redundancy (R : List Nat) (c : Check)
+  /-- `R` invariant, and neither event of check `c` is enabled on it. -/
+  | unreachableCheck (R : List Nat) (c : Check)
   /-- Bad state reachable along `path`. -/
   | violation (path : List Edge)
   /-- Envelope chain `[W₀, …, Wₙ]` for objective `nonblocking`. -/
@@ -27,6 +29,7 @@ deriving Repr, Inhabited
 def checkCertificate (p : Plant) : Certificate → Bool
   | .reachability R => isClosed p R
   | .redundancy R c => checkRedundancy p R c
+  | .unreachableCheck R c => checkUnreachable p R c
   | .violation path => checkPath p path
   | .envelope nb chain => checkEnvelope p nb chain
 
@@ -34,6 +37,8 @@ def checkCertificate (p : Plant) : Certificate → Bool
 def Claim (p : Plant) : Certificate → Prop
   | .reachability R => ∀ q, Reachable p q → q ∈ R
   | .redundancy _ c => ∀ q q', Reachable p q → (⟨q, c.failEvent, q'⟩ : Edge) ∈ p.edges → False
+  | .unreachableCheck _ c => ∀ q q' e, Reachable p q → (⟨q, e, q'⟩ : Edge) ∈ p.edges →
+      e ≠ c.passEvent ∧ e ≠ c.failEvent
   | .violation _ => ∃ b, Reachable p b ∧ b ∈ p.bad
   | .envelope nb chain => Good p nb (finalW chain) ∧ ∀ G, Good p nb G → Sub G (finalW chain)
 
@@ -43,6 +48,7 @@ theorem checkCertificate_sound {p : Plant} (c : Certificate)
   cases c with
   | reachability R => exact closed_sound h
   | redundancy R c => exact checkRedundancy_sound h
+  | unreachableCheck R c => exact checkUnreachable_sound h
   | violation path => exact checkPath_sound h
   | envelope nb chain => exact checkEnvelope_sound h
 

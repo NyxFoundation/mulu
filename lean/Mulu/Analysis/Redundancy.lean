@@ -56,4 +56,40 @@ exercised (otherwise it is *unreachable*, which the report shows separately). -/
 def reachedOn (p : Plant) (R : List Nat) (c : Check) : Bool :=
   p.edges.any fun e => e.ev == c.passEvent && R.contains e.src
 
+/-! ## Unreachable checks — `never evaluated`
+
+`checkRedundancy` proves the fail event is not enabled anywhere reachable.
+That is *not* the claim "the check is never evaluated": for that, neither of
+its events may be enabled. The report shows the two separately, so they get
+separate checks; reporting the stronger claim on the weaker certificate is
+the conflation this file exists to avoid. -/
+
+/-- Neither event of `c` is enabled anywhere in `R`. -/
+def notEvaluatedOn (p : Plant) (R : List Nat) (c : Check) : Bool :=
+  !reachedOn p R c && neverFailsOn p R c
+
+/-- Full certificate check for `unreachable-check`. -/
+def checkUnreachable (p : Plant) (R : List Nat) (c : Check) : Bool :=
+  isClosed p R && notEvaluatedOn p R c
+
+/-- **Soundness**: after a successful check, no reachable state of the model
+enables either event of `c`, so the check is never evaluated. -/
+theorem checkUnreachable_sound {p : Plant} {R : List Nat} {c : Check}
+    (h : checkUnreachable p R c = true) :
+    ∀ q q' e, Reachable p q → (⟨q, e, q'⟩ : Edge) ∈ p.edges →
+      e ≠ c.passEvent ∧ e ≠ c.failEvent := by
+  simp only [checkUnreachable, notEvaluatedOn, Bool.and_eq_true, Bool.not_eq_true'] at h
+  obtain ⟨hcl, hnr, hnf⟩ := h
+  intro q q' e hq he
+  have hR := closed_sound hcl q hq
+  constructor
+  · intro hp
+    have : reachedOn p R c = true := by
+      apply List.any_eq_true.2
+      exact ⟨⟨q, e, q'⟩, he, by simp [hp, hR]⟩
+    simp [this] at hnr
+  · intro hf
+    have := List.all_eq_true.1 hnf _ he
+    simp [hf, hR] at this
+
 end Mulu.Analysis

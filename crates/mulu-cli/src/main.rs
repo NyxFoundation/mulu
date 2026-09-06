@@ -698,8 +698,13 @@ fn handle_redundancy(ctx: &mut Ctx, fp: &FiniteProduct, n: &Normalized, a: &Valu
         return Ok(fails);
     }
     for item in a["checks"].as_array().cloned().unwrap_or_default() {
-        let idx = item["id"].as_u64().unwrap_or(0) as usize;
-        let decl = &fp.checks[idx];
+        let idx = item["id"].as_u64().unwrap_or(u64::MAX) as usize;
+        // The index comes from the worker. Out of range is a tool bug, and a
+        // panic here would take the whole report with it.
+        let Some(decl) = fp.checks.get(idx) else {
+            ctx.cross_check_errors.push(format!("redundancy: worker named check {idx}, which the model does not have"));
+            continue;
+        };
         let st = item["status"].as_str().unwrap_or("unknown");
         let fail_ev = n.core.checks[idx].fail_event;
         let fail_states: Vec<usize> = n.core.edges.iter().filter(|e| e[1] == fail_ev && reach.contains(&e[0])).map(|e| e[0]).collect();
@@ -716,6 +721,11 @@ fn handle_redundancy(ctx: &mut Ctx, fp: &FiniteProduct, n: &Normalized, a: &Valu
         } else {
             None
         };
+        // A claim is `proven` because a certificate was checked, not because
+        // the worker said so. `unreachable` used to come back proven with no
+        // evidence at all: its certificate was thrown away and never re-run
+        // under the kernel.
+        let dstatus = if dstatus == "proven" && ev.is_none() { "candidate" } else { dstatus };
         ctx.diags.push(Diagnostic {
             id: format!("check-{}", decl.id),
             kind: Box::leak(kind.to_string().into_boxed_str()),

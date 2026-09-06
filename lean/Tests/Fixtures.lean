@@ -47,6 +47,39 @@ example : checkEnvelope f1 true [[0]] = false := by decide           -- wrong W�
 example : checkCertificate f1 (.reachability [0,1]) = false := by decide       -- not closed
 example : checkCertificate f1 (.violation [⟨0,0,1⟩]) = false := by decide     -- does not end in bad
 example : checkCertificate f1 (.redundancy [0,1,2] ⟨0, 0, 1⟩) = false := by decide -- event 1 fails from reachable q1
+
+/-! ### `unreachable` is not `never-fails`
+
+`f4` has a check whose two events leave only q3, which nothing reaches.
+`never-fails` holds of it, and so does the stronger "never evaluated"; the
+point of the separate certificate is that the first does not imply the second,
+so the report may not show the second on the first's evidence. -/
+
+-- q0 -0-> q1 -1-> q2 (marked); q3 -2-> q2 and q3 -3-> q2, with q3 unreachable.
+-- Check ⟨0, 2, 3⟩ is the one nothing reaches.
+def f4 : Plant where
+  numStates := 4
+  numEvents := 4
+  controllable := []
+  initial := [0]
+  marked := [2]
+  bad := []
+  edges := [⟨0,0,1⟩, ⟨1,1,2⟩, ⟨3,2,2⟩, ⟨3,3,2⟩]
+
+theorem t7 : checkCertificate f4 (.unreachableCheck [0,1,2] ⟨0, 2, 3⟩) = true := by decide
+-- the same check is trivially never-fails, which is the weaker claim
+theorem t8 : checkCertificate f4 (.redundancy [0,1,2] ⟨0, 2, 3⟩) = true := by decide
+-- and a check that *is* evaluated is never-fails but not unreachable, so the
+-- weaker certificate cannot stand in for the stronger one
+theorem t9 : checkCertificate f4 (.redundancy [0,1,2] ⟨1, 0, 3⟩) = true := by decide
+example : checkCertificate f4 (.unreachableCheck [0,1,2] ⟨1, 0, 3⟩) = false := by decide
+-- R that is not closed is rejected for this kind too
+example : checkCertificate f4 (.unreachableCheck [0,1] ⟨0, 2, 3⟩) = false := by decide
+-- naming q3 as reachable makes the check evaluated, and the certificate fails
+example : checkCertificate f4 (.unreachableCheck [0,1,2,3] ⟨0, 2, 3⟩) = false := by decide
+
+#print axioms t7
+#print axioms checkUnreachable_sound
 #print axioms t1
 #print axioms t2
 #print axioms checkEnvelope_sound

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "kind": "finite-product",
+  "description": "A check nothing reaches. A is evaluated on every call and can fail; B is declared and its two events leave only `orphan`, which no path from the initial state enters. Expected: A may-fail, B unreachable with its own certificate. `unreachable` is a stronger claim than `never-fails` and is not reported on the redundancy certificate.",
+  "states": ["idle", "a0", "a1", "ret", "orphan", "orphan1"],
+  "initial": "idle",
+  "marked": ["idle", "ret"],
+  "bad": [],
+  "events": [
+    {"id": "call_f", "control": "uncontrollable", "description": "CallRequest(f)"},
+    {"id": "A_pass", "control": "uncontrollable", "description": "GuardResult(A, true)"},
+    {"id": "A_fail", "control": "uncontrollable", "description": "GuardResult(A, false)"},
+    {"id": "B_pass", "control": "uncontrollable", "description": "GuardResult(B, true)"},
+    {"id": "B_fail", "control": "uncontrollable", "description": "GuardResult(B, false)"},
+    {"id": "store", "control": "uncontrollable", "description": "StorageWrite(v)"},
+    {"id": "done", "control": "uncontrollable", "description": "TxReturn"}
+  ],
+  "transitions": [
+    {"from": "idle", "event": "call_f", "to": "a0"},
+    {"from": "a0", "event": "A_pass", "to": "a1"},
+    {"from": "a0", "event": "A_fail", "to": "ret"},
+    {"from": "a1", "event": "store", "to": "ret"},
+    {"from": "ret", "event": "done", "to": "idle"},
+    {"from": "orphan", "event": "B_pass", "to": "orphan1"},
+    {"from": "orphan", "event": "B_fail", "to": "ret"},
+    {"from": "orphan1", "event": "done", "to": "ret"}
+  ],
+  "checks": [
+    {"id": "A", "pass_event": "A_pass", "fail_event": "A_fail"},
+    {"id": "B", "pass_event": "B_pass", "fail_event": "B_fail"}
+  ]
+}

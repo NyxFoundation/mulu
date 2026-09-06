@@ -71,6 +71,10 @@ instance : FromJson Certificate where
       let R ← j.getObjValAs? (List Nat) "states"
       let c ← j.getObjValAs? Check "check"
       pure (.redundancy R c)
+    | "unreachable-check" =>
+      let R ← j.getObjValAs? (List Nat) "states"
+      let c ← j.getObjValAs? Check "check"
+      pure (.unreachableCheck R c)
     | "violation" =>
       let pj ← j.getObjValAs? (List Json) "path"
       let path ← pj.mapM parseEdge
@@ -85,6 +89,8 @@ instance : ToJson Certificate where
   toJson
     | .reachability R => Json.mkObj [("kind", "reachability"), ("states", toJson R)]
     | .redundancy R c => Json.mkObj [("kind", "redundancy"), ("states", toJson R), ("check", toJson c)]
+    | .unreachableCheck R c =>
+        Json.mkObj [("kind", "unreachable-check"), ("states", toJson R), ("check", toJson c)]
     | .violation path => Json.mkObj [("kind", "violation"), ("path", toJson (path.map edgeJson))]
     | .envelope nb chain => Json.mkObj [("kind", "envelope"), ("nonblocking", toJson nb),
         ("chain", toJson chain)]
@@ -230,13 +236,24 @@ def analyze (m : CoreModel) (req : Request) : Json := Id.run do
       let ok := checkCertificate p cert
       let reached := reachedOn p R c
       let witness := (p.edges.find? fun e => e.ev == c.failEvent && R.contains e.src).map (·.src)
+      -- `unreachable` is a stronger claim than `never-fails` and gets its own
+      -- certificate. Reporting it on the redundancy certificate would be
+      -- proving one thing and saying another.
+      let unreachCert : Certificate := .unreachableCheck R c
+      let unreachOk := checkCertificate p unreachCert
+      -- `unreachable` first: it is the more specific claim, and it implies
+      -- `never-fails`. (`unreachOk = ok && !reached`, so the two orders agree.)
       let st := if !reachOk then "unknown"
-        else if ok && reached then "never-fails"
-        else if ok then "unreachable"
+        else if unreachOk then "unreachable"
+        else if ok then "never-fails"
         else "may-fail"
+      let (chosen, chosenOk) :=
+        if st == "unreachable" then (unreachCert, unreachOk)
+        else (cert, ok)
+      let _ := reached
       Json.mkObj [("id", toJson c.id), ("status", st),
-        ("certificate", if ok && reached then toJson cert else Json.null),
-        ("checked", toJson (ok && reached)),
+        ("certificate", if chosenOk then toJson chosen else Json.null),
+        ("checked", toJson chosenOk),
         ("fail_witness_state", match witness with | some q => toJson q | none => Json.null)]
     fields := fields ++ [("redundancy", Json.mkObj [
       statusJson (if reachOk then "complete" else "partial"),

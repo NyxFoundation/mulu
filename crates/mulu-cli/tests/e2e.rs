@@ -97,3 +97,34 @@ fn limits_three_findings() {
     std::fs::write(&p, c.to_string()).unwrap();
     assert_eq!(verify(&out), 4);
 }
+
+#[test]
+fn an_unreachable_check_is_proven_by_its_own_certificate() {
+    if !worker_available() {
+        return;
+    }
+    // `never-fails` says the fail event is not enabled anywhere reachable.
+    // "never evaluated" is stronger: neither event is. The report used to
+    // make the stronger claim `proven` while throwing the certificate away,
+    // so it carried no evidence and the kernel never saw it.
+    let (code, r, out) = analyze("examples/models/unreachable-check.json", &[]);
+    assert_eq!(code, 0);
+
+    let b = diag(&r, "check-B");
+    assert_eq!(b["claim"], "unreachable");
+    assert_eq!(b["status"], "proven");
+    assert_eq!(b["evidence"]["checked"], true);
+    assert_eq!(b["evidence"]["kernel_checked"], true);
+
+    let cert: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("certificates/redundancy_B.json")).unwrap())
+            .unwrap();
+    assert_eq!(cert["kind"], "unreachable-check", "the weaker certificate would prove the weaker claim");
+    let lean = std::fs::read_to_string(out.join("certificates/Check.lean")).unwrap();
+    assert!(lean.contains(".unreachableCheck"), "the kernel must re-check the claim that was made");
+
+    // A is evaluated and can fail, which is the ordinary case
+    assert_eq!(diag(&r, "check-A")["claim"], "may-fail");
+    assert_eq!(verify(&out), 0);
+    let _ = std::fs::remove_dir_all(&out);
+}

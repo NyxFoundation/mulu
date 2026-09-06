@@ -61,11 +61,18 @@ that is to not produce the result.
 ## Certificates
 
 ```json
-{"kind": "reachability", "states": [0, 1, 2]}
-{"kind": "redundancy",   "states": [...], "check": {"id": 1, "pass_event": 8, "fail_event": 9}}
-{"kind": "violation",    "path": [[0, 0, 1], [1, 1, 2]]}
-{"kind": "envelope",     "nonblocking": true, "chain": [[0, 1], [0]]}
+{"kind": "reachability",      "states": [0, 1, 2]}
+{"kind": "redundancy",        "states": [...], "check": {"id": 1, "pass_event": 8, "fail_event": 9}}
+{"kind": "unreachable-check", "states": [...], "check": {"id": 1, "pass_event": 8, "fail_event": 9}}
+{"kind": "violation",         "path": [[0, 0, 1], [1, 1, 2]]}
+{"kind": "envelope",          "nonblocking": true, "chain": [[0, 1], [0]]}
 ```
+
+`redundancy` proves the check's fail event is not enabled in any reachable
+state. `unreachable-check` proves neither of its events is, which is the
+stronger claim the report shows as *never evaluated*. They are separate
+because the first does not imply the second, and a report may not make a
+claim its certificate does not carry.
 
 What each one proves when `Mulu.Analysis.checkCertificate` returns `true` is
 `Mulu.Analysis.Claim` (lean/Mulu/Analysis/Certificate.lean), by the theorem

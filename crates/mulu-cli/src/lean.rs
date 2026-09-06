@@ -76,6 +76,13 @@ pub fn cert_term(c: &Value) -> Result<String> {
             c["check"]["pass_event"],
             c["check"]["fail_event"]
         ),
+        "unreachable-check" => format!(
+            ".unreachableCheck {} ⟨{}, {}, {}⟩",
+            nat_list(&json_nats(&c["states"])),
+            c["check"]["id"],
+            c["check"]["pass_event"],
+            c["check"]["fail_event"]
+        ),
         "violation" => format!(".violation {}", edge_list(&json_edges(&c["path"]))),
         "envelope" => {
             let chain: Vec<String> = c["chain"].as_array().map(|a| a.iter().map(|w| nat_list(&json_nats(w))).collect()).unwrap_or_default();

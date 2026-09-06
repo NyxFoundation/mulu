@@ -461,6 +461,7 @@ mulu/
 ├── tools/              regen-yul-fixtures.sh
 └── examples/
     ├── models/         hand-written finite models, for the core alone
+    │                   (including a check nothing reaches)
     ├── limits/         the worked example: two guards, one redundant
     ├── access/         the first guard in a modifier in an imported file
     ├── guards/         a guard written `if (..) revert()`
