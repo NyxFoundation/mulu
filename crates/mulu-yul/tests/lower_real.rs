@@ -27,6 +27,20 @@ fn span_text(l: mulu_yul::Location) -> &'static str {
 }
 
 #[test]
+fn access_fixtures_match_their_example_contracts() {
+    assert_eq!(
+        include_str!("fixtures/access-Base.sol"),
+        include_str!("../../../examples/access/Base.sol"),
+        "examples/access/Base.sol changed; rerun tools/regen-yul-fixtures.sh"
+    );
+    assert_eq!(
+        include_str!("fixtures/access-Vault.sol"),
+        include_str!("../../../examples/access/Vault.sol"),
+        "examples/access/Vault.sol changed; rerun tools/regen-yul-fixtures.sh"
+    );
+}
+
+#[test]
 fn fixture_matches_the_example_contract() {
     // The committed Yul was generated from this exact source. If the example
     // changes, every @src offset shifts, so the pair must be regenerated

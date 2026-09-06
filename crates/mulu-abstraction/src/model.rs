@@ -129,6 +129,39 @@ impl<'a> Builder<'a> {
         None
     }
 
+    /// The functions an entrypoint body actually executes: itself plus every
+    /// function it calls as a statement, transitively. A modifier and the
+    /// `_inner` body solc splits out both live here, and their guards and
+    /// storage writes must refine the partition exactly like the entry's own.
+    fn reachable(&self, entry: &str) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        let mut queue = vec![entry.to_string()];
+        while let Some(name) = queue.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(f) = self.ir.function(&name) else { continue };
+            for b in &f.blocks {
+                for ins in &b.instructions {
+                    // Only statement calls; a guard helper is a check, and a
+                    // store helper is already a recognised write.
+                    if ins.storage_write.is_some() {
+                        continue;
+                    }
+                    if let Some((callee, _)) = statement_call(ins) {
+                        if self.ir.checks.iter().any(|c| c.helper.as_deref() == Some(callee.as_str())) {
+                            continue;
+                        }
+                        if self.ir.function(&callee).is_some() {
+                            queue.push(callee);
+                        }
+                    }
+                }
+            }
+        }
+        seen.into_iter().collect()
+    }
+
     fn entries(&mut self) -> Vec<Entry> {
         let mut out = Vec::new();
         for e in &self.ir.entrypoints {
@@ -168,7 +201,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Guard predicates of a function, keyed by check id.
-    fn guards(&mut self, f: &Function) -> BTreeMap<String, Predicate> {
+    pub(crate) fn guards(&mut self, f: &Function) -> BTreeMap<String, Predicate> {
         let mut out = BTreeMap::new();
         for c in self.ir.checks.iter().filter(|c| c.function == f.id) {
             if c.purity != Purity::Pure {
@@ -257,44 +290,47 @@ impl<'a> Builder<'a> {
         let mut arg_preds: Vec<PredicateInfo> = Vec::new();
         let mut guards_by_func: BTreeMap<String, BTreeMap<String, Predicate>> = BTreeMap::new();
         for e in &entries {
-            let Some(f) = self.ir.function(&e.func) else { continue };
-            let f = f.clone();
-            let g = self.guards(&f);
-            for (id, p) in &g {
-                let set = p.set();
-                if !set.is_full() && !set.is_empty() && !arg_sets.iter().any(|(n, _)| n == id) {
-                    arg_preds.push(PredicateInfo {
-                        id: id.clone(),
-                        source: format!("check {id} in {}", e.solidity_name),
-                        text: format!("{p}"),
-                        set: set.clone(),
-                    });
-                    arg_sets.push((id.clone(), set));
-                }
-            }
-            guards_by_func.insert(e.func.clone(), g);
-
-            // pull the spec back through `slot := argument`
-            for b in &f.blocks {
-                for ins in &b.instructions {
-                    let Some(w) = &ins.storage_write else { continue };
-                    if Some(&w.value_text) != e.param.as_ref() {
-                        continue;
+            for fname in self.reachable(&e.func) {
+                let Some(f) = self.ir.function(&fname) else { continue };
+                let f = f.clone();
+                let g = self.guards(&f);
+                for (id, p) in &g {
+                    let set = p.set();
+                    if !set.is_full() && !set.is_empty() && !arg_sets.iter().any(|(n, _)| n == id) {
+                        arg_preds.push(PredicateInfo {
+                            id: id.clone(),
+                            source: format!("check {id} reached from {}", e.solidity_name),
+                            text: format!("{p}"),
+                            set: set.clone(),
+                        });
+                        arg_sets.push((id.clone(), set));
                     }
-                    let Some(label) = self.slot_label(&w.slot_text) else { continue };
-                    for p in self.props.iter().filter(|p| p.var.as_deref() == Some(label.as_str())) {
-                        let id = format!("spec:{}", p.id);
-                        if !arg_sets.iter().any(|(n, _)| *n == id) {
-                            arg_preds.push(PredicateInfo {
-                                id: id.clone(),
-                                source: format!(
-                                    "spec property {} pulled back through {}: {} := {}",
-                                    p.id, e.solidity_name, label, w.value_text
-                                ),
-                                text: p.text.clone(),
-                                set: p.predicate.set(),
-                            });
-                            arg_sets.push((id, p.predicate.set()));
+                }
+                guards_by_func.insert(fname.clone(), g);
+
+                // pull the spec back through `slot := argument`
+                for b in &f.blocks {
+                    for ins in &b.instructions {
+                        let Some(w) = &ins.storage_write else { continue };
+                        // the write names this function's own parameter
+                        if !f.parameters.iter().any(|p| *p == w.value_text) {
+                            continue;
+                        }
+                        let Some(label) = self.slot_label(&w.slot_text) else { continue };
+                        for p in self.props.iter().filter(|p| p.var.as_deref() == Some(label.as_str())) {
+                            let id = format!("spec:{}", p.id);
+                            if !arg_sets.iter().any(|(n, _)| *n == id) {
+                                arg_preds.push(PredicateInfo {
+                                    id: id.clone(),
+                                    source: format!(
+                                        "spec property {} pulled back through {}: {} := the argument",
+                                        p.id, e.solidity_name, label
+                                    ),
+                                    text: p.text.clone(),
+                                    set: p.predicate.set(),
+                                });
+                                arg_sets.push((id, p.predicate.set()));
+                            }
                         }
                     }
                 }
@@ -572,15 +608,19 @@ impl<'a> Walk<'a> {
         Abstraction { model, report }
     }
 
-    /// One straight-line abstract execution. Every guard is decided by the
-    /// argument region, so there is nothing to branch on.
+    /// One abstract execution. Every guard is decided by the argument region,
+    /// so there is nothing to branch on, but the walk does follow internal
+    /// calls: a modifier is a separate Yul function, and its guard would
+    /// otherwise be invisible (and the model silently wrong).
     fn walk_one(
         &mut self,
         e: &Entry,
         arg: Option<usize>,
         entry_storage: &StorageRegion,
     ) -> Result<(), String> {
-        let f = self.b.ir.function(&e.func).ok_or("no such function")?.clone();
+        const MAX_DEPTH: usize = 32;
+        const MAX_STEPS: usize = 10_000;
+
         let arg_set = arg.map(|a| self.arg_regions[a].clone());
         let call_event = match arg {
             Some(a) => format!("call_{}_{}", e.solidity_name, self.arg_name(a)),
@@ -603,47 +643,42 @@ impl<'a> Walk<'a> {
         let mut storage = entry_storage.clone();
         let mut step = 0usize;
         let mut seen_checks: Vec<String> = Vec::new();
-        let mut block = f.entry;
-        let mut index = 0usize;
-        let mut visited: BTreeSet<(usize, usize)> = BTreeSet::new();
-        let empty = BTreeMap::new();
-        let guards = self.guards.get(&e.func).unwrap_or(&empty).clone();
+        let mut frames: Vec<Frame> = vec![Frame {
+            func: e.func.clone(),
+            block: 0,
+            index: 0,
+            arg_var: e.param.clone(),
+            visited: BTreeSet::new(),
+        }];
+        let region = arg_set.clone().unwrap_or_else(IntervalSet::full);
+        let mut steps = 0usize;
 
         loop {
-            if !visited.insert((block, index)) {
-                return Err("the abstract execution revisits a position; P1a does not model loops".into());
+            steps += 1;
+            if steps > MAX_STEPS {
+                return Err("the abstract execution did not terminate within the step limit".into());
             }
-            let blk = f.block(block);
-            // instructions
-            let mut advanced = false;
-            while index < blk.instructions.len() {
+            let depth = frames.len();
+            let (func, block, index, arg_var) = {
+                let fr = frames.last().expect("a frame");
+                (fr.func.clone(), fr.block, fr.index, fr.arg_var.clone())
+            };
+            let f = self.b.ir.function(&func).ok_or("no such function")?.clone();
+            let blk = f.block(block).clone();
+
+            if index < blk.instructions.len() {
+                frames.last_mut().unwrap().index += 1;
                 let ins = &blk.instructions[index];
-                // a guard evaluated here?
-                let check = self
-                    .b
-                    .ir
-                    .checks
-                    .iter()
-                    .find(|c| {
-                        c.function == f.id
-                            && c.pre_location == block
-                            && matches!(c.pass_edge, mulu_yul::ir::CheckEdge::Continue)
-                            && ins
-                                .storage_write
-                                .is_none()
-                                && guards.contains_key(&c.id)
-                                && instruction_calls(ins, c.helper.as_deref())
-                    })
-                    .cloned();
-                if let Some(c) = check {
-                    let p = &guards[&c.id];
-                    let var = e.param.clone().unwrap_or_default();
-                    let region = arg_set.clone().unwrap_or_else(IntervalSet::full);
+
+                // 1. a guard evaluated here
+                if let Some(c) = self.check_at(&f, block, ins) {
+                    let guards = self.guards_of(&f);
+                    let Some(p) = guards.get(&c.id) else {
+                        return Err(format!("check {} could not be turned into a predicate", c.id));
+                    };
+                    let var = arg_var.clone().unwrap_or_default();
                     let outcome = p.decide(&var, &region).ok_or_else(|| {
-                        format!(
-                            "check {} is not decided by the argument region {region}",
-                            c.id
-                        )
+                        format!("check {} is not decided by the argument region {region}", c.id)
                     })?;
                     let pass = self.event(&format!("{}_pass", c.id), &format!("GuardResult({}, true)", c.id));
                     let fail = self.event(&format!("{}_fail", c.id), &format!("GuardResult({}, false)", c.id));
@@ -660,35 +695,19 @@ impl<'a> Walk<'a> {
                         self.add(&cur.clone(), &pass, &next);
                         cur = next;
                         seen_checks.push(c.id.clone());
-                    } else {
-                        // TxRevert restores the storage of the entry snapshot.
-                        let rev = format!(
-                            "{}#rev_{}",
-                            e.solidity_name,
-                            self.storage_name(entry_storage)
-                        );
-                        self.add(&cur.clone(), &fail, &rev);
-                        self.finish_revert(&rev, entry_storage);
-                        return Ok(());
+                        continue;
                     }
-                    index += 1;
-                    advanced = true;
-                    continue;
+                    let rev = format!("{}#rev_{}", e.solidity_name, self.storage_name(entry_storage));
+                    self.add(&cur.clone(), &fail, &rev);
+                    self.finish_revert(&rev, entry_storage);
+                    return Ok(());
                 }
-                // a storage write?
-                if let Some(w) = &ins.storage_write.clone() {
-                    let slot_label = self
-                        .b
-                        .slot_label(&w.slot_text)
-                        .ok_or_else(|| format!("a write to slot {} is not a declared variable", w.slot_text))?;
-                    let slot_idx = self
-                        .per_slot
-                        .iter()
-                        .position(|(l, _)| *l == slot_label)
-                        .ok_or("unknown slot")?;
-                    // the value: this function's argument, or a literal
-                    let values = if Some(&w.value_text) == e.param.as_ref() {
-                        arg_set.clone().ok_or("the argument is written but the function takes none")?
+
+                // 2. a whole-slot storage write
+                if let Some(w) = ins.storage_write.clone() {
+                    let (slot_idx, slot_label) = self.slot_of(&w.slot_text)?;
+                    let values = if Some(&w.value_text) == arg_var.as_ref() {
+                        arg_set.clone().ok_or("the argument is written but the call takes none")?
                     } else if let Ok(v) = crate::interval::parse_decimal(&w.value_text) {
                         IntervalSet::point(v)
                     } else {
@@ -699,9 +718,7 @@ impl<'a> Walk<'a> {
                         ));
                     };
                     let new_region = self.region_of(slot_idx, &values).ok_or_else(|| {
-                        format!(
-                            "the value written to {slot_label} straddles a specification boundary"
-                        )
+                        format!("the value written to {slot_label} straddles a specification boundary")
                     })?;
                     storage[slot_idx] = new_region;
                     let ev = self.event(
@@ -712,45 +729,97 @@ impl<'a> Walk<'a> {
                     let next = format!("{}#{step}_{suffix}", e.solidity_name);
                     self.add(&cur.clone(), &ev, &next);
                     cur = next;
-                    index += 1;
-                    advanced = true;
                     continue;
                 }
-                index += 1;
+
+                // 3. a call into another function of this contract. A modifier
+                //    is one of these, and so is the `_inner` body solc splits
+                //    out, so not following them loses the guards entirely.
+                if let Some((callee, args)) = statement_call(ins) {
+                    if let Some(g) = self.b.ir.function(&callee) {
+                        let matters = g.effects.writes_storage
+                            || g.effects.can_revert
+                            || self.b.ir.checks.iter().any(|c| c.function == callee);
+                        if matters {
+                            if depth >= MAX_DEPTH {
+                                return Err(format!("call depth limit reached at {callee}"));
+                            }
+                            let inner_var = bind_argument(g, &args, arg_var.as_deref())?;
+                            frames.push(Frame {
+                                func: callee,
+                                block: 0,
+                                index: 0,
+                                arg_var: inner_var,
+                                visited: BTreeSet::new(),
+                            });
+                            continue;
+                        }
+                    }
+                }
+
+                // 4. anything else must be inert, or the model would lose it
+                if ins.effects.writes_storage || ins.effects.can_revert {
+                    return Err(format!(
+                        "an instruction in {func} carries effects the model does not represent \
+                         ({}{}); P1a cannot skip it",
+                        if ins.effects.writes_storage { "writes storage" } else { "" },
+                        if ins.effects.can_revert { " can revert" } else { "" },
+                    ));
+                }
+                continue;
             }
-            let _ = advanced;
+
             // terminator
             match &blk.terminator {
                 Terminator::Jump { target } => {
-                    block = *target;
-                    index = 0;
+                    let fr = frames.last_mut().unwrap();
+                    if !fr.visited.insert((*target, 0)) {
+                        return Err("the abstract execution revisits a block; P1a does not model loops".into());
+                    }
+                    fr.block = *target;
+                    fr.index = 0;
                 }
                 Terminator::Branch { cond, then_block, else_block } => {
                     let p = translate(cond, &f.parameters).map_err(|w| {
                         format!("a branch condition is outside the P1a fragment: {w}")
                     })?;
-                    let var = e.param.clone().unwrap_or_default();
-                    let region = arg_set.clone().unwrap_or_else(IntervalSet::full);
+                    let var = arg_var.clone().unwrap_or_default();
                     let taken = p
                         .decide(&var, &region)
                         .ok_or("a branch is not decided by the argument region")?;
-                    block = if taken { *then_block } else { *else_block };
-                    index = 0;
+                    let target = if taken { *then_block } else { *else_block };
+                    let fr = frames.last_mut().unwrap();
+                    if !fr.visited.insert((target, 0)) {
+                        return Err("the abstract execution revisits a block; P1a does not model loops".into());
+                    }
+                    fr.block = target;
+                    fr.index = 0;
                 }
                 Terminator::Revert { .. } => {
-                    let rev =
-                        format!("{}#rev_{}", e.solidity_name, self.storage_name(entry_storage));
+                    let rev = format!("{}#rev_{}", e.solidity_name, self.storage_name(entry_storage));
                     let ev = self.event("revert", "TxRevert");
                     self.add(&cur.clone(), &ev, &rev);
                     self.finish_revert(&rev, entry_storage);
                     return Ok(());
                 }
-                Terminator::Return { .. } | Terminator::Stop | Terminator::Leave => {
+                Terminator::Return { .. } | Terminator::Stop => {
                     let ret = format!("{}#ret_{}", e.solidity_name, self.storage_name(&storage));
                     let ev = self.event("return", "TxReturn");
                     self.add(&cur.clone(), &ev, &ret);
                     self.finish_return(&ret, &storage);
                     return Ok(());
+                }
+                Terminator::Leave => {
+                    // Falling off a Yul function returns to its caller. When
+                    // the entry body does it, the transaction succeeded.
+                    frames.pop();
+                    if frames.is_empty() {
+                        let ret = format!("{}#ret_{}", e.solidity_name, self.storage_name(&storage));
+                        let ev = self.event("return", "TxReturn");
+                        self.add(&cur.clone(), &ev, &ret);
+                        self.finish_return(&ret, &storage);
+                        return Ok(());
+                    }
                 }
                 Terminator::Switch { .. } => {
                     return Err("a switch in a function body is outside P1a".into())
@@ -758,6 +827,50 @@ impl<'a> Walk<'a> {
                 Terminator::Unsupported { reason } => return Err(reason.clone()),
             }
         }
+    }
+
+    fn slot_of(&self, slot_text: &str) -> Result<(usize, String), String> {
+        let label = self
+            .b
+            .slot_label(slot_text)
+            .ok_or_else(|| format!("a write to slot {slot_text} is not a declared variable"))?;
+        let idx = self
+            .per_slot
+            .iter()
+            .position(|(l, _)| *l == label)
+            .ok_or_else(|| format!("slot {label} is not partitioned"))?;
+        Ok((idx, label))
+    }
+
+    /// Guards of a function, computed on demand as the walk enters it.
+    fn guards_of(&mut self, f: &Function) -> BTreeMap<String, Predicate> {
+        if let Some(g) = self.guards.get(&f.id) {
+            return g.clone();
+        }
+        let g = self.b.guards(f);
+        self.guards.insert(f.id.clone(), g.clone());
+        g
+    }
+
+    /// The check evaluated by this instruction, if it is a guard-helper call.
+    fn check_at(
+        &self,
+        f: &Function,
+        block: usize,
+        ins: &mulu_yul::ir::Instruction,
+    ) -> Option<mulu_yul::Check> {
+        self.b
+            .ir
+            .checks
+            .iter()
+            .find(|c| {
+                c.function == f.id
+                    && c.pre_location == block
+                    && matches!(c.pass_edge, mulu_yul::ir::CheckEdge::Continue)
+                    && ins.storage_write.is_none()
+                    && instruction_calls(ins, c.helper.as_deref())
+            })
+            .cloned()
     }
 
     /// After a revert the transaction boundary is reached with the storage the
@@ -795,6 +908,62 @@ impl<'a> Walk<'a> {
         }
         false
     }
+}
+
+/// One activation on the walk's call stack.
+struct Frame {
+    func: String,
+    block: usize,
+    index: usize,
+    /// The name denoting the abstract argument inside this activation.
+    arg_var: Option<String>,
+    visited: BTreeSet<(usize, usize)>,
+}
+
+/// A call written as a statement, with its arguments.
+fn statement_call(ins: &mulu_yul::ir::Instruction) -> Option<(String, Vec<mulu_yul::Expr>)> {
+    match &ins.op {
+        mulu_yul::ir::Op::Effect { call: mulu_yul::Expr::Call { name, args, .. } } => {
+            Some((name.clone(), args.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// Which of the callee's parameters denotes the abstract argument.
+///
+/// P1a carries a single uint256 argument, so a call may pass it along
+/// unchanged or pass none of it. Anything else, such as a computed value,
+/// would need the argument partition to be re-derived and is refused.
+fn bind_argument(
+    callee: &Function,
+    args: &[mulu_yul::Expr],
+    caller_arg: Option<&str>,
+) -> Result<Option<String>, String> {
+    let mut bound = None;
+    for (i, a) in args.iter().enumerate() {
+        let Some(param) = callee.parameters.get(i) else { break };
+        match (&a, caller_arg) {
+            (mulu_yul::Expr::Ident { name, .. }, Some(outer)) if name == outer => {
+                if bound.is_some() {
+                    return Err(format!(
+                        "{} receives the argument in two parameters; P1a models one",
+                        callee.id
+                    ));
+                }
+                bound = Some(param.clone());
+            }
+            (mulu_yul::Expr::Literal { .. }, _) => {}
+            (mulu_yul::Expr::Ident { .. }, _) | (mulu_yul::Expr::Call { .. }, _) => {
+                return Err(format!(
+                    "{} is called with {}, which P1a cannot relate to the entrypoint argument",
+                    callee.id,
+                    a.render()
+                ))
+            }
+        }
+    }
+    Ok(bound)
 }
 
 fn instruction_calls(ins: &mulu_yul::ir::Instruction, name: Option<&str>) -> bool {

@@ -32,6 +32,10 @@ analyze: build
 	  --spec examples/limits/limits.spec.json --out analysis-limits; \
 	  code=$$?; [ $$code -le 1 ] || exit $$code
 	./target/release/mulu verify analysis-limits
+	./target/release/mulu analyze examples/access/Vault.sol --contract Vault \
+	  --spec examples/access/vault.spec.json --out analysis-vault; \
+	  code=$$?; [ $$code -le 1 ] || exit $$code
+	./target/release/mulu verify analysis-vault
 
 fixtures: build
 	@for f in examples/fixtures/*.json examples/limits/model.json; do \

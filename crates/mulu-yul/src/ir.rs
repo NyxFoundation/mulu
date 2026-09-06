@@ -133,6 +133,8 @@ impl Function {
 pub enum CheckOrigin {
     /// A `require(...)` in the Solidity source.
     Require,
+    /// A `require(...)` written inside a modifier and applied to a function.
+    Modifier,
     /// Inserted by the compiler: non-payable guard, ABI validation, and such.
     Compiler,
     /// A guard written directly as `if ... { revert }` in Yul.
@@ -170,6 +172,12 @@ pub struct Check {
     /// The guard helper this came from, if it was a call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub helper: Option<String>,
+    /// The contract that declares the source text, from the AST.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_in: Option<String>,
+    /// The Solidity function or modifier the source text sits in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_in: Option<String>,
     /// Block whose execution reaches the check.
     pub pre_location: BlockId,
     pub pass_edge: CheckEdge,
@@ -199,6 +207,16 @@ pub struct Entrypoint {
     pub selector: String,
     /// The `external_fun_*` wrapper.
     pub external_function: String,
+}
+
+/// Where a source span sits, as the AST records it.
+#[derive(Debug, Clone, Default)]
+pub struct SourceOrigin {
+    pub contract: Option<String>,
+    /// The enclosing function or modifier.
+    pub member: Option<String>,
+    /// Set when the span is inside a modifier definition.
+    pub in_modifier: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

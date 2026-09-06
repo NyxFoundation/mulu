@@ -98,9 +98,13 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
     // An incomplete abstraction cannot be reported as a complete analysis.
     if !abstraction.report.complete() && code < 2 {
         eprintln!(
-            "\nthe abstraction left {} thing(s) unmodelled, so this unit is not complete",
+            "\nthe abstraction left {} thing(s) unmodelled, so this unit is not complete:",
             abstraction.report.unsupported.len()
         );
+        for u in &abstraction.report.unsupported {
+            eprintln!("  {u}");
+        }
+        println!("exit code: 2 (the model analysis alone would have been {code})");
         return Ok(2);
     }
     Ok(code)

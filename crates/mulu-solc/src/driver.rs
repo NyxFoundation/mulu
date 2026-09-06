@@ -22,6 +22,10 @@ pub enum SolcError {
     Compile(String),
     #[error("no contract named {wanted:?}; this build defines: {available}")]
     NoSuchContract { wanted: String, available: String },
+    #[error("{0} is abstract, an interface or a library: solc produced no code for it, so there is nothing to analyse")]
+    CodelessContract(String),
+    #[error("this build defines no contract with code (only: {0})")]
+    NoContractWithCode(String),
     #[error("solc did not emit {what} for {contract}; it was requested in outputSelection")]
     MissingOutput { what: &'static str, contract: String },
     #[error("reading {path}: {source}")]
@@ -148,21 +152,23 @@ impl Solc {
         self.into_bundle(response, sources, settings, input_sha256)
     }
 
-    /// Compile files from disk, keyed by their path relative to `root`.
+    /// Compile files from disk, following their `import` statements. Source
+    /// keys are paths relative to `root`, matching the `@use-src` names solc
+    /// writes into the generated Yul.
     pub fn compile_files(
         &self,
         root: &Path,
         files: &[PathBuf],
         opts: &CompileOptions,
     ) -> Result<BuildBundle, SolcError> {
-        let mut sources = Vec::new();
-        for f in files {
-            let content = std::fs::read_to_string(f)
-                .map_err(|e| SolcError::Io { path: f.display().to_string(), source: e })?;
-            let key = f.strip_prefix(root).unwrap_or(f).to_string_lossy().replace('\\', "/");
-            sources.push((key, content));
-        }
-        self.compile(&sources, opts)
+        let resolved = crate::imports::resolve(root, files).map_err(|e| SolcError::Io {
+            path: files.first().map(|f| f.display().to_string()).unwrap_or_default(),
+            source: e,
+        })?;
+        let sources: Vec<(String, String)> = resolved.sources.into_iter().collect();
+        let mut bundle = self.compile(&sources, opts)?;
+        bundle.unresolved_imports = resolved.unresolved;
+        Ok(bundle)
     }
 
     fn into_bundle(
@@ -210,11 +216,15 @@ impl Solc {
         sources.sort_by_key(|s| s.id);
 
         let mut contracts = Vec::new();
+        let mut codeless = Vec::new();
         for (source_path, per_file) in response["contracts"].as_object().cloned().unwrap_or_default() {
             for (name, c) in per_file.as_object().cloned().unwrap_or_default() {
                 let ir = c["ir"].as_str().unwrap_or("").to_string();
                 if ir.is_empty() {
-                    return Err(SolcError::MissingOutput { what: "ir (Yul)", contract: name });
+                    // An abstract contract, interface or library has no code.
+                    // That is not a compilation failure.
+                    codeless.push(name);
+                    continue;
                 }
                 contracts.push(ContractArtifact {
                     name,
@@ -227,15 +237,20 @@ impl Solc {
             }
         }
         contracts.sort_by(|a, b| a.name.cmp(&b.name));
+        codeless.sort();
 
+        let ast_index = crate::ast::AstIndex::build(&ast);
         Ok(BuildBundle {
             compiler: self.version.clone(),
             settings,
             input_sha256,
             sources,
+            ast_index,
             ast,
             contracts,
             warnings,
+            unresolved_imports: vec![],
+            codeless_contracts: codeless,
         })
     }
 }
@@ -246,12 +261,19 @@ pub fn select_contract<'a>(
     wanted: Option<&str>,
 ) -> Result<&'a ContractArtifact, SolcError> {
     match wanted {
-        Some(n) => bundle.contract(n).ok_or_else(|| SolcError::NoSuchContract {
-            wanted: n.to_string(),
-            available: bundle.contract_names().join(", "),
+        Some(n) => bundle.contract(n).ok_or_else(|| {
+            if bundle.codeless_contracts.iter().any(|c| c == n) {
+                SolcError::CodelessContract(n.to_string())
+            } else {
+                SolcError::NoSuchContract {
+                    wanted: n.to_string(),
+                    available: bundle.contract_names().join(", "),
+                }
+            }
         }),
         None => match bundle.contracts.len() {
             1 => Ok(&bundle.contracts[0]),
+            0 => Err(SolcError::NoContractWithCode(bundle.codeless_contracts.join(", "))),
             _ => Err(SolcError::NoSuchContract {
                 wanted: "(unspecified)".into(),
                 available: bundle.contract_names().join(", "),

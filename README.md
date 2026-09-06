@@ -32,6 +32,9 @@ The chain runs end to end for the P1a subset: Solidity in, certified findings ou
 * The P1a subset is one uint256 argument per entrypoint, pure comparison
   guards, whole-slot uint256 storage, no loops, no external calls. Anything
   outside it is reported and makes the unit incomplete (exit 2), never dropped.
+* Several source files, `import` statements and guards written in modifiers all
+  work. Abstract contracts, interfaces and libraries are recognised as having no
+  code rather than treated as a compilation failure.
 * Every claim is about the generated model (`scope: abstract-model`). Nothing
   here proves anything about a source program until the correspondence layers
   of docs 09/11 exist. That is P1-04.
@@ -54,6 +57,10 @@ make test                           # cargo test + kernel-checked fixture theore
 mulu analyze examples/limits/Limits.sol --contract Limits \
      --spec examples/limits/limits.spec.json --out analysis-limits
 mulu verify analysis-limits
+
+# the same finding, with the first guard in a modifier in an imported file
+mulu analyze examples/access/Vault.sol --contract Vault \
+     --spec examples/access/vault.spec.json --out analysis-vault
 
 # P1-01 alone: stop at the ProgramIR
 mulu ir examples/limits/Limits.sol --contract Limits --out ir-limits
@@ -95,6 +102,35 @@ silence.
 
 Without `--spec` there is no bad state and only redundancy is analysed
 (docs/09 §3).
+
+### Modifiers, imports and where a check was written
+
+solc lowers a modifier into a separate Yul function, so `setLimit` becomes
+`fun_setLimit` calling `modifier_capped` calling `fun_setLimit_inner`. The walk
+follows those calls; a guard inside a modifier refines the argument partition
+exactly like one written in the function body. `examples/access` is
+`examples/limits` with the first guard moved into a modifier in an imported
+file, and it reaches the same conclusion.
+
+The Yul only carries a byte span. Which contract and which modifier that span
+belongs to is in the AST, which the adapter indexes:
+
+```
+checks
+  A       modifier  modifier_capped_28  (modifier Bounded.capped)
+      passes when  iszero(gt(var_x_24, 0x64))
+      purity Pure   at Base.sol:9:9
+  B       require   Vault.setLimit
+      passes when  iszero(gt(var_x_24, 0x03e8))
+      purity Pure   at Vault.sol:12:9
+```
+
+Locations resolve through the file id they carry, so a check reported for
+`Vault` can point into `Base.sol`.
+
+An instruction whose effects the model cannot express stops the walk rather
+than being skipped. Without that, a modifier the walk did not follow produced a
+model in which the function did nothing, reported as complete.
 
 `analyze-model` writes:
 
@@ -202,7 +238,7 @@ obligation (docs 11 E9); nothing is said about inputs outside the model.
 mulu/
 ├── crates/
 │   ├── mulu-model/     schema v1, validator, normalisation, hashes, reference algorithms
-│   ├── mulu-solc/      solc Standard JSON driver, BuildBundle, source hashes
+│   ├── mulu-solc/      solc Standard JSON driver, imports, AST index, hashes
 │   ├── mulu-yul/       Yul lexer/parser, CFG, effects, folding, ProgramIR, checks
 │   ├── mulu-abstraction/ uint256 intervals, guard predicates, spec DSL, model builder
 │   └── mulu-cli/       `mulu` — worker driver, Check.lean generator, report, exit codes

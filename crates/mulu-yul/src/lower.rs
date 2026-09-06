@@ -20,7 +20,11 @@ struct GuardHelper {
     params: Vec<String>,
 }
 
+/// Looks a source span up in the AST: `(file_id, start, end)`.
+pub type OriginLookup<'a> = &'a dyn Fn(u32, u32, u32) -> crate::ir::SourceOrigin;
+
 pub struct Lowering<'a> {
+    origins: Option<OriginLookup<'a>>,
     contract: &'a str,
     source_path: &'a str,
     compiler: &'a str,
@@ -113,8 +117,16 @@ impl Builder {
 }
 
 impl<'a> Lowering<'a> {
+    /// Attach the AST index so a check can say which contract and which
+    /// modifier it was written in.
+    pub fn with_origins(mut self, lookup: OriginLookup<'a>) -> Self {
+        self.origins = Some(lookup);
+        self
+    }
+
     pub fn new(contract: &'a str, source_path: &'a str, compiler: &'a str) -> Self {
         Self {
+            origins: None,
             contract,
             source_path,
             compiler,
@@ -926,6 +938,8 @@ impl<'a> Lowering<'a> {
                         condition,
                         origin,
                         helper: Some(name.clone()),
+                        declared_in: None,
+                        written_in: None,
                         pre_location: blk.id,
                         pass_edge: CheckEdge::Continue,
                         fail_edge: CheckEdge::Revert { via: Some(name.clone()) },
@@ -970,6 +984,8 @@ impl<'a> Lowering<'a> {
                         condition,
                         origin: CheckOrigin::Compiler,
                         helper: None,
+                        declared_in: None,
+                        written_in: None,
                         pre_location: blk.id,
                         pass_edge: CheckEdge::Block { id: pass_block },
                         fail_edge: CheckEdge::Block { id: fail_block },
@@ -984,15 +1000,28 @@ impl<'a> Lowering<'a> {
         // from where they sit, so adding a require does not renumber them.
         found.sort_by_key(|c| {
             (
-                c.origin != CheckOrigin::Require,
+                !matches!(c.origin, CheckOrigin::Require | CheckOrigin::Modifier),
                 c.source.map(|l| (l.file_id, l.byte_start, l.byte_length)).unwrap_or((u32::MAX, u32::MAX, u32::MAX)),
                 c.function.clone(),
                 c.pre_location,
             )
         });
+        // The AST is the only place that says a `require` was written in a
+        // modifier rather than in the function that applies it (docs/08 §2).
+        if let Some(lookup) = self.origins {
+            for c in found.iter_mut() {
+                let Some(l) = c.source else { continue };
+                let o = lookup(l.file_id, l.byte_start, l.byte_start + l.byte_length);
+                c.declared_in = o.contract;
+                c.written_in = o.member;
+                if o.in_modifier && c.origin == CheckOrigin::Require {
+                    c.origin = CheckOrigin::Modifier;
+                }
+            }
+        }
         let mut nth = 0usize;
         for c in found.iter_mut() {
-            if c.origin == CheckOrigin::Require {
+            if matches!(c.origin, CheckOrigin::Require | CheckOrigin::Modifier) {
                 c.id = check_id(nth);
                 nth += 1;
             } else {

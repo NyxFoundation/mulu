@@ -44,13 +44,35 @@ pub fn compile_and_lower(
     let selected = mulu_solc::driver_select(&bundle, contract)?.name.clone();
     let c = bundle.contract(&selected).expect("just selected");
 
-    let ir = mulu_yul::lower_contract(
+    if !bundle.unresolved_imports.is_empty() {
+        eprintln!(
+            "warning: {} import(s) need a remapping and were not followed: {}",
+            bundle.unresolved_imports.len(),
+            bundle.unresolved_imports.join(", ")
+        );
+    }
+
+    // The AST says which contract and which modifier a check was written in;
+    // the Yul only carries a byte span (docs/08 §2).
+    let index = bundle.ast_index.clone();
+    let lookup = move |file_id: u32, start: u32, end: u32| mulu_yul::SourceOrigin {
+        contract: index.contract_at(file_id, start, end).map(|s| s.to_string()),
+        member: index
+            .enclosing(file_id, start, end)
+            .into_iter()
+            .find(|n| n.kind != mulu_solc::AstKind::Contract)
+            .map(|n| n.name.clone()),
+        in_modifier: index.modifier_at(file_id, start, end).is_some(),
+    };
+
+    let ir = mulu_yul::lower_contract_with(
         &c.name,
         &c.source_path,
         &bundle.compiler,
         &c.ir,
         &c.abi,
         c.storage_layout.clone(),
+        Some(&lookup),
     )
     .with_context(|| format!("lowering the Yul of {}", c.name))?;
     Ok((bundle, selected, ir))
@@ -136,9 +158,36 @@ fn write_ir_manifest(
     Ok(())
 }
 
+/// `path:line:col` for a location, resolved through the file id it carries.
+/// With several sources a check can point into a file other than the one the
+/// contract is declared in, which is exactly what a modifier does.
+pub fn where_of(
+    bundle: &mulu_solc::BuildBundle,
+    ir: &ProgramIr,
+    loc: Option<mulu_yul::Location>,
+) -> String {
+    let Some(l) = loc else { return "(generated)".into() };
+    let Some(src) = bundle.source_by_id(l.file_id) else {
+        return format!("file#{}:{}", l.file_id, l.byte_start);
+    };
+    let path = ir.use_src.get(&l.file_id).cloned().unwrap_or_else(|| src.path.clone());
+    match src.line_col(l.byte_start as usize) {
+        Some((line, col)) => format!("{path}:{line}:{}", col + 1),
+        None => format!("{path}@{}", l.byte_start),
+    }
+}
+
 pub fn print_summary(bundle: &mulu_solc::BuildBundle, ir: &ProgramIr, out: &Path) {
     println!("contract {} from {}", ir.contract, ir.source_path);
     println!("compiler {}", bundle.compiler);
+    if bundle.sources.len() > 1 {
+        let names: Vec<String> = bundle
+            .sources
+            .iter()
+            .map(|s| format!("{} (#{})", s.path, s.id))
+            .collect();
+        println!("sources  {}", names.join(", "));
+    }
     println!("artifact {}\n", ir.derived_from);
 
     println!("entrypoints");
@@ -147,23 +196,26 @@ pub fn print_summary(bundle: &mulu_solc::BuildBundle, ir: &ProgramIr, out: &Path
     }
 
     println!("\nchecks");
-    let src = bundle.source_by_id(0);
     for c in &ir.checks {
         let origin = match c.origin {
             CheckOrigin::Require => "require",
+            CheckOrigin::Modifier => "modifier",
             CheckOrigin::Compiler => "compiler",
             CheckOrigin::Inline => "inline",
         };
-        let where_ = c
-            .source
-            .and_then(|l| src.and_then(|s| s.line_col(l.byte_start as usize)))
-            .map(|(line, col)| format!("{}:{}:{}", ir.source_path, line, col + 1))
-            .unwrap_or_else(|| "(generated)".into());
+        let where_ = where_of(bundle, ir, c.source);
         let fname = ir
             .function(&c.function)
             .and_then(|f| f.solidity_name.clone())
             .unwrap_or_else(|| c.function.clone());
-        println!("  {:<28} {origin:<9} {fname}", c.id);
+        let written = match (&c.declared_in, &c.written_in) {
+            (Some(ct), Some(m)) if c.origin == CheckOrigin::Modifier => {
+                format!("{fname}  (modifier {ct}.{m})")
+            }
+            (Some(ct), Some(m)) => format!("{ct}.{m}"),
+            _ => fname.clone(),
+        };
+        println!("  {:<28} {origin:<9} {written}", c.id);
         println!("      passes when  {}", c.condition_text);
         println!("      purity {:?}   at {where_}", c.purity);
     }
@@ -187,11 +239,7 @@ pub fn print_summary(bundle: &mulu_solc::BuildBundle, ir: &ProgramIr, out: &Path
             Op::Assign { value, .. } => value.render(),
             _ => "?".into(),
         };
-        let where_ = i
-            .source
-            .and_then(|l| src.and_then(|s| s.line_col(l.byte_start as usize)))
-            .map(|(line, col)| format!("{}:{}:{}", ir.source_path, line, col + 1))
-            .unwrap_or_else(|| "(generated)".into());
+        let where_ = where_of(bundle, ir, i.source);
         println!("  {}  {where_}", func.solidity_name.clone().unwrap_or_else(|| f.to_string()));
         println!("      {text}");
     }

@@ -70,3 +70,74 @@ fn the_input_hash_changes_with_the_settings() {
         "a different evmVersion must produce a different input hash"
     );
 }
+
+#[test]
+fn imports_are_followed_from_the_entry_file() {
+    let Some(solc) = solc() else { return };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let b = solc
+        .compile_files(
+            &root.join("examples/access"),
+            &[root.join("examples/access/Vault.sol")],
+            &CompileOptions::default(),
+        )
+        .expect("Vault.sol imports Base.sol and must compile from the entry file alone");
+
+    // both files are in the bundle, hashed, with the ids the Yul refers to
+    let mut paths: Vec<&str> = b.sources.iter().map(|s| s.path.as_str()).collect();
+    paths.sort();
+    assert_eq!(paths, vec!["Base.sol", "Vault.sol"]);
+    assert!(b.sources.iter().all(|s| s.sha256.len() == 64));
+    assert!(b.unresolved_imports.is_empty());
+
+    // an abstract contract has no code and is not an analysis target
+    assert_eq!(b.contract_names(), vec!["Vault"]);
+    assert_eq!(b.codeless_contracts, vec!["Bounded".to_string()]);
+}
+
+#[test]
+fn selecting_an_abstract_contract_says_why_it_cannot_be_analysed() {
+    let Some(solc) = solc() else { return };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let b = solc
+        .compile_files(
+            &root.join("examples/access"),
+            &[root.join("examples/access/Vault.sol")],
+            &CompileOptions::default(),
+        )
+        .unwrap();
+    let err = mulu_solc::driver_select(&b, Some("Bounded")).unwrap_err().to_string();
+    assert!(err.contains("abstract"), "{err}");
+    // a name that is not there at all reads differently
+    let err = mulu_solc::driver_select(&b, Some("Nope")).unwrap_err().to_string();
+    assert!(err.contains("no contract named"), "{err}");
+}
+
+#[test]
+fn the_ast_index_locates_a_modifier_across_files() {
+    let Some(solc) = solc() else { return };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let b = solc
+        .compile_files(
+            &root.join("examples/access"),
+            &[root.join("examples/access/Vault.sol")],
+            &CompileOptions::default(),
+        )
+        .unwrap();
+    assert!(!b.ast_index.is_empty());
+
+    // find the `capped` modifier and confirm it is attributed to Bounded
+    let m = b
+        .ast_index
+        .nodes
+        .iter()
+        .find(|n| n.name == "capped")
+        .expect("the capped modifier");
+    assert_eq!(m.kind, mulu_solc::AstKind::Modifier);
+    assert_eq!(m.contract.as_deref(), Some("Bounded"));
+    let base = b.source_by_id(m.file_id).unwrap();
+    assert_eq!(base.path, "Base.sol", "the modifier lives in the imported file");
+    // a span inside it resolves back to the modifier
+    let inside = b.ast_index.modifier_at(m.file_id, m.start + 10, m.start + 20).unwrap();
+    assert_eq!(inside.name, "capped");
+}

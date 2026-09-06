@@ -11,4 +11,14 @@ cp "$OUT/.build/build/Limits.yul" "$OUT/Limits.yul"
 cp "$OUT/.build/build/abi.json" "$OUT/Limits.abi.json"
 cp "$OUT/.build/build/storage-layout.json" "$OUT/Limits.storage.json"
 rm -rf "$OUT/.build"
-echo "regenerated $OUT from examples/limits/Limits.sol using $(solc --version | tail -1)"
+
+# the multi-file, modifier example
+cargo run --quiet -p mulu-cli -- ir examples/access/Vault.sol --contract Vault --out "$OUT/.build" >/dev/null
+cp examples/access/Base.sol "$OUT/access-Base.sol"
+cp examples/access/Vault.sol "$OUT/access-Vault.sol"
+cp "$OUT/.build/build/Vault.yul" "$OUT/Vault.yul"
+cp "$OUT/.build/build/abi.json" "$OUT/Vault.abi.json"
+cp "$OUT/.build/build/storage-layout.json" "$OUT/Vault.storage.json"
+rm -rf "$OUT/.build"
+
+echo "regenerated $OUT from examples/ using $(solc --version | tail -1)"

@@ -86,6 +86,10 @@ impl ContractArtifact {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildBundle {
+    /// Where each contract, function and modifier sits, from the AST. This is
+    /// the only place that says a `require` came from a modifier.
+    #[serde(default)]
+    pub ast_index: crate::ast::AstIndex,
     /// Full version string, e.g. `0.8.28+commit.7893614a.Linux.g++`.
     pub compiler: String,
     /// The exact `settings` object sent to solc.
@@ -98,6 +102,13 @@ pub struct BuildBundle {
     pub contracts: Vec<ContractArtifact>,
     /// Warnings solc reported. Errors are never stored here: they abort.
     pub warnings: Vec<String>,
+    /// Imports that needed a remapping and were not followed.
+    #[serde(default)]
+    pub unresolved_imports: Vec<String>,
+    /// Contracts solc produced no code for: abstract contracts, interfaces and
+    /// libraries. They are not analysis targets, but naming one should say why.
+    #[serde(default)]
+    pub codeless_contracts: Vec<String>,
 }
 
 impl BuildBundle {
