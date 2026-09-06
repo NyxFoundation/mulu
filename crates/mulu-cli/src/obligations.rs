@@ -38,14 +38,36 @@ pub struct Obligation {
     pub lean: Option<String>,
     /// What the analyser did that made this necessary.
     pub raised_by: Vec<String>,
+    /// Who could ever discharge this. `mulu` is work on this project and the
+    /// statement is ours to prove. `solc` is a correctness property of a
+    /// compiler nobody has proved correct, so it is an assumption on a third
+    /// party rather than an item on our list, and listing the two together
+    /// makes the second look like the first. `caller` is neither: the
+    /// analysis was handed something that stands for nothing.
+    #[serde(default = "mulu_bearer")]
+    pub bearer: String,
+    /// The artifact that would discharge this, where one is known to exist.
+    /// Naming it is not a claim that it has been used, or that it is correct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub would_need: Option<String>,
     /// `None` while open. Nothing sets this yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discharged_by: Option<String>,
 }
 
+fn mulu_bearer() -> String {
+    "mulu".into()
+}
+
 impl Obligation {
     pub fn open(&self) -> bool {
         self.discharged_by.is_none()
+    }
+
+    /// Open, and ours to close. The rest are open because someone else has
+    /// not proved their compiler correct, which no amount of work here fixes.
+    pub fn ours(&self) -> bool {
+        self.bearer == "mulu"
     }
 }
 
@@ -74,7 +96,7 @@ impl Ledger {
     /// model and there is no program they could be about, so the layers above
     /// are not merely undischarged, they are undefined.
     pub fn model_only() -> Ledger {
-        let o = ob(
+        let mut o = ob(
             MODEL_ONLY,
             "yul-semantics",
             "The analysis was handed a finite model, not a contract. Nothing says what this \
@@ -84,6 +106,7 @@ impl Ledger {
             None,
             vec!["the model was given directly".into()],
         );
+        o.bearer = "caller".into();
         Ledger {
             kind: "model-only".into(),
             obligations: vec![o],
@@ -150,7 +173,17 @@ fn ob(
         lean: lean.map(|s| s.to_string()),
         raised_by,
         discharged_by: None,
+        bearer: mulu_bearer(),
+        would_need: None,
     }
+}
+
+/// An obligation nobody here can close: a property of a compiler this project
+/// did not write and nobody has proved correct.
+fn on_solc(mut o: Obligation, would_need: &str) -> Obligation {
+    o.bearer = "solc".into();
+    o.would_need = Some(would_need.to_string());
+    o
 }
 
 /// Build the ledger for one analysis.
@@ -163,7 +196,7 @@ pub fn ledger(
 
     // The root. Everything above needs a semantics to be stated against, and
     // there is none, so nothing above can be discharged either.
-    out.push(ob(
+    let mut root = ob(
         "semantics:yul-not-formalised",
         "yul-semantics",
         "A formal semantics of the Yul solc emits, in Lean, against which the conditions \
@@ -171,7 +204,19 @@ pub fn ledger(
          theorem has nothing to apply to.",
         Some("Mulu.Semantics.Concrete"),
         vec![format!("the analysed artifact is {}", ir.derived_from)],
-    ));
+    );
+    // Ours to close, and not ours to write. An executable Yul semantics in
+    // Lean already exists; adopting one moves the residual assumption from
+    // "there is no semantics" to "that semantics is faithful to the EVM",
+    // which its own conformance suite is evidence for and not a proof.
+    root.would_need = Some(
+        "an executable Yul semantics in Lean instantiating `Mulu.Semantics.Concrete`; \
+         NethermindEth/EVMYulLean (Apache-2.0) is one, and paradigmxyz/EVMYulLean is the fork \
+         Solidus pins. Adopting one leaves the assumption that it matches the EVM, which its \
+         conformance suite tests rather than proves."
+            .into(),
+    );
+    out.push(root);
 
     // The two conditions of the simulation.
     let mut initial_raised = vec![];
@@ -255,14 +300,20 @@ pub fn ledger(
     }
 
     // The layers above, which P1 does not attempt.
-    out.push(ob(
-        "compilation:yul-corresponds-to-source",
-        "solidity-source",
-        "solc's lowering of this contract to Yul preserves the behaviours the claims are \
-         about. Not attempted: the analysed artifact is the Yul, and a statement about the \
-         Solidity source needs this link.",
-        None,
-        vec!["the front end reads solc's `ir` output".into()],
+    out.push(on_solc(
+        ob(
+            "compilation:yul-corresponds-to-source",
+            "solidity-source",
+            "solc's lowering of this contract to Yul preserves the behaviours the claims are \
+             about. Not attempted: the analysed artifact is the Yul, and a statement about the \
+             Solidity source needs this link.",
+            None,
+            vec!["the front end reads solc's `ir` output".into()],
+        ),
+        "a proof that solc lowers Solidity to Yul faithfully. None exists. A verified compiler \
+         (Paradigm's Solidus, Verity) replaces the question rather than answering it for solc: \
+         it would be a different compiler, so the obligation would become a proof about that \
+         one.",
     ));
     // P1b: when the project's own build was read, every way this compilation
     // differs from it is a reason the deployed bytecode is not this artifact,
@@ -272,13 +323,18 @@ pub fn ledger(
     if let Some(d) = drift {
         deployed_raised.extend(d.lines());
     }
-    out.push(ob(
-        "compilation:optimised-bytecode",
-        "evm-bytecode",
-        "The deployed bytecode behaves as the unoptimized Yul does. Not attempted: the \
-         optimizer is off and the analysed artifact is not what would be deployed.",
-        None,
-        deployed_raised,
+    out.push(on_solc(
+        ob(
+            "compilation:optimised-bytecode",
+            "evm-bytecode",
+            "The deployed bytecode behaves as the unoptimized Yul does. Not attempted: the \
+             optimizer is off and the analysed artifact is not what would be deployed.",
+            None,
+            deployed_raised,
+        ),
+        "a proof that solc's Yul-to-bytecode compilation and its optimizer preserve behaviour. \
+         None exists for solc. Solidus proves exactly this for its own backend, so compiling \
+         with it would move this obligation to that proof, not discharge it here.",
     ));
 
     // A layer that is not one of `LAYERS` can neither block nor promote, so a

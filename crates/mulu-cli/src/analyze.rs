@@ -264,8 +264,21 @@ fn print_obligations(l: &crate::obligations::Ledger) {
     println!("\ncorrespondence");
     println!("  findings are reported at: {}", l.scope);
     println!("  {} obligation(s), {} open", l.obligations.len(), open.len());
-    for o in &open {
-        println!("    {:<40} reaches {}", o.id, o.reaches);
+    // Two kinds of open, and printing them as one list makes an assumption on
+    // a compiler nobody has verified look like an item on a to-do list.
+    let ours: Vec<_> = open.iter().filter(|o| o.ours()).collect();
+    let theirs: Vec<_> = open.iter().filter(|o| !o.ours()).collect();
+    if !ours.is_empty() {
+        println!("  {} to prove here:", ours.len());
+        for o in &ours {
+            println!("    {:<40} reaches {}", o.id, o.reaches);
+        }
+    }
+    if !theirs.is_empty() {
+        println!("  {} assumption(s) on a compiler this project did not write:", theirs.len());
+        for o in &theirs {
+            println!("    {:<40} reaches {}", o.id, o.reaches);
+        }
     }
     if open.is_empty() {
         println!("    none");

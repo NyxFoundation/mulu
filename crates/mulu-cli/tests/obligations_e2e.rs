@@ -384,3 +384,45 @@ fn verify_notes_an_analysis_that_did_not_run_whatever_it_is_called() {
     assert!(text.contains("(error)"), "{text}");
     let _ = std::fs::remove_dir_all(&out);
 }
+
+#[test]
+fn an_assumption_on_solc_is_not_an_item_on_our_list() {
+    if !ready() {
+        return;
+    }
+    // Six of the eight are statements about mulu's own abstraction and are
+    // ours to prove. Two are correctness properties of a compiler nobody has
+    // proved correct. Printing them as one list of open obligations makes the
+    // second look like work that is merely pending.
+    let out = analysed("bearers");
+    let ledger = json(&out.join("obligations.json"));
+    let obs = ledger["obligations"].as_array().unwrap();
+
+    let theirs: Vec<&str> = obs
+        .iter()
+        .filter(|o| o["bearer"] == "solc")
+        .map(|o| o["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        theirs,
+        vec!["compilation:yul-corresponds-to-source", "compilation:optimised-bytecode"]
+    );
+    // and each says what would discharge it, which is not "more work here"
+    for o in obs.iter().filter(|o| o["bearer"] == "solc") {
+        let need = o["would_need"].as_str().unwrap();
+        assert!(need.contains("None exists"), "{need}");
+    }
+    // the root names the artifact that exists, without claiming it is in use
+    let root = obs.iter().find(|o| o["id"] == "semantics:yul-not-formalised").unwrap();
+    assert_eq!(root["bearer"], "mulu");
+    assert!(root["would_need"].as_str().unwrap().contains("EVMYulLean"));
+    assert!(root["discharged_by"].is_null(), "naming it is not using it");
+
+    // every claim still sits at the model, because everything is still open
+    let report = json(&out.join("report.json"));
+    for d in report["diagnostics"].as_array().unwrap() {
+        assert_eq!(d["scope"], "abstract-model");
+    }
+    assert_eq!(mulu().args(["verify", out.to_str().unwrap()]).status().unwrap().code(), Some(0));
+    let _ = std::fs::remove_dir_all(&out);
+}
