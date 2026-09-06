@@ -58,6 +58,7 @@ pub fn concretise(path: &Value, report: &AbstractionReport) -> Result<Vec<Call>,
             .iter()
             .find(|e| e.model_name == name)
             .ok_or_else(|| format!("no entrypoint is modelled as {name:?}"))?;
+        check_encodable(e)?;
         let argument = match region {
             None => None,
             Some(r) => {
@@ -75,6 +76,22 @@ pub fn concretise(path: &Value, report: &AbstractionReport) -> Result<Vec<Call>,
         return Err("the path contains no call, so there is nothing to replay".into());
     }
     Ok(calls)
+}
+
+/// Refuse an entrypoint whose argument is not one ABI word. The abstraction
+/// already restricts the types it models, but the encoder here would pad any
+/// value into a word regardless, and wrong calldata makes the run say nothing
+/// in either direction.
+fn check_encodable(e: &mulu_abstraction::model::EntrypointInfo) -> Result<(), String> {
+    match &e.param_type {
+        None => Ok(()),
+        Some(t) if mulu_replay::is_static_word(t) => Ok(()),
+        Some(t) => Err(format!(
+            "{}: an argument of type {t} is not one ABI word, and this encoder would pad it \
+             into one",
+            e.signature
+        )),
+    }
 }
 
 fn region_set(report: &AbstractionReport, name: &str) -> Option<IntervalSet> {
@@ -187,6 +204,11 @@ fn evaluate_spec(
     let mut unevaluable: Vec<String> = Vec::new();
 
     for p in props {
+        // Only one timing exists today, but matching it means a new one is a
+        // compile error rather than a property checked at the wrong moment.
+        match p.when {
+            mulu_abstraction::spec::When::SuccessfulTransactionEnd => {}
+        }
         match &p.var {
             None => {
                 // A constant property. `false` forbids every successful end.
@@ -206,6 +228,7 @@ fn evaluate_spec(
                 };
                 let mut violated = false;
                 let mut read_any = false;
+                let mut unreadable = false;
                 for c in r.calls.iter().filter(|c| c.success) {
                     let Some(read) = c.storage.get(&v.slot) else { continue };
                     read_any = true;
@@ -216,13 +239,16 @@ fn evaluate_spec(
                             }
                         }
                         Err(e) => {
-                            unevaluable.push(format!("{}: slot {} read back as {read:?}: {e}", p.id, v.slot));
-                            read_any = false;
+                            unevaluable
+                                .push(format!("{}: slot {} read back as {read:?}: {e}", p.id, v.slot));
+                            unreadable = true;
                             break;
                         }
                     }
                 }
-                if violated {
+                if unreadable {
+                    // already reported; do not report the same property twice
+                } else if violated {
                     broken.push(p.id.clone());
                 } else if !read_any && r.calls.iter().any(|c| c.success) {
                     unevaluable.push(format!(
@@ -281,6 +307,7 @@ pub fn concretise_rejected_call(
         .iter()
         .find(|e| e.model_name == name)
         .ok_or_else(|| format!("no entrypoint is modelled as {name:?}"))?;
+    check_encodable(e)?;
     let argument = match region {
         None => None,
         Some(r) => {
@@ -311,7 +338,7 @@ pub fn run_rejection(creation_hex: Option<&str>, calls: Vec<Call>) -> Reproducti
     };
     match replay(&bytes, &calls, &[]) {
         Ok(r) => {
-            let rejected = r.calls.iter().all(|c| !c.success);
+            let rejected = !r.calls.is_empty() && r.calls.iter().all(|c| !c.success);
             if rejected {
                 let why = r.calls[0].revert_reason.clone().unwrap_or_else(|| "reverted".into());
                 Reproduction {
@@ -343,7 +370,7 @@ mod tests {
     use mulu_abstraction::interval::U256;
     use mulu_abstraction::model::{EntrypointInfo, RegionInfo};
 
-    fn report() -> AbstractionReport {
+    pub(super) fn report() -> AbstractionReport {
         AbstractionReport {
             environment_profile: "p1a-abi-single-v1",
             entrypoints: vec![
@@ -544,5 +571,91 @@ mod spec_tests {
         assert_eq!(evaluate_spec(&run(&[(true, "0")]), &p, &layout()).broken, vec!["never"]);
         // but a run where nothing succeeds breaks nothing
         assert!(evaluate_spec(&run(&[(false, "0")]), &p, &layout()).broken.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use mulu_abstraction::model::EntrypointInfo;
+
+    fn entry(sig: &str, ty: Option<&str>) -> EntrypointInfo {
+        EntrypointInfo {
+            model_name: "f".into(),
+            signature: sig.into(),
+            selector: "0x00000000".into(),
+            param_type: ty.map(|s| s.to_string()),
+        }
+    }
+
+    /// The encoder pads any value into one word. An argument that is not one
+    /// word would get calldata that means something else, and the run would
+    /// then say nothing in either direction.
+    #[test]
+    fn an_argument_that_is_not_one_abi_word_is_refused() {
+        assert!(check_encodable(&entry("f(uint256)", Some("uint256"))).is_ok());
+        assert!(check_encodable(&entry("f(uint8)", Some("uint8"))).is_ok());
+        assert!(check_encodable(&entry("f(address)", Some("address"))).is_ok());
+        assert!(check_encodable(&entry("f(bool)", Some("bool"))).is_ok());
+        assert!(check_encodable(&entry("f()", None)).is_ok());
+        for t in ["string", "bytes", "uint256[]", "(uint8,bool)", "int256"] {
+            let e = check_encodable(&entry("f(x)", Some(t))).unwrap_err();
+            assert!(e.contains("not one ABI word"), "{e}");
+        }
+    }
+
+    #[test]
+    fn concretising_refuses_before_encoding_a_type_it_cannot() {
+        let mut r = super::tests::report();
+        r.entrypoints[0].param_type = Some("bytes".into());
+        let path = serde_json::json!([{"from": "a", "event": "call_forceSet#X2", "to": "b"}]);
+        assert!(concretise(&path, &r).is_err());
+        assert!(concretise_rejected_call("forceSet#0_X2_S", &r).is_err());
+    }
+
+    /// `all()` is vacuously true on an empty sequence, so a run with no calls
+    /// took the "rejected" branch and then indexed into nothing.
+    #[test]
+    fn a_run_with_no_calls_does_not_claim_a_rejection() {
+        // no creation code, so the replay never runs: the point is that this
+        // returns rather than panicking
+        let rep = run_rejection(None, vec![]);
+        assert_eq!(rep.status, "unsupported");
+        assert!(rep.run.is_none());
+    }
+
+    #[test]
+    fn a_property_whose_value_will_not_parse_is_reported_once() {
+        use mulu_abstraction::spec::Spec;
+        use mulu_replay::{CallOutcome, Replay};
+        use std::collections::BTreeMap;
+        let layout = serde_json::json!({
+            "storage": [{"label": "limit", "offset": 0, "slot": "0", "type": "t_uint256"}],
+            "types": {"t_uint256": {"label": "uint256", "numberOfBytes": "32", "encoding": "inplace"}}
+        });
+        let props = Spec::parse(
+            r#"{"schema_version":1,"properties":[{"id":"b","contract":"C",
+            "when":"successful-transaction-end",
+            "assert":{"op":"ule","left":{"storage":"limit"},"right":{"uint256":"1000"}}}]}"#,
+        )
+        .unwrap()
+        .compile("C", &layout)
+        .unwrap();
+        let r = Replay {
+            address: "0x00".into(),
+            evm: "test".into(),
+            storage: BTreeMap::new(),
+            calls: vec![CallOutcome {
+                signature: "f()".into(),
+                argument: None,
+                success: true,
+                revert_reason: None,
+                gas_used: 1,
+                storage: BTreeMap::from([("0".to_string(), "not a number".to_string())]),
+            }],
+        };
+        let o = evaluate_spec(&r, &props, &layout);
+        assert!(o.broken.is_empty());
+        assert_eq!(o.unevaluable.len(), 1, "reported once, not twice: {:?}", o.unevaluable);
     }
 }

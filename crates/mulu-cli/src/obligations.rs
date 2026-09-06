@@ -12,9 +12,12 @@
 //! of solc's Yul exists to discharge them against. So nothing is promoted past
 //! `abstract-model`, and the reason is enumerated rather than described.
 //!
-//! The rule is executable: `promoted_scope` decides a finding's scope from the
-//! ledger, and `verify` recomputes it, so a scope cannot be raised by editing
-//! a report.
+//! The rule is executable. `promoted_scope` decides a finding's scope from the
+//! ledger; `verify` recomputes what a finding rests on from its own kind,
+//! rather than reading the list off the report, refuses a ledger claiming a
+//! discharge it cannot check, and refuses a report whose ledger is missing.
+//! What it does not do is verify a discharge, because nothing here can: an
+//! obligation is discharged by a proof, and none exists.
 
 use mulu_abstraction::model::AbstractionReport;
 use mulu_yul::{CheckOrigin, ProgramIr};
@@ -48,13 +51,57 @@ impl Obligation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ledger {
+    /// `solidity` when the model was built from a contract, `model-only` when
+    /// one was handed in directly. They rest on different things.
+    #[serde(default = "solidity_kind")]
+    pub kind: String,
     pub obligations: Vec<Obligation>,
     /// The layer every finding is reported at, given what is open.
     pub scope: String,
     pub note: String,
 }
 
+fn solidity_kind() -> String {
+    "solidity".into()
+}
+
+/// The obligation a model handed in directly rests on: nothing above it is
+/// even defined, because there is no artifact for it to correspond to.
+pub const MODEL_ONLY: &str = "correspondence:no-artifact";
+
 impl Ledger {
+    /// A model given directly to the analyser. Its findings are about that
+    /// model and there is no program they could be about, so the layers above
+    /// are not merely undischarged, they are undefined.
+    pub fn model_only() -> Ledger {
+        let o = ob(
+            MODEL_ONLY,
+            "yul-semantics",
+            "The analysis was handed a finite model, not a contract. Nothing says what this \
+             model is a model of, so no claim about a program can be built on it. Discharging \
+             this means supplying the artifact and its correspondence, which is what analysing \
+             a contract with `mulu analyze` produces; this ledger would then be that one.",
+            None,
+            vec!["the model was given directly".into()],
+        );
+        Ledger {
+            kind: "model-only".into(),
+            obligations: vec![o],
+            scope: "abstract-model".into(),
+            note: "A model given directly stands for nothing but itself.".into(),
+        }
+    }
+
+    /// What a finding of this kind rests on, in this ledger. An unrecognised
+    /// ledger kind is treated as the stricter of the two rather than waved
+    /// through as an ordinary analysis.
+    pub fn depends_on(&self, kind: &str, check_id: Option<&str>) -> Vec<String> {
+        match self.kind.as_str() {
+            "solidity" => depends_on(kind, check_id),
+            _ => vec![MODEL_ONLY.to_string()],
+        }
+    }
+
     pub fn open(&self) -> Vec<&Obligation> {
         self.obligations.iter().filter(|o| o.open()).collect()
     }
@@ -216,7 +263,21 @@ pub fn ledger(ir: &ProgramIr, report: &AbstractionReport) -> Ledger {
         vec!["the analysis reads unoptimized Yul".into()],
     ));
 
+    // A layer that is not one of `LAYERS` can neither block nor promote, so a
+    // typo here would drop an obligation without a word.
+    debug_assert!(
+        out.iter().all(|o| LAYERS.contains(&o.reaches.as_str())),
+        "every obligation must name a layer of docs/04 §7"
+    );
+    let unknown: Vec<&str> = out
+        .iter()
+        .map(|o| o.reaches.as_str())
+        .filter(|r| !LAYERS.contains(r))
+        .collect();
+    assert!(unknown.is_empty(), "obligations name layers that do not exist: {unknown:?}");
+
     let scope = Ledger {
+        kind: solidity_kind(),
         obligations: out.clone(),
         scope: String::new(),
         note: String::new(),
@@ -224,6 +285,7 @@ pub fn ledger(ir: &ProgramIr, report: &AbstractionReport) -> Ledger {
     .promoted_scope(&[])
     .to_string();
     Ledger {
+        kind: solidity_kind(),
         obligations: out,
         scope,
         note: "A finding is reported at the deepest layer whose obligations are all \
@@ -237,7 +299,21 @@ mod tests {
     use super::*;
 
     fn led(obs: Vec<Obligation>) -> Ledger {
-        Ledger { obligations: obs, scope: "abstract-model".into(), note: String::new() }
+        Ledger {
+            kind: "solidity".into(),
+            obligations: obs,
+            scope: "abstract-model".into(),
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_model_given_directly_rests_on_one_thing_and_reaches_nothing() {
+        let l = Ledger::model_only();
+        assert_eq!(l.promoted_scope(&[]), "abstract-model");
+        assert_eq!(l.depends_on("redundant-check", Some("A")), vec![MODEL_ONLY.to_string()]);
+        assert_eq!(l.depends_on("envelope", None), vec![MODEL_ONLY.to_string()]);
+        assert!(l.obligations.iter().all(|o| o.open()));
     }
 
     fn discharged(mut o: Obligation) -> Obligation {

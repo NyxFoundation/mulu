@@ -23,6 +23,12 @@ use thiserror::Error;
 /// transaction cap, which a larger value trips before the code even runs.
 const GAS_LIMIT: u64 = 10_000_000;
 
+/// The EVM a record was produced on. An upgrade can change execution, so the
+/// record names the version rather than this crate's own, which says nothing
+/// about the semantics. `revm_version_matches_the_dependency` keeps the two
+/// in step.
+pub const REVM_VERSION: &str = "43.0.0";
+
 #[derive(Debug, Error)]
 pub enum ReplayError {
     #[error("deploying the contract failed: {0}")]
@@ -60,6 +66,25 @@ fn parse_u256(text: &str) -> Result<U256, ReplayError> {
         U256::from_str_radix(t, 10)
     };
     r.map_err(|e| ReplayError::Encoding(format!("{text:?} is not a uint256: {e}")))
+}
+
+/// Is this type encoded as one *right*-aligned word, the way this encoder
+/// writes it? `uintN`, `address` and `bool` are.
+///
+/// `bytesN` is deliberately excluded even though it also occupies one word:
+/// it is left-aligned, so anything narrower than 32 bytes would be encoded at
+/// the wrong end, and the abstraction does not model it either. Rejecting the
+/// whole family is safer than admitting the one width that happens to agree.
+pub fn is_static_word(ty: &str) -> bool {
+    let t = ty.trim();
+    if t == "bool" || t == "address" || t == "address payable" {
+        return true;
+    }
+    match t.strip_prefix("uint") {
+        Some("") => true,
+        Some(bits) => bits.parse::<u32>().is_ok_and(|b| b > 0 && b <= 256 && b % 8 == 0),
+        None => false,
+    }
 }
 
 impl Call {
@@ -212,7 +237,7 @@ pub fn replay(creation: &[u8], calls: &[Call], slots: &[U256]) -> Result<Replay,
         address: format!("0x{}", hex_of(address.as_slice())),
         calls: outcomes,
         storage,
-        evm: format!("revm {}", env!("CARGO_PKG_VERSION")),
+        evm: format!("revm {REVM_VERSION}"),
     })
 }
 
@@ -264,5 +289,32 @@ mod tests {
     #[test]
     fn empty_creation_code_is_refused() {
         assert!(matches!(replay(&[], &[], &[]), Err(ReplayError::NoCode)));
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn revm_version_matches_the_dependency() {
+        // The record names the EVM it ran on, so this must not drift.
+        let manifest = include_str!("../Cargo.toml");
+        let pinned = manifest
+            .lines()
+            .find_map(|l| l.strip_prefix("revm = \"="))
+            .and_then(|l| l.split('"').next())
+            .expect("revm must be pinned to an exact version");
+        assert_eq!(pinned, REVM_VERSION, "REVM_VERSION and Cargo.toml disagree");
+    }
+
+    #[test]
+    fn only_single_word_types_are_encodable() {
+        for t in ["uint256", "uint8", "uint", "address", "address payable", "bool"] {
+            assert!(is_static_word(t), "{t}");
+        }
+        for t in ["string", "bytes", "bytes32", "uint256[]", "(uint8,bool)", "int256", "uint7"] {
+            assert!(!is_static_word(t), "{t} is not one word of ABI encoding");
+        }
     }
 }

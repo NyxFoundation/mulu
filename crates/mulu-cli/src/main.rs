@@ -373,15 +373,16 @@ pub fn analyze_model_at(
     // --- correspondence (P1-04): a finding is reported at the deepest layer
     //     whose obligations are discharged. None is, so nothing moves past
     //     the model, and the ledger says exactly what is missing.
-    if let Some(l) = ledger {
-        for d in &mut ctx.diags {
-            let deps = obligations::depends_on(d.kind, d.check_id.as_deref());
-            let refs: Vec<&str> = deps.iter().map(|s| s.as_str()).collect();
-            d.scope = l.promoted_scope(&refs);
-            d.obligations = deps;
-        }
-        fs::write(out.join("obligations.json"), serde_json::to_string_pretty(l)?)?;
+    // A model handed in directly still gets a ledger: it says there is nothing
+    // for the model to correspond to, which is why its findings stop there.
+    let owned = ledger.cloned().unwrap_or_else(obligations::Ledger::model_only);
+    for d in &mut ctx.diags {
+        let deps = owned.depends_on(d.kind, d.check_id.as_deref());
+        let refs: Vec<&str> = deps.iter().map(|s| s.as_str()).collect();
+        d.scope = owned.promoted_scope(&refs);
+        d.obligations = deps;
     }
+    fs::write(out.join("obligations.json"), serde_json::to_string_pretty(&owned)?)?;
 
     // --- concrete reproduction (P1-03), beside the certificate rather than
     //     in place of it
@@ -780,6 +781,16 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
     // A reported scope must be one the ledger allows. Without this the layer
     // a claim is made at would be a note in a file, not a checked property.
     let ledger_path = dir.join("obligations.json");
+    // Both files must be here. Requiring only one lets the pair be deleted
+    // together, and the layer check would then pass by having nothing to check.
+    if !dir.join("report.json").exists() {
+        failures.push("report.json is missing, so there are no findings to check".into());
+    }
+    if !ledger_path.exists() {
+        failures.push(
+            "obligations.json is missing, so no diagnostic's layer could be checked".into(),
+        );
+    }
     if ledger_path.exists() {
         let ledger_text = fs::read_to_string(&ledger_path).context("reading obligations.json")?;
         let l: obligations::Ledger =
@@ -787,6 +798,17 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
         let report: Value = serde_json::from_str(
             &fs::read_to_string(dir.join("report.json")).context("reading report.json")?,
         )?;
+        // The ledger's kind decides what a finding rests on, so it is not the
+        // report's to choose. Bind it to how the analysis was actually run.
+        let from_solidity = !manifest["provenance"].is_null();
+        let expected_kind = if from_solidity { "solidity" } else { "model-only" };
+        if l.kind != expected_kind {
+            failures.push(format!(
+                "the ledger says it is a {:?} analysis but the manifest says {expected_kind:?}",
+                l.kind
+            ));
+        }
+
         // The tool discharges nothing, so a discharge in the ledger is a claim
         // no one checked. Refuse it rather than let it raise a scope.
         for o in l.obligations.iter().filter(|o| !o.open()) {
@@ -801,22 +823,37 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
         for d in report["diagnostics"].as_array().cloned().unwrap_or_default() {
             let id = d["id"].as_str().unwrap_or("?").to_string();
             let claimed = d["scope"].as_str().unwrap_or("");
-            let deps: Vec<String> = d["obligations"]
+            let listed: Vec<String> = d["obligations"]
                 .as_array()
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            let refs: Vec<&str> = deps.iter().map(|s| s.as_str()).collect();
+
+            // Recompute what this finding rests on from what it *is*. Reading
+            // the list off the report would let a shortened list raise the
+            // layer as soon as any obligation is discharged.
+            let kind = d["kind"].as_str().unwrap_or("");
+            let check_id = d["check_id"].as_str();
+            let mut expected = l.depends_on(kind, check_id);
+            expected.sort();
+            let mut listed_sorted = listed.clone();
+            listed_sorted.sort();
+            if listed_sorted != expected {
+                failures.push(format!(
+                    "{id} lists obligations {listed_sorted:?} but a {kind:?} finding rests on                      {expected:?}"
+                ));
+            }
+            for o in &expected {
+                if l.find(o).is_none() {
+                    failures.push(format!("{id} rests on {o}, which the ledger does not record"));
+                }
+            }
+
+            let refs: Vec<&str> = expected.iter().map(|s| s.as_str()).collect();
             let allowed = l.promoted_scope(&refs);
             if claimed != allowed {
                 failures.push(format!(
                     "{id} is reported at {claimed:?} but its obligations reach {allowed:?}"
                 ));
-            }
-            // and every obligation it names must be in the ledger
-            for o in &deps {
-                if l.find(o).is_none() {
-                    failures.push(format!("{id} names an obligation the ledger does not: {o}"));
-                }
             }
             checked += 1;
         }
