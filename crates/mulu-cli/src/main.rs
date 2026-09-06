@@ -4,6 +4,7 @@
 //! violation; 2 partial / unsupported; 3 input or execution error;
 //! 4 certificate check failed. Mixed results use the priority 4 > 3 > 2 > 1 > 0.
 
+mod analyze;
 mod build;
 mod lean;
 mod report;
@@ -32,32 +33,51 @@ struct Cli {
 }
 
 #[derive(clap::Args, Clone)]
-struct ToolArgs {
+pub struct ToolArgs {
     /// Path to the Lean project (default: auto-discover `lean/` or $MULU_LEAN_DIR)
     #[arg(long, global = true)]
-    lean_dir: Option<PathBuf>,
+    pub lean_dir: Option<PathBuf>,
     /// Path to the mulu-worker binary (default: <lean-dir>/.lake/build/bin/mulu-worker or $MULU_WORKER)
     #[arg(long, global = true)]
-    worker: Option<PathBuf>,
+    pub worker: Option<PathBuf>,
     /// Skip the kernel re-check (`lake env lean certificates/Check.lean`)
     #[arg(long, global = true)]
-    no_kernel: bool,
+    pub no_kernel: bool,
     /// Worker timeout in milliseconds
     #[arg(long, default_value = "60000", global = true)]
-    timeout_ms: u64,
+    pub timeout_ms: u64,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Analyse a Solidity project (not implemented yet: P1-02 onwards)
+    /// Analyse Solidity: compile, abstract, and check the model (P1-02)
     Analyze {
-        project: PathBuf,
+        /// Solidity source files to compile
+        #[arg(required = true)]
+        sources: Vec<PathBuf>,
+        /// Which contract to analyse; required when the build defines several
         #[arg(long)]
         contract: Option<String>,
+        /// Specification (docs/09 §3). Without one, only redundancy is analysed
         #[arg(long)]
         spec: Option<PathBuf>,
         #[arg(long)]
-        out: Option<PathBuf>,
+        out: PathBuf,
+        /// Path to solc (default: $MULU_SOLC, then PATH)
+        #[arg(long)]
+        solc: Option<PathBuf>,
+        #[arg(long, default_value = "cancun")]
+        evm_version: String,
+        /// safety-nonblocking (default) or safety
+        #[arg(long, default_value = "safety-nonblocking")]
+        objective: String,
+        /// Exit 1 also for unconfirmed candidates
+        #[arg(long)]
+        fail_on_candidate: bool,
+        #[arg(long, default_value = "100000")]
+        max_states: usize,
+        #[command(flatten)]
+        tools: ToolArgs,
     },
     /// Compile Solidity with solc and write the ProgramIR (P1-01). No analysis.
     Ir {
@@ -115,16 +135,31 @@ fn main() {
 fn run() -> Result<i32> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Analyze { project, .. } => {
-            eprintln!(
-                "unsupported: `mulu analyze` needs the abstraction stage (P1-02), which is not \n\
-                 implemented yet. project: {}\n\
-                 Available today: `mulu ir` builds the ProgramIR from Solidity, and\n\
-                 `mulu analyze-model <model.json>` analyses a finite-product model.",
-                project.display()
-            );
-            Ok(2)
-        }
+        Cmd::Analyze {
+            sources,
+            contract,
+            spec,
+            out,
+            solc,
+            evm_version,
+            objective,
+            fail_on_candidate,
+            max_states,
+            tools,
+        } => analyze::run(
+            &analyze::AnalyzeArgs {
+                sources,
+                contract,
+                spec,
+                out,
+                solc,
+                evm_version,
+                objective,
+                fail_on_candidate,
+                max_states,
+            },
+            &tools,
+        ),
         Cmd::Ir { sources, contract, out, solc, evm_version } => build::run(&build::IrArgs {
             sources,
             contract,
@@ -140,7 +175,7 @@ fn run() -> Result<i32> {
             Ok(0)
         }
         Cmd::AnalyzeModel { model, out, objective, fail_on_candidate, max_states, tools } => {
-            analyze_model(&model, &out, &objective, fail_on_candidate, max_states, &tools)
+            analyze_model_at(&model, &out, &objective, fail_on_candidate, max_states, &tools, None)
         }
         Cmd::Verify { dir, tools } => verify(&dir, &tools),
     }
@@ -195,7 +230,15 @@ fn nat_set(v: &Value) -> BTreeSet<usize> {
     v.as_array().map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect()).unwrap_or_default()
 }
 
-fn analyze_model(model: &Path, out: &Path, objective: &str, fail_on_candidate: bool, max_states: usize, tools: &ToolArgs) -> Result<i32> {
+pub fn analyze_model_at(
+    model: &Path,
+    out: &Path,
+    objective: &str,
+    fail_on_candidate: bool,
+    max_states: usize,
+    tools: &ToolArgs,
+    provenance: Option<Value>,
+) -> Result<i32> {
     if objective != "safety-nonblocking" && objective != "safety" {
         bail!("--objective must be safety-nonblocking or safety");
     }
@@ -335,6 +378,7 @@ fn analyze_model(model: &Path, out: &Path, objective: &str, fail_on_candidate: b
                   "core_model_sha256": sha256_hex(core_json.as_bytes())},
         "objective": objective,
         "semantics": {"finite-product": 1, "lean": "Mulu (lean/), kernel tactic: decide", "allowed_axioms": lean::ALLOWED_AXIOMS},
+        "provenance": provenance,
         "state_names": impl_n.state_names, "event_names": impl_n.event_names, "check_names": impl_n.check_names,
         "plant_state_names": plant_n.as_ref().map(|p| p.state_names.clone()),
         "plant_event_names": plant_n.as_ref().map(|p| p.event_names.clone()),

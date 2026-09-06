@@ -40,9 +40,11 @@ fn builds_program_ir_for_limits() {
 
     // the artifact under analysis is named, and it is not the bytecode
     assert!(ir["derived_from"].as_str().unwrap().contains("unoptimized Yul"));
-    assert_eq!(manifest["fully_supported"], true);
-    assert!(manifest["standard_json_input_sha256"].as_str().unwrap().len() == 64);
-    assert!(manifest["compiler"].as_str().unwrap().starts_with("0.8."));
+    let p = &manifest["provenance"];
+    assert_eq!(manifest["stage"], "ir");
+    assert_eq!(p["fully_supported"], true);
+    assert!(p["standard_json_input_sha256"].as_str().unwrap().len() == 64);
+    assert!(p["compiler"].as_str().unwrap().starts_with("0.8."));
 
     // the two requires, with conditions resolved to comparisons over x
     let checks = ir["checks"].as_array().unwrap();
@@ -66,16 +68,4 @@ fn builds_program_ir_for_limits() {
         assert!(out.join(f).exists(), "missing {f}");
     }
     let _ = std::fs::remove_dir_all(&out);
-}
-
-#[test]
-fn analyze_still_reports_unsupported_until_p1_02() {
-    let out = Command::new(env!("CARGO_BIN_EXE_mulu"))
-        .args(["analyze", "./nowhere"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("P1-02"), "{err}");
-    assert!(err.contains("mulu ir"), "the message must point at what does work: {err}");
 }

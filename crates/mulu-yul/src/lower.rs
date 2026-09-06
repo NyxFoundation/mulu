@@ -7,6 +7,7 @@
 
 use crate::ast::{self, Expr, FunctionDef, Stmt};
 use crate::builtins::{classify, Effects, Purity};
+use crate::fold::fold_fixpoint;
 use crate::ir::*;
 use crate::lex::SrcSpan;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +33,8 @@ pub struct Lowering<'a> {
     always_reverts: BTreeSet<String>,
     guards: BTreeMap<String, GuardHelper>,
     aliases: BTreeMap<String, (Vec<String>, Expr)>,
+    /// name -> (slot param index, value param index) for whole-slot store helpers
+    store_helpers: BTreeMap<String, (usize, usize)>,
 }
 
 fn loc(s: Option<SrcSpan>) -> Option<Location> {
@@ -123,6 +126,7 @@ impl<'a> Lowering<'a> {
             always_reverts: BTreeSet::new(),
             guards: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            store_helpers: BTreeMap::new(),
         }
     }
 
@@ -342,7 +346,108 @@ impl<'a> Lowering<'a> {
             Op::Let { targets, .. } | Op::Assign { targets, .. } => targets.clone(),
             Op::Effect { .. } => vec![],
         };
-        Instruction { op, reads, writes, effects, source: loc(src) }
+        let storage_write = value.and_then(|v| self.recognise_storage_write(v));
+        // The slot and value are resolved against the containing function's
+        // locals in `resolve_storage_writes`, once its CFG exists.
+        Instruction { op, reads, writes, effects, storage_write, source: loc(src) }
+    }
+
+    /// A direct `sstore(slot, value)`, or a call to a helper recognised as one.
+    fn recognise_storage_write(&self, e: &Expr) -> Option<crate::ir::StorageWrite> {
+        let Expr::Call { name, args, .. } = e else { return None };
+        if name == "sstore" && args.len() == 2 {
+            return Some(crate::ir::StorageWrite {
+                slot_text: args[0].render(),
+                value_text: args[1].render(),
+                slot: args[0].clone(),
+                value: args[1].clone(),
+                via: None,
+            });
+        }
+        let (si, vi) = *self.store_helpers.get(name)?;
+        let (slot, value) = (args.get(si)?.clone(), args.get(vi)?.clone());
+        Some(crate::ir::StorageWrite {
+            slot_text: slot.render(),
+            value_text: value.render(),
+            slot,
+            value,
+            via: Some(name.clone()),
+        })
+    }
+
+    /// Helpers whose body holds exactly one `sstore` and nothing else that
+    /// writes storage, where the slot and the value each reduce to one of the
+    /// helper's own parameters. The call site's arguments then determine both.
+    fn find_store_helpers(&mut self) {
+        let names: Vec<String> = self.defs.keys().cloned().collect();
+        for name in names {
+            let def = self.defs[&name];
+            let eff = self.effects.get(&name).cloned().unwrap_or_default();
+            if !eff.writes_storage || eff.external_call || !eff.unsupported.is_empty() {
+                continue;
+            }
+            // Straight-line body: gather local definitions, find the one sstore.
+            let mut env: BTreeMap<String, Expr> = BTreeMap::new();
+            let mut stores: Vec<(Expr, Expr)> = Vec::new();
+            let mut ok = true;
+            for st in &def.body.stmts {
+                match st {
+                    Stmt::Let { names, value: Some(v), .. } if names.len() == 1 => {
+                        env.insert(names[0].clone(), v.substitute(&env));
+                    }
+                    Stmt::Assign { names, value, .. } if names.len() == 1 => {
+                        let r = value.substitute(&env);
+                        env.insert(names[0].clone(), r);
+                    }
+                    Stmt::Expr { value: Expr::Call { name: c, args, .. }, .. } if c == "sstore" && args.len() == 2 => {
+                        stores.push((args[0].substitute(&env), args[1].substitute(&env)));
+                    }
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok || stores.len() != 1 {
+                continue;
+            }
+            let (slot, value) = &stores[0];
+            let reduce = |e: &Expr| -> Option<usize> {
+                let mut cur = fold_fixpoint(e);
+                for _ in 0..32 {
+                    let next = fold_fixpoint(&self.inline_aliases(&cur));
+                    if next.render() == cur.render() {
+                        break;
+                    }
+                    cur = next;
+                }
+                match cur {
+                    Expr::Ident { name, .. } => def.params.iter().position(|p| *p == name),
+                    _ => None,
+                }
+            };
+            if let (Some(si), Some(vi)) = (reduce(slot), reduce(value)) {
+                self.store_helpers.insert(name.clone(), (si, vi));
+            }
+        }
+    }
+
+    /// Replace calls to pure alias helpers by their bodies, one layer at a time.
+    fn inline_aliases(&self, e: &Expr) -> Expr {
+        match e {
+            Expr::Ident { .. } | Expr::Literal { .. } => e.clone(),
+            Expr::Call { name, args, src } => {
+                let args: Vec<Expr> = args.iter().map(|a| self.inline_aliases(a)).collect();
+                if let Some((params, body)) = self.aliases.get(name) {
+                    if params.len() == args.len() {
+                        let map: BTreeMap<String, Expr> =
+                            params.iter().cloned().zip(args.iter().cloned()).collect();
+                        return body.substitute(&map);
+                    }
+                }
+                Expr::Call { name: name.clone(), args, src: *src }
+            }
+        }
     }
 
     fn lower_stmts(&mut self, b: &mut Builder, block: &ast::Block, fname: &str) {
@@ -545,6 +650,30 @@ impl<'a> Lowering<'a> {
         }
     }
 
+    /// Rewrite each recognised storage write's slot and value against the
+    /// locals of the function it sits in, so they read as expressions over the
+    /// function's parameters rather than over solc's temporaries.
+    fn resolve_storage_writes(&self, f: &mut Function) {
+        if !f.blocks.iter().any(|b| b.instructions.iter().any(|i| i.storage_write.is_some())) {
+            return;
+        }
+        let snapshot = f.clone();
+        let dom = Self::dominators(&snapshot.blocks);
+        let defs = self.local_defs(&snapshot);
+        for b in &mut f.blocks {
+            let bid = b.id;
+            for (idx, ins) in b.instructions.iter_mut().enumerate() {
+                let Some(w) = &mut ins.storage_write else { continue };
+                let slot = self.simplify_with(&w.slot, &defs, &dom, bid, idx);
+                let value = self.simplify_with(&w.value, &defs, &dom, bid, idx);
+                w.slot_text = slot.render();
+                w.value_text = value.render();
+                w.slot = slot;
+                w.value = value;
+            }
+        }
+    }
+
     fn lower_function(&mut self, id: &str, params: &[String], returns: &[String],
                       body: &ast::Block, kind: FunctionKind, src: Option<SrcSpan>) -> Function {
         let mut b = Builder::new();
@@ -569,7 +698,7 @@ impl<'a> Lowering<'a> {
             }
             e
         });
-        Function {
+        let mut f = Function {
             id: id.to_string(),
             kind,
             solidity_name: solidity_name(id),
@@ -580,7 +709,9 @@ impl<'a> Lowering<'a> {
             blocks,
             effects,
             source: loc(src),
-        }
+        };
+        self.resolve_storage_writes(&mut f);
+        f
     }
 
     // --------------------------------------------------- expression cleanup
@@ -622,7 +753,9 @@ impl<'a> Lowering<'a> {
                 continue;
             }
             if let Some(ret) = env.get(&def.returns[0]) {
-                self.aliases.insert(name.clone(), (def.params.clone(), ret.clone()));
+                // Folding is what turns solc's mask-and-merge into the identity.
+                self.aliases
+                    .insert(name.clone(), (def.params.clone(), fold_fixpoint(ret)));
             }
         }
     }
@@ -697,11 +830,22 @@ impl<'a> Lowering<'a> {
     fn simplify(&self, e: &Expr, f: &Function, at_block: BlockId, at_index: usize) -> Expr {
         let dom = Self::dominators(&f.blocks);
         let defs = self.local_defs(f);
+        self.simplify_with(e, &defs, &dom, at_block, at_index)
+    }
+
+    fn simplify_with(
+        &self,
+        e: &Expr,
+        defs: &BTreeMap<String, (BlockId, usize, Expr)>,
+        dom: &[BTreeSet<BlockId>],
+        at_block: BlockId,
+        at_index: usize,
+    ) -> Expr {
         let mut cur = e.clone();
         // Bounded: solc's expression chains are shallow, and a bound keeps a
         // pathological input from looping.
         for _ in 0..64 {
-            let next = self.simplify_once(&cur, &defs, &dom, at_block, at_index);
+            let next = fold_fixpoint(&self.simplify_once(&cur, defs, dom, at_block, at_index));
             if next.render() == cur.render() {
                 return next;
             }
@@ -880,6 +1024,7 @@ impl<'a> Lowering<'a> {
         self.analyse_functions();
         self.find_guards();
         self.find_pure_aliases();
+        self.find_store_helpers();
 
         for (o, oname) in &objects {
             let code_id = format!("{oname}#code");

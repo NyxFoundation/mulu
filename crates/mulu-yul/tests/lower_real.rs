@@ -95,6 +95,35 @@ fn the_storage_update_is_preserved_with_its_location() {
 }
 
 #[test]
+fn whole_slot_writes_resolve_to_slot_and_parameter() {
+    let ir = ir();
+    // The abstraction needs "slot 0 receives the argument", not solc's
+    // mask-and-merge over temporaries.
+    let mut got: Vec<(String, String, String)> = ir
+        .recognised_storage_writes()
+        .into_iter()
+        .filter(|(f, _, _)| f.starts_with("fun_"))
+        .map(|(f, _, w)| (f.to_string(), w.slot_text.clone(), w.value_text.clone()))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("fun_forceSet_37".to_string(), "0x00".to_string(), "var_x_29".to_string()),
+            ("fun_setLimit_27".to_string(), "0x00".to_string(), "var_x_5".to_string()),
+        ]
+    );
+    // the value named is each function's own parameter
+    for (f, _, w) in ir.recognised_storage_writes() {
+        let Some(func) = ir.function(f) else { continue };
+        if func.kind != FunctionKind::Body {
+            continue;
+        }
+        assert!(func.parameters.contains(&w.value_text), "{} writes {}", f, w.value_text);
+    }
+}
+
+#[test]
 fn revert_and_return_paths_are_terminators() {
     let ir = ir();
     let f = ir.function("external_fun_setLimit_27").unwrap();

@@ -1,11 +1,13 @@
 [package]
-name = "mulu-yul"
-description = "mulu: Yul lexer, parser, CFG and ProgramIR with check extraction"
+name = "mulu-abstraction"
+description = "mulu: predicate abstraction from ProgramIR and a specification to a finite model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mulu-yul = { path = "../mulu-yul" }
+mulu-model = { path = "../mulu-model" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

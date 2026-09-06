@@ -8,6 +8,7 @@
 
 pub mod ast;
 pub mod builtins;
+pub mod fold;
 pub mod ir;
 pub mod lex;
 pub mod lower;

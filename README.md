@@ -21,18 +21,20 @@ certificate whose meaning is a Lean theorem, re-checked by the Lean kernel.
 
 ## Status (2026-09-06)
 
-Two stages exist. They do not meet yet.
+The chain runs end to end for the P1a subset: Solidity in, certified findings out.
 
 | stage | command | what it does |
 |---|---|---|
+| **P1-01** front end | `ir` | Solidity to ProgramIR through solc's unoptimized Yul |
+| **P1-02** abstraction | `analyze` | ProgramIR and a spec to a finite model, then analysed |
 | **P0** analysis core | `analyze-model`, `verify` | finite models in, certified findings out |
-| **P1-01** front end | `ir` | Solidity in, ProgramIR out. No analysis |
 
-* `mulu analyze`, which would run one into the other, needs the predicate
-  abstraction of P1-02 and returns `unsupported` (exit 2).
-* Every claim is about the model or the IR (`scope: abstract-model`). Nothing
+* The P1a subset is one uint256 argument per entrypoint, pure comparison
+  guards, whole-slot uint256 storage, no loops, no external calls. Anything
+  outside it is reported and makes the unit incomplete (exit 2), never dropped.
+* Every claim is about the generated model (`scope: abstract-model`). Nothing
   here proves anything about a source program until the correspondence layers
-  of docs 09/11 exist.
+  of docs 09/11 exist. That is P1-04.
 
 ## Build
 
@@ -48,15 +50,51 @@ make test                           # cargo test + kernel-checked fixture theore
 ## Use
 
 ```sh
-# P1-01: Solidity -> ProgramIR
+# P1-02: the whole chain, Solidity to certified findings
+mulu analyze examples/limits/Limits.sol --contract Limits \
+     --spec examples/limits/limits.spec.json --out analysis-limits
+mulu verify analysis-limits
+
+# P1-01 alone: stop at the ProgramIR
 mulu ir examples/limits/Limits.sol --contract Limits --out ir-limits
 
-# P0: finite model -> certified findings
+# P0 alone: a hand-written finite model
 mulu validate examples/limits/model.json
-mulu analyze-model examples/limits/model.json --out analysis-limits
-mulu verify analysis-limits
-mulu analyze-model examples/fixtures/blocking-cycle.json --out a --objective safety
+mulu analyze-model examples/limits/model.json --out a
+mulu analyze-model examples/fixtures/blocking-cycle.json --out b --objective safety
 ```
+
+### `mulu analyze`
+
+```
+abstraction (p1a-abi-single-v1)
+  entrypoints modelled: setLimit(uint256), forceSet(uint256), limit()
+  specification limit-bound: limit <= 1000
+  argument regions
+    X0   {[0, 100]}
+    X1   {[101, 1000]}
+    X2   {[1001, 1157920892373161954235709850086879078532699846656405640394575840079131296399
+35]}
+  discharged: argument: A and B and not spec:limit-bound is unsatisfiable
+  model: 36 states, 47 transitions
+
+WARNING  spec-violation   idle_LIM0 --call_forceSet_X2--> ... --next_tx--> bad
+                          claim: bad-reachable  status: proven
+INFO     check-A          can fail from setLimit#0_X1_LIM0, setLimit#0_X2_LIM0
+HINT     check-B          never fails on any reachable model state
+                          claim: never-fails  status: proven  depends on: A
+```
+
+The argument domain is split by the guard conditions **and** by the
+specification pulled back through `limit = x`, which is what makes every guard
+decidable on every region. The split is done by interval arithmetic over
+uint256, so it is exact: no solver, and therefore no `trusted-solver`
+assumption. Combinations that turn out to be unsatisfiable, such as `x <= 100`
+together with `x > 1000`, are reported as discharged rather than dropped in
+silence.
+
+Without `--spec` there is no bad state and only redundancy is analysed
+(docs/09 §3).
 
 `analyze-model` writes:
 
@@ -141,8 +179,10 @@ tactic makes it fail (exit 4).
 | `Analysis.checkRedundancy_sound` | no reachable state enables the fail event of the check |
 | `Analysis.checkCertificate_sound` | `checkCertificate p c = true → Claim p c` for all of the above |
 
-The IR stage proves nothing. It records, per check, the syntactic criterion it
-matched and the semantic gap that leaves open, under `assumptions`.
+The IR and abstraction stages prove nothing. They record, per check, the
+syntactic criterion matched and the semantic gap it leaves open. The
+abstraction additionally records its environment profile, what it discharged by
+interval arithmetic, and anything it refused to model, in `abstraction.json`.
 
 Trusted base: the Lean kernel, `Mulu.Core`'s definitions, the normalisation
 `FiniteProduct → CoreModel` in `crates/mulu-model` (recorded in the manifest),
@@ -163,7 +203,8 @@ mulu/
 ├── crates/
 │   ├── mulu-model/     schema v1, validator, normalisation, hashes, reference algorithms
 │   ├── mulu-solc/      solc Standard JSON driver, BuildBundle, source hashes
-│   ├── mulu-yul/       Yul lexer/parser, CFG, effects, ProgramIR, check extraction
+│   ├── mulu-yul/       Yul lexer/parser, CFG, effects, folding, ProgramIR, checks
+│   ├── mulu-abstraction/ uint256 intervals, guard predicates, spec DSL, model builder
 │   └── mulu-cli/       `mulu` — worker driver, Check.lean generator, report, exit codes
 ├── lean/
 │   ├── Mulu/Core/      FinitePlant, Reachability (lfp), Envelope (gfp), Correctness
@@ -186,12 +227,14 @@ live in the NyxFoundation `projects/mulu/docs` directory.
 
 ## Roadmap
 
-P1-01 (solc adapter and ProgramIR) is done. Next is **P1-02**: turn the pure
-checks and storage writes of the IR into predicates and a finite model, so
-`mulu analyze` can run the two halves together and reproduce by construction
-what `examples/limits/model.json` says by hand. Then P1-03 replays
-counterexamples on a local EVM and P1-04 proves the correspondence that lets a
-finding move from `abstract-model` to `yul-semantics`.
+P1-01 and P1-02 are done: `mulu analyze` builds by construction what
+`examples/limits/model.json` says by hand, and reaches the same two findings.
+
+Next is **P1-03**: solve a counterexample region for concrete arguments and
+replay it on a local EVM, so `forceSet(1001)` is reproduced rather than only
+derived. Then **P1-04**, the correspondence proofs that let a finding move from
+`abstract-model` to `yul-semantics`, and **P1-05**, the reference control plant
+that turns the envelope into overrestriction candidates on generated models.
 P2: reentrancy, after checking the DFA-plant theory even applies.
 P3: annotations, LSP, Yul hints. P4: benchmarks.
 

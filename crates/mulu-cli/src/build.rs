@@ -20,42 +20,60 @@ pub struct IrArgs {
     pub evm_version: String,
 }
 
-pub fn run(args: &IrArgs) -> Result<i32> {
-    let solc = Solc::discover(args.solc.clone())?;
-    let root = args
-        .sources
+/// Compile and lower, shared by `mulu ir` and `mulu analyze`.
+pub fn compile_and_lower(
+    sources: &[PathBuf],
+    contract: Option<&str>,
+    solc_path: Option<PathBuf>,
+    evm_version: &str,
+) -> Result<(mulu_solc::BuildBundle, String, ProgramIr)> {
+    let solc = Solc::discover(solc_path)?;
+    let root = sources
         .first()
         .and_then(|p| p.parent())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let opts = CompileOptions { evm_version: args.evm_version.clone(), ..Default::default() };
+    let opts = CompileOptions { evm_version: evm_version.to_string(), ..Default::default() };
 
     let bundle = solc
-        .compile_files(&root, &args.sources, &opts)
+        .compile_files(&root, sources, &opts)
         .with_context(|| format!("compiling with {}", solc.path().display()))?;
     for w in &bundle.warnings {
         eprintln!("solc warning: {}", w.lines().next().unwrap_or(w));
     }
-    let contract = mulu_solc::driver_select(&bundle, args.contract.as_deref())?;
+    let selected = mulu_solc::driver_select(&bundle, contract)?.name.clone();
+    let c = bundle.contract(&selected).expect("just selected");
 
     let ir = mulu_yul::lower_contract(
-        &contract.name,
-        &contract.source_path,
+        &c.name,
+        &c.source_path,
         &bundle.compiler,
-        &contract.ir,
-        &contract.abi,
-        contract.storage_layout.clone(),
+        &c.ir,
+        &c.abi,
+        c.storage_layout.clone(),
     )
-    .with_context(|| format!("lowering the Yul of {}", contract.name))?;
+    .with_context(|| format!("lowering the Yul of {}", c.name))?;
+    Ok((bundle, selected, ir))
+}
+
+pub fn run(args: &IrArgs) -> Result<i32> {
+    let (bundle, name, ir) = compile_and_lower(
+        &args.sources,
+        args.contract.as_deref(),
+        args.solc.clone(),
+        &args.evm_version,
+    )?;
+    let contract = bundle.contract(&name).expect("selected contract");
 
     write_artifacts(&args.out, &bundle, contract, &ir)?;
+    write_ir_manifest(&args.out, &bundle, contract, &ir)?;
     print_summary(&bundle, &ir, &args.out);
 
     // docs/09 §4: anything unsupported means the unit is not complete.
     Ok(if ir.fully_supported() { 0 } else { 2 })
 }
 
-fn write_artifacts(
+pub fn write_artifacts(
     out: &Path,
     bundle: &mulu_solc::BuildBundle,
     contract: &mulu_solc::ContractArtifact,
@@ -74,11 +92,17 @@ fn write_artifacts(
         serde_json::to_string_pretty(&contract.storage_layout)?,
     )?;
     fs::write(out.join("program.json"), serde_json::to_string_pretty(ir)?)?;
+    Ok(())
+}
 
-    let manifest = json!({
-        "schema_version": 1,
-        "tool": crate::TOOL,
-        "stage": "ir",
+/// What `mulu ir` records; `mulu analyze` folds the same facts into its own
+/// manifest instead.
+pub fn provenance(
+    bundle: &mulu_solc::BuildBundle,
+    contract: &mulu_solc::ContractArtifact,
+    ir: &ProgramIr,
+) -> serde_json::Value {
+    json!({
         "compiler": bundle.compiler,
         "settings": bundle.settings,
         "standard_json_input_sha256": bundle.input_sha256,
@@ -93,12 +117,26 @@ fn write_artifacts(
         "entrypoints": ir.entrypoints,
         "unsupported": ir.unsupported,
         "fully_supported": ir.fully_supported(),
+    })
+}
+
+fn write_ir_manifest(
+    out: &Path,
+    bundle: &mulu_solc::BuildBundle,
+    contract: &mulu_solc::ContractArtifact,
+    ir: &ProgramIr,
+) -> Result<()> {
+    let manifest = json!({
+        "schema_version": 1,
+        "tool": crate::TOOL,
+        "stage": "ir",
+        "provenance": provenance(bundle, contract, ir),
     });
     fs::write(out.join("manifest.json"), serde_json::to_string_pretty(&manifest)?)?;
     Ok(())
 }
 
-fn print_summary(bundle: &mulu_solc::BuildBundle, ir: &ProgramIr, out: &Path) {
+pub fn print_summary(bundle: &mulu_solc::BuildBundle, ir: &ProgramIr, out: &Path) {
     println!("contract {} from {}", ir.contract, ir.source_path);
     println!("compiler {}", bundle.compiler);
     println!("artifact {}\n", ir.derived_from);

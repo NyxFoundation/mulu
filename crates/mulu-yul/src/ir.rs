@@ -33,6 +33,22 @@ pub enum Op {
     Effect { call: Expr },
 }
 
+/// A recognised whole-slot storage write, with the expressions that give the
+/// slot and the value once alias helpers and single-assignment locals have
+/// been folded in. Recorded when the callee's body holds exactly one `sstore`
+/// whose slot and value both reduce to parameters of that callee, so the call
+/// site's arguments determine both.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageWrite {
+    pub slot: Expr,
+    pub value: Expr,
+    pub slot_text: String,
+    pub value_text: String,
+    /// The helper it was recognised through; `None` for a literal `sstore`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Instruction {
     pub op: Op,
@@ -40,6 +56,9 @@ pub struct Instruction {
     pub writes: Vec<String>,
     /// Transitive effects of everything this instruction calls.
     pub effects: Effects,
+    /// Set when this instruction writes a whole storage slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_write: Option<StorageWrite>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Location>,
 }
@@ -213,6 +232,20 @@ impl ProgramIr {
     pub fn pure_checks(&self) -> Vec<&Check> {
         self.checks.iter().filter(|c| c.purity == Purity::Pure).collect()
     }
+    /// Recognised whole-slot writes, with the function they sit in.
+    pub fn recognised_storage_writes(&self) -> Vec<(&str, &Instruction, &StorageWrite)> {
+        self.functions
+            .iter()
+            .flat_map(|f| {
+                f.blocks.iter().flat_map(move |b| {
+                    b.instructions.iter().filter_map(move |i| {
+                        i.storage_write.as_ref().map(|w| (f.id.as_str(), i, w))
+                    })
+                })
+            })
+            .collect()
+    }
+
     /// Instructions that write storage, with the function they sit in.
     pub fn storage_writes(&self) -> Vec<(&str, &Instruction)> {
         self.functions
