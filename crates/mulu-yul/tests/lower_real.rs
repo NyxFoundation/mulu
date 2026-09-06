@@ -41,6 +41,15 @@ fn access_fixtures_match_their_example_contracts() {
 }
 
 #[test]
+fn typed_fixture_matches_its_example_contract() {
+    assert_eq!(
+        include_str!("fixtures/typed-Meter.sol"),
+        include_str!("../../../examples/typed/Meter.sol"),
+        "examples/typed/Meter.sol changed; rerun tools/regen-yul-fixtures.sh"
+    );
+}
+
+#[test]
 fn fixture_matches_the_example_contract() {
     // The committed Yul was generated from this exact source. If the example
     // changes, every @src offset shifts, so the pair must be regenerated

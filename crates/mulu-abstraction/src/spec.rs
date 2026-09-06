@@ -75,28 +75,44 @@ pub enum SpecError {
     Json(#[from] serde_json::Error),
 }
 
-/// A storage variable as solc describes it.
+/// A storage variable as solc describes it, with its type resolved through
+/// the layout's `types` table.
 #[derive(Debug, Clone)]
 pub struct StorageVar {
     pub label: String,
     pub slot: String,
     pub offset: u64,
     pub type_id: String,
+    /// The Solidity type name, e.g. `uint8`.
+    pub type_label: Option<String>,
+    /// How many of the slot's 32 bytes it occupies.
+    pub bytes: Option<u64>,
+}
+
+impl StorageVar {
+    /// True when the variable is the only thing in its slot and fills it.
+    pub fn whole_slot(&self) -> bool {
+        self.offset == 0 && self.bytes == Some(32)
+    }
 }
 
 /// Read solc's `storageLayout` output.
 pub fn storage_vars(layout: &serde_json::Value) -> Vec<StorageVar> {
+    let types = &layout["types"];
     layout["storage"]
         .as_array()
         .map(|items| {
             items
                 .iter()
                 .filter_map(|v| {
+                    let type_id = v["type"].as_str()?.to_string();
                     Some(StorageVar {
                         label: v["label"].as_str()?.to_string(),
                         slot: v["slot"].as_str()?.to_string(),
                         offset: v["offset"].as_u64().unwrap_or(0),
-                        type_id: v["type"].as_str()?.to_string(),
+                        type_label: crate::types::label_of_type_id(&type_id, types),
+                        bytes: crate::types::bytes_of_type_id(&type_id, types),
+                        type_id,
                     })
                 })
                 .collect()
@@ -124,15 +140,18 @@ fn operand_side(o: &Operand, vars: &[StorageVar]) -> Result<Side, String> {
                 .iter()
                 .find(|v| &v.label == name)
                 .ok_or_else(|| format!("no storage variable named {name:?} in this contract"))?;
-            // P1a models whole-slot uint256 only.
-            if v.type_id != "t_uint256" {
+            // The type must be one P1a can give a value domain to, and the
+            // variable must own its slot: a packed one is written by a masked
+            // merge, not by a whole-slot store.
+            let label = v.type_label.clone().unwrap_or_else(|| v.type_id.clone());
+            crate::types::domain_of(&label)
+                .map_err(|e| format!("storage variable {name:?}: {e}"))?;
+            if !v.whole_slot() {
                 return Err(format!(
-                    "storage variable {name:?} has type {}; P1a models t_uint256 only",
-                    v.type_id
+                    "storage variable {name:?} ({label}) shares slot {} at offset {}; \
+                     P1a models variables that own a whole slot",
+                    v.slot, v.offset
                 ));
-            }
-            if v.offset != 0 {
-                return Err(format!("storage variable {name:?} is packed at offset {}; P1a models whole slots only", v.offset));
             }
             Ok(Side::Var(name.clone()))
         }
@@ -253,15 +272,23 @@ impl Spec {
 mod tests {
     use super::*;
 
+    /// Shaped like real solc output, `numberOfBytes` included: without it
+    /// nothing can tell a packed variable from one that owns its slot.
     fn layout() -> serde_json::Value {
         serde_json::json!({
             "storage": [
                 {"astId": 3, "contract": "Limits.sol:Limits", "label": "limit",
                  "offset": 0, "slot": "0", "type": "t_uint256"},
                 {"astId": 5, "contract": "Limits.sol:Limits", "label": "owner",
-                 "offset": 0, "slot": "1", "type": "t_address"}
+                 "offset": 0, "slot": "1", "type": "t_address"},
+                {"astId": 7, "contract": "Limits.sol:Limits", "label": "packed",
+                 "offset": 20, "slot": "1", "type": "t_uint8"}
             ],
-            "types": {"t_uint256": {"label": "uint256"}, "t_address": {"label": "address"}}
+            "types": {
+                "t_uint256": {"label": "uint256", "numberOfBytes": "32", "encoding": "inplace"},
+                "t_address": {"label": "address", "numberOfBytes": "20", "encoding": "inplace"},
+                "t_uint8": {"label": "uint8", "numberOfBytes": "1", "encoding": "inplace"}
+            }
         })
     }
 
@@ -301,8 +328,8 @@ mod tests {
         let cases = [
             // unresolved storage name
             r#"{"schema_version":1,"properties":[{"id":"p","contract":"Limits","when":"successful-transaction-end","assert":{"op":"ule","left":{"storage":"nope"},"right":{"uint256":"1"}}}]}"#,
-            // a type P1a does not model
-            r#"{"schema_version":1,"properties":[{"id":"p","contract":"Limits","when":"successful-transaction-end","assert":{"op":"ule","left":{"storage":"owner"},"right":{"uint256":"1"}}}]}"#,
+            // a variable that does not own its slot
+            r#"{"schema_version":1,"properties":[{"id":"p","contract":"Limits","when":"successful-transaction-end","assert":{"op":"ule","left":{"storage":"packed"},"right":{"uint256":"1"}}}]}"#,
             // two storage variables
             r#"{"schema_version":1,"properties":[{"id":"p","contract":"Limits","when":"successful-transaction-end","assert":{"op":"ule","left":{"storage":"limit"},"right":{"storage":"limit"}}}]}"#,
         ];
@@ -318,6 +345,25 @@ mod tests {
         // and neither does an unknown schema version or a stray field
         assert!(Spec::parse(r#"{"schema_version": 2, "properties": []}"#).is_err());
         assert!(Spec::parse(r#"{"schema_version": 1, "properties": [], "extra": 1}"#).is_err());
+    }
+
+    #[test]
+    fn a_variable_that_owns_its_slot_may_be_narrower_than_a_word() {
+        // `owner` is an address: 20 bytes at offset 0 of slot 1, so it does
+        // not own the slot and P1a refuses it, while `limit` is fine.
+        let vars = storage_vars(&layout());
+        let limit = vars.iter().find(|v| v.label == "limit").unwrap();
+        assert_eq!(limit.type_label.as_deref(), Some("uint256"));
+        assert_eq!(limit.bytes, Some(32));
+        assert!(limit.whole_slot());
+
+        let owner = vars.iter().find(|v| v.label == "owner").unwrap();
+        assert_eq!(owner.bytes, Some(20));
+        assert!(!owner.whole_slot(), "20 bytes leaves room for something else");
+
+        let packed = vars.iter().find(|v| v.label == "packed").unwrap();
+        assert_eq!(packed.offset, 20);
+        assert!(!packed.whole_slot());
     }
 
     #[test]

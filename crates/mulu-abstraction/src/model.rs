@@ -66,6 +66,45 @@ struct Entry {
     signature: String,
     func: String,
     param: Option<String>,
+    /// The ABI type of the single argument, if there is one.
+    param_type: Option<String>,
+    /// The values that argument can take. docs/11 §5 admits type-correct
+    /// calls only, so this is the domain the abstraction may reason over.
+    domain: IntervalSet,
+}
+
+/// The ABI parameter types of a signature: `setLimit(uint256)` -> `[uint256]`.
+pub fn signature_params(sig: &str) -> Vec<String> {
+    let Some(open) = sig.find('(') else { return vec![] };
+    let Some(close) = sig.rfind(')') else { return vec![] };
+    if close <= open + 1 {
+        return vec![];
+    }
+    let inner = &sig[open + 1..close];
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut cur = String::new();
+    for c in inner.chars() {
+        match c {
+            '(' | '[' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | ']' => {
+                depth = depth.saturating_sub(1);
+                cur.push(c);
+            }
+            ',' if depth == 0 => {
+                out.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
 }
 
 pub struct Builder<'a> {
@@ -187,6 +226,30 @@ impl<'a> Builder<'a> {
                 ));
                 continue;
             }
+            // The argument's domain comes from its ABI type, not from the
+            // machine word. A uint8 argument has 256 values; treating it as a
+            // full word invents regions no type-correct call can reach.
+            let abi_params = signature_params(&e.signature);
+            if abi_params.len() != f.parameters.len() {
+                self.refuse(format!(
+                    "entrypoint {}: the ABI lists {} parameter(s) but the body takes {}",
+                    e.signature,
+                    abi_params.len(),
+                    f.parameters.len()
+                ));
+                continue;
+            }
+            let param_type = abi_params.first().cloned();
+            let domain = match &param_type {
+                Some(t) => match crate::types::domain_of(t) {
+                    Ok(d) => d,
+                    Err(why) => {
+                        self.refuse(format!("entrypoint {}: {why}", e.signature));
+                        continue;
+                    }
+                },
+                None => IntervalSet::full(),
+            };
             out.push(Entry {
                 solidity_name: f
                     .solidity_name
@@ -195,13 +258,19 @@ impl<'a> Builder<'a> {
                 signature: e.signature.clone(),
                 func: f.id.clone(),
                 param: f.parameters.first().cloned(),
+                param_type,
+                domain,
             });
         }
         out
     }
 
     /// Guard predicates of a function, keyed by check id.
-    pub(crate) fn guards(&mut self, f: &Function) -> BTreeMap<String, Predicate> {
+    pub(crate) fn guards(
+        &mut self,
+        f: &Function,
+        domain: &IntervalSet,
+    ) -> BTreeMap<String, Predicate> {
         let mut out = BTreeMap::new();
         for c in self.ir.checks.iter().filter(|c| c.function == f.id) {
             if c.purity != Purity::Pure {
@@ -211,7 +280,7 @@ impl<'a> Builder<'a> {
                 ));
                 continue;
             }
-            match translate(&c.condition, &f.parameters) {
+            match crate::predicate::translate_in(&c.condition, &f.parameters, domain) {
                 Ok(p) => {
                     out.insert(c.id.clone(), p);
                 }
@@ -263,20 +332,34 @@ impl<'a> Builder<'a> {
         let mut storage_preds: Vec<PredicateInfo> = Vec::new();
         let mut per_slot: Vec<(String, Vec<IntervalSet>)> = Vec::new();
         for v in self.storage.clone() {
-            let sets: Vec<(String, IntervalSet)> = self
-                .props
-                .iter()
-                .filter(|p| p.var.as_deref() == Some(v.label.as_str()))
-                .map(|p| {
+            let mut sets: Vec<(String, IntervalSet)> = Vec::new();
+            // A slot cannot hold values its type has no room for.
+            let type_label = v.type_label.clone().unwrap_or_else(|| v.type_id.clone());
+            if let Ok(d) = crate::types::domain_of(&type_label) {
+                if !d.is_full() {
                     storage_preds.push(PredicateInfo {
-                        id: p.id.clone(),
-                        source: format!("spec property {}", p.id),
-                        text: p.text.clone(),
-                        set: p.predicate.set(),
+                        id: format!("type:{}", v.label),
+                        source: format!("the declared type of {}", v.label),
+                        text: format!("{} is {type_label}", v.label),
+                        set: d.clone(),
                     });
-                    (p.id.clone(), p.predicate.set())
-                })
-                .collect();
+                    sets.push((format!("type:{}", v.label), d));
+                }
+            }
+            sets.extend(
+                self.props
+                    .iter()
+                    .filter(|p| p.var.as_deref() == Some(v.label.as_str()))
+                    .map(|p| {
+                        storage_preds.push(PredicateInfo {
+                            id: p.id.clone(),
+                            source: format!("spec property {}", p.id),
+                            text: p.text.clone(),
+                            set: p.predicate.set(),
+                        });
+                        (p.id.clone(), p.predicate.set())
+                    }),
+            );
             let (regions, infeasible) = Self::partition(&sets);
             for i in infeasible {
                 self.discharged.push(format!("storage {}: {i} is unsatisfiable", v.label));
@@ -293,7 +376,7 @@ impl<'a> Builder<'a> {
             for fname in self.reachable(&e.func) {
                 let Some(f) = self.ir.function(&fname) else { continue };
                 let f = f.clone();
-                let g = self.guards(&f);
+                let g = self.guards(&f, &e.domain);
                 for (id, p) in &g {
                     let set = p.set();
                     if !set.is_full() && !set.is_empty() && !arg_sets.iter().any(|(n, _)| n == id) {
@@ -312,8 +395,11 @@ impl<'a> Builder<'a> {
                 for b in &f.blocks {
                     for ins in &b.instructions {
                         let Some(w) = &ins.storage_write else { continue };
-                        // the write names this function's own parameter
-                        if !f.parameters.iter().any(|p| *p == w.value_text) {
+                        // the write carries this function's own parameter,
+                        // directly or through a cleanup
+                        let mut reads = Vec::new();
+                        w.value.idents(&mut reads);
+                        if !reads.iter().any(|r| f.parameters.contains(r)) {
                             continue;
                         }
                         let Some(label) = self.slot_label(&w.slot_text) else { continue };
@@ -336,6 +422,28 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // Each entrypoint's type domain refines the partition too, so every
+        // region is wholly inside or wholly outside the values a given
+        // entrypoint can receive.
+        for e in &entries {
+            if e.domain.is_full() {
+                continue;
+            }
+            let id = format!("type:{}", e.signature);
+            if !arg_sets.iter().any(|(n, _)| *n == id) {
+                arg_preds.push(PredicateInfo {
+                    id: id.clone(),
+                    source: format!("the ABI type of {}", e.signature),
+                    text: format!(
+                        "the argument of {} is {}",
+                        e.signature,
+                        e.param_type.clone().unwrap_or_default()
+                    ),
+                    set: e.domain.clone(),
+                });
+                arg_sets.push((id, e.domain.clone()));
+            }
+        }
         let (arg_regions, infeasible) = Self::partition(&arg_sets);
         for i in infeasible {
             self.discharged.push(format!("argument: {i} is unsatisfiable"));
@@ -352,6 +460,11 @@ impl<'a> Builder<'a> {
         self.note(
             "argument-regions-are-exact: guards are decided by interval arithmetic over uint256, \
              not by a solver, so no trusted-solver assumption is carried",
+        );
+        self.note(
+            "typed-domains: each argument ranges over the values its ABI type admits and each \
+             slot over the values its declared type admits, matching the profile's type-correct \
+             calls rather than the whole machine word",
         );
 
         Walk::new(self, entries, guards_by_func, arg_regions, arg_preds, storage_preds, per_slot)
@@ -517,7 +630,11 @@ impl<'a> Walk<'a> {
         for e in &entries {
             for s in &storage_regions {
                 let regions: Vec<Option<usize>> = match e.param {
-                    Some(_) => (0..self.arg_regions.len()).map(Some).collect(),
+                    // Only the regions this entrypoint's type can receive.
+                    Some(_) => (0..self.arg_regions.len())
+                        .filter(|i| self.arg_regions[*i].subset_of(&e.domain))
+                        .map(Some)
+                        .collect(),
                     None => vec![None],
                 };
                 for a in regions {
@@ -672,7 +789,7 @@ impl<'a> Walk<'a> {
 
                 // 1. a guard evaluated here
                 if let Some(c) = self.check_at(&f, block, ins) {
-                    let guards = self.guards_of(&f);
+                    let guards = self.guards_of(&f, &e.domain);
                     let Some(p) = guards.get(&c.id) else {
                         return Err(format!("check {} could not be turned into a predicate", c.id));
                     };
@@ -706,17 +823,13 @@ impl<'a> Walk<'a> {
                 // 2. a whole-slot storage write
                 if let Some(w) = ins.storage_write.clone() {
                     let (slot_idx, slot_label) = self.slot_of(&w.slot_text)?;
-                    let values = if Some(&w.value_text) == arg_var.as_ref() {
-                        arg_set.clone().ok_or("the argument is written but the call takes none")?
-                    } else if let Ok(v) = crate::interval::parse_decimal(&w.value_text) {
-                        IntervalSet::point(v)
-                    } else {
-                        return Err(format!(
-                            "the value written to {slot_label} is {}, which P1a cannot resolve to \
-                             the argument or a literal",
-                            w.value_text
-                        ));
-                    };
+                    // Evaluate what is stored over the argument's domain. A
+                    // narrowing cleanup such as `and(x, 0xff)` is the identity
+                    // exactly when the type says the argument fits the mask.
+                    let values = crate::value::value_set(&w.value, arg_var.as_deref(), &region)
+                        .map_err(|why| {
+                            format!("the value written to {slot_label} is {}: {why}", w.value_text)
+                        })?;
                     let new_region = self.region_of(slot_idx, &values).ok_or_else(|| {
                         format!("the value written to {slot_label} straddles a specification boundary")
                     })?;
@@ -780,7 +893,8 @@ impl<'a> Walk<'a> {
                     fr.index = 0;
                 }
                 Terminator::Branch { cond, then_block, else_block } => {
-                    let p = translate(cond, &f.parameters).map_err(|w| {
+                    let p = crate::predicate::translate_in(cond, &f.parameters, &e.domain)
+                        .map_err(|w| {
                         format!("a branch condition is outside the P1a fragment: {w}")
                     })?;
                     let var = arg_var.clone().unwrap_or_default();
@@ -843,11 +957,11 @@ impl<'a> Walk<'a> {
     }
 
     /// Guards of a function, computed on demand as the walk enters it.
-    fn guards_of(&mut self, f: &Function) -> BTreeMap<String, Predicate> {
+    fn guards_of(&mut self, f: &Function, domain: &IntervalSet) -> BTreeMap<String, Predicate> {
         if let Some(g) = self.guards.get(&f.id) {
             return g.clone();
         }
-        let g = self.b.guards(f);
+        let g = self.b.guards(f, domain);
         self.guards.insert(f.id.clone(), g.clone());
         g
     }

@@ -29,9 +29,10 @@ The chain runs end to end for the P1a subset: Solidity in, certified findings ou
 | **P1-02** abstraction | `analyze` | ProgramIR and a spec to a finite model, then analysed |
 | **P0** analysis core | `analyze-model`, `verify` | finite models in, certified findings out |
 
-* The P1a subset is one uint256 argument per entrypoint, pure comparison
-  guards, whole-slot uint256 storage, no loops, no external calls. Anything
-  outside it is reported and makes the unit incomplete (exit 2), never dropped.
+* The P1a subset is one argument per entrypoint typed `uintN`, `address` or
+  `bool`, pure comparison guards, storage variables that own their slot, no
+  loops, no external calls. Anything outside it is reported and makes the unit
+  incomplete (exit 2), never dropped.
 * Several source files, `import` statements and guards written in modifiers all
   work. Abstract contracts, interfaces and libraries are recognised as having no
   code rather than treated as a compilation failure.
@@ -61,6 +62,10 @@ mulu verify analysis-limits
 # the same finding, with the first guard in a modifier in an imported file
 mulu analyze examples/access/Vault.sol --contract Vault \
      --spec examples/access/vault.spec.json --out analysis-vault
+
+# a narrow argument type rules a violation out rather than inventing one
+mulu analyze examples/typed/Meter.sol --contract Meter \
+     --spec examples/typed/meter.spec.json --out analysis-meter
 
 # P1-01 alone: stop at the ProgramIR
 mulu ir examples/limits/Limits.sol --contract Limits --out ir-limits
@@ -131,6 +136,28 @@ Locations resolve through the file id they carry, so a check reported for
 An instruction whose effects the model cannot express stops the walk rather
 than being skipped. Without that, a modifier the walk did not follow produced a
 model in which the function did nothing, reported as complete.
+
+### Types decide the domains
+
+The environment profile admits type-correct calls, so the argument's domain is
+what its ABI type admits, not the whole machine word. `examples/typed` bounds
+`reading <= 1000` and offers two ways to set it:
+
+| entrypoint | argument domain | can it break the bound |
+|---|---|---|
+| `record(uint8)` | `[0, 255]` | no, and the model says so |
+| `force(uint256)` | the whole word | yes, with a path to `bad` |
+
+Treating both as uint256 would invent a region above 255 that no call to
+`record` can reach. Storage domains come from the layout's type table the same
+way, and a variable that shares its slot with another is refused rather than
+written whole.
+
+Reading the type also settles the cleanups solc inserts. Storing a `uint8`
+into a `uint256` slot lowers to `and(x, 0xff)`, and comparing one lowers to
+`gt(and(x, 0xff), 100)`. That mask is the identity exactly when the type keeps
+the value inside it, which is checked; a mask that would really truncate is
+refused.
 
 `analyze-model` writes:
 

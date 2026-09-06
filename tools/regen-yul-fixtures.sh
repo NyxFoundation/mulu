@@ -21,4 +21,12 @@ cp "$OUT/.build/build/abi.json" "$OUT/Vault.abi.json"
 cp "$OUT/.build/build/storage-layout.json" "$OUT/Vault.storage.json"
 rm -rf "$OUT/.build"
 
+# the typed example: the ABI type decides the argument domain
+cargo run --quiet -p mulu-cli -- ir examples/typed/Meter.sol --contract Meter --out "$OUT/.build" >/dev/null
+cp examples/typed/Meter.sol "$OUT/typed-Meter.sol"
+cp "$OUT/.build/build/Meter.yul" "$OUT/Meter.yul"
+cp "$OUT/.build/build/abi.json" "$OUT/Meter.abi.json"
+cp "$OUT/.build/build/storage-layout.json" "$OUT/Meter.storage.json"
+rm -rf "$OUT/.build"
+
 echo "regenerated $OUT from examples/ using $(solc --version | tail -1)"

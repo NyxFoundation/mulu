@@ -36,6 +36,10 @@ analyze: build
 	  --spec examples/access/vault.spec.json --out analysis-vault; \
 	  code=$$?; [ $$code -le 1 ] || exit $$code
 	./target/release/mulu verify analysis-vault
+	./target/release/mulu analyze examples/typed/Meter.sol --contract Meter \
+	  --spec examples/typed/meter.spec.json --out analysis-meter; \
+	  code=$$?; [ $$code -le 1 ] || exit $$code
+	./target/release/mulu verify analysis-meter
 
 fixtures: build
 	@for f in examples/fixtures/*.json examples/limits/model.json; do \

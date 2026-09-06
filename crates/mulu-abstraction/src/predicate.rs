@@ -129,6 +129,33 @@ enum Operand {
     Lit(U256),
 }
 
+/// Drop a cleanup that cannot change the value: `and(v, mask)` is `v` when the
+/// variable's declared type keeps it inside the mask. A `uint8` argument
+/// compared with `x <= 100` reaches here as `and(x, 0xff)`.
+fn strip_cleanup(e: &Expr, domain: &IntervalSet) -> Expr {
+    let Expr::Call { name, args, .. } = e else { return e.clone() };
+    if name != "and" || args.len() != 2 {
+        return e.clone();
+    }
+    let (inner, mask) = match (literal_of(&args[0]), literal_of(&args[1])) {
+        (None, Some(m)) => (&args[0], m),
+        (Some(m), None) => (&args[1], m),
+        _ => return e.clone(),
+    };
+    if domain.subset_of(&IntervalSet::le(mask)) {
+        strip_cleanup(inner, domain)
+    } else {
+        e.clone()
+    }
+}
+
+fn literal_of(e: &Expr) -> Option<U256> {
+    match e {
+        Expr::Literal { text, .. } => parse_decimal(text).ok(),
+        _ => None,
+    }
+}
+
 fn operand(e: &Expr, vars: &[String]) -> Result<Operand, String> {
     match e {
         Expr::Ident { name, .. } => {
@@ -170,6 +197,13 @@ fn compare(
 
 /// Translate a Yul condition. It holds when the expression is non-zero.
 pub fn translate(e: &Expr, vars: &[String]) -> Result<Predicate, String> {
+    translate_in(e, vars, &IntervalSet::full())
+}
+
+/// As `translate`, knowing what the variable's declared type admits. That is
+/// what makes solc's narrowing cleanups droppable rather than opaque.
+pub fn translate_in(e: &Expr, vars: &[String], domain: &IntervalSet) -> Result<Predicate, String> {
+    let e = &strip_cleanup(e, domain);
     match e {
         Expr::Literal { text, .. } => {
             let v = parse_decimal(text).map_err(|e| e.to_string())?;
@@ -194,36 +228,41 @@ pub fn translate(e: &Expr, vars: &[String]) -> Result<Predicate, String> {
             match name.as_str() {
                 "iszero" => {
                     arity(1)?;
-                    Ok(translate(&args[0], vars)?.negate())
+                    Ok(translate_in(&args[0], vars, domain)?.negate())
                 }
                 // Unsigned comparisons.
                 "gt" => {
                     arity(2)?;
-                    compare(&args[0], &args[1], vars, IntervalSet::gt, IntervalSet::lt)
+                    let (l, r) = (strip_cleanup(&args[0], domain), strip_cleanup(&args[1], domain));
+                    compare(&l, &r, vars, IntervalSet::gt, IntervalSet::lt)
                 }
                 "lt" => {
                     arity(2)?;
-                    compare(&args[0], &args[1], vars, IntervalSet::lt, IntervalSet::gt)
+                    let (l, r) = (strip_cleanup(&args[0], domain), strip_cleanup(&args[1], domain));
+                    compare(&l, &r, vars, IntervalSet::lt, IntervalSet::gt)
                 }
                 "eq" => {
                     arity(2)?;
                     // `eq(e, e)` is true whatever `e` is, which is how the
                     // uint256 ABI validator collapses.
-                    if args[0].render() == args[1].render() {
+                    let (l, r) = (strip_cleanup(&args[0], domain), strip_cleanup(&args[1], domain));
+                    if l.render() == r.render() {
                         return Ok(Predicate::True);
                     }
-                    compare(&args[0], &args[1], vars, IntervalSet::eq_to, IntervalSet::eq_to)
+                    compare(&l, &r, vars, IntervalSet::eq_to, IntervalSet::eq_to)
                 }
                 // Boolean combination. Yul's `and`/`or` are bitwise, so this is
                 // only valid when both sides are 0/1, which holds for the
                 // comparison results solc feeds them.
                 "and" => {
                     arity(2)?;
-                    translate(&args[0], vars)?.and(&translate(&args[1], vars)?)
+                    translate_in(&args[0], vars, domain)?
+                        .and(&translate_in(&args[1], vars, domain)?)
                 }
                 "or" => {
                     arity(2)?;
-                    translate(&args[0], vars)?.or(&translate(&args[1], vars)?)
+                    translate_in(&args[0], vars, domain)?
+                        .or(&translate_in(&args[1], vars, domain)?)
                 }
                 "slt" | "sgt" => Err(format!(
                     "`{name}` is a signed comparison; P1a models unsigned uint256 only"
@@ -313,6 +352,21 @@ mod tests {
             };
             assert!(translate(e, &vars).is_err(), "{expr} must be refused, not guessed");
         }
+    }
+
+    #[test]
+    fn a_narrowing_cleanup_is_dropped_when_the_type_justifies_it() {
+        let byte = crate::types::domain_of("uint8").unwrap();
+        // a uint8 argument reaches a comparison through and(x, 0xff)
+        let src = "object \"T\" { code { let c := iszero(gt(and(x, 0xff), 100)) } }";
+        let p = parse_object(src).unwrap();
+        let mulu_yul::Stmt::Let { value: Some(e), .. } = &p.object.code.stmts[0] else { panic!() };
+        let vars = vec!["x".to_string()];
+        let got = translate_in(e, &vars, &byte).unwrap();
+        assert_eq!(got, Predicate::Over { var: "x".into(), set: IntervalSet::le(u(100)) });
+
+        // without the type the mask could truncate, so it is not dropped
+        assert!(translate_in(e, &vars, &IntervalSet::full()).is_err());
     }
 
     #[test]

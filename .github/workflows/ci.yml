@@ -28,5 +28,5 @@ jobs:
         run: ./tools/regen-yul-fixtures.sh && git diff --exit-code crates/mulu-yul/tests/fixtures
       - name: Fixtures end to end
         run: make fixtures
-      - name: Solidity end to end (analyze + verify)
+      - name: Solidity end to end (analyze + verify, three examples)
         run: make analyze

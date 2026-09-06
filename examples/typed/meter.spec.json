@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "properties": [{
+    "id": "reading-bound",
+    "contract": "Meter",
+    "when": "successful-transaction-end",
+    "assert": {
+      "op": "ule",
+      "left": {"storage": "reading"},
+      "right": {"uint256": "1000"}
+    }
+  }]
+}
