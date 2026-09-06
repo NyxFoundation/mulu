@@ -21,7 +21,7 @@ fn build() -> (ProgramIr, Abstraction) {
         serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Limits.storage.json")).unwrap(),
     )
     .unwrap();
-    let props = Spec::parse(include_str!("../../../examples/limits/limits.spec.json"))
+    let props = Spec::parse(include_str!("../../../examples/limits/Limits.spec.json"))
         .unwrap()
         .compile("Limits", &ir.storage_layout)
         .unwrap();

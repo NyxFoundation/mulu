@@ -1,23 +1,72 @@
-# mulu
+<h1 align="center">mulu</h1>
 
-**mulu — A Supervisory Control-based static analyzer for code redundancy and gap detection.**
+<p align="center">
+  <em>A Supervisory Control-based static analyzer for code redundancy and gap detection.</em>
+</p>
 
-mulu takes a finite transition model of a program together with a specification
-monitor and answers three questions on one common model, each with a
-machine-checked certificate:
+<p align="center">
+  <a href="https://github.com/NyxFoundation/mulu/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/NyxFoundation/mulu/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="Lean 4" src="https://img.shields.io/badge/Lean-4.25.0-4B0082.svg">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-stable-orange.svg">
+  <img alt="mathlib free" src="https://img.shields.io/badge/mathlib-not%20required-lightgrey.svg">
+</p>
 
-| question | finding | needs a spec | how |
-|---|---|---|---|
-| Does this check always succeed when reached? | `redundant-check` / `never-fails` | no | reachable set, least fixed point |
-| Can the implementation reach a bad state? | `spec-violation` | yes | direct search + path certificate |
-| Does the implementation reject requests the spec would allow? | `overrestriction` (candidate) | yes | maximal permissive envelope, greatest fixed point |
+---
 
-The envelope is the Ramadge–Wonham *maximal permissive supervisor* of the plant
-under the specification: the largest set of states that is safe, closed under
-uncontrollable events and (in nonblocking mode) can always complete.
-Rust does I/O, normalisation and reporting; **Lean 4 computes and, more
-importantly, checks** — every reported `proven` finding is backed by a
-certificate whose meaning is a Lean theorem, re-checked by the Lean kernel.
+Most analysers tell you what might go wrong. mulu also tells you what your
+checks are doing that they need not, and where they are stricter than your
+specification asks. It answers all three on **one model**, and every answer
+it calls proven is backed by a certificate the **Lean kernel** re-checks.
+
+```console
+$ mulu analyze examples/limits/Limits.sol --contract Limits \
+      --spec examples/limits/Limits.spec.json --out analysis
+
+HINT     check-B          never fails on any reachable model state
+                          claim: never-fails  status: proven  depends on: A
+WARNING  spec-violation   forceSet(1001) leaves limit = 1001, breaking limit <= 1000
+                          reproduced on a local EVM
+INFO     overrestriction-A
+                          setLimit(101) is permitted by the specification and rejected
+                          claim: spec-permits-rejected-request  status: candidate
+```
+
+| question | finding | needs a spec |
+|---|---|---|
+| Does this check always succeed when reached? | `redundant-check` | no |
+| Can the contract reach a state the spec forbids? | `spec-violation` | yes |
+| Does it reject requests the spec would allow? | `overrestriction` | yes |
+
+The envelope behind the third is the Ramadge–Wonham **maximal permissive
+supervisor**: the largest behaviour that stays safe, is closed under events
+the code cannot refuse, and can always complete.
+
+## Install
+
+Lean 4 v4.25.0 (no mathlib, no network) and a stable Rust toolchain. `solc` is
+needed only for the Solidity front end.
+
+```sh
+git clone https://github.com/NyxFoundation/mulu && cd mulu
+cd lean && lake build && cd ..     # the Mulu library and mulu-worker
+cargo build --release
+make check                         # tests, kernel checks, examples end to end
+```
+
+## Honest limits, up front
+
+- **Every finding is a claim about a model mulu built**, not about your
+  contract. `obligations.json` lists what would have to be proved to change
+  that, and none of it is proved yet. See [What a finding is a claim
+  about](#what-a-finding-is-a-claim-about).
+- The analysable subset is small: one argument per entrypoint typed `uintN`,
+  `address` or `bool`, pure comparison guards, storage variables that own their
+  slot, no loops, no external calls.
+- Anything outside it is **reported and makes the run incomplete**, never
+  quietly skipped.
+- `never-fails` is not `removal-equivalent`. It does not say you may delete the
+  check.
 
 ## Status (2026-09-06)
 
@@ -32,54 +81,33 @@ The chain runs end to end for the P1a subset: Solidity in, certified findings ou
 | **P1-04** correspondence | `analyze`, `verify` | what stands between a model claim and the program |
 | **P0** analysis core | `analyze-model`, `verify` | finite models in, certified findings out |
 
-All three findings of docs/10 now come out of Solidity source: a redundant
-check, a specification violation, and an overrestriction.
-
-* The P1a subset is one argument per entrypoint typed `uintN`, `address` or
-  `bool`, pure comparison guards, storage variables that own their slot, no
-  loops, no external calls. Anything outside it is reported and makes the unit
-  incomplete (exit 2), never dropped.
-* Several source files, `import` statements and guards written in modifiers all
-  work. Abstract contracts, interfaces and libraries are recognised as having no
-  code rather than treated as a compilation failure.
-* Every claim is about the generated model (`scope: abstract-model`). Nothing
-  here proves anything about a source program until the correspondence layers
-  of docs 09/11 exist. That is P1-04.
-
-## Build
-
-Lean 4 (v4.25.0, no mathlib, no network needed) and a stable Rust toolchain.
-`solc` is needed only for `mulu ir` and its tests, which skip without it.
-
-```sh
-cd lean && lake build && cd ..      # Mulu library + lean/.lake/build/bin/mulu-worker
-cargo build --release               # target/release/mulu
-make test                           # cargo test + kernel-checked fixture theorems
-```
+Several source files, `import` statements and guards written in modifiers all
+work. Abstract contracts, interfaces and libraries are recognised as having no
+code rather than treated as a compilation failure.
 
 ## Use
 
 ```sh
 # P1-02: the whole chain, Solidity to certified findings
 mulu analyze examples/limits/Limits.sol --contract Limits \
-     --spec examples/limits/limits.spec.json --out analysis-limits
+     --spec examples/limits/Limits.spec.json --out analysis-limits
 mulu verify analysis-limits
 
 # the same finding, with the first guard in a modifier in an imported file
 mulu analyze examples/access/Vault.sol --contract Vault \
-     --spec examples/access/vault.spec.json --out analysis-vault
+     --spec examples/access/Vault.spec.json --out analysis-vault
 
 # a narrow argument type rules a violation out rather than inventing one
 mulu analyze examples/typed/Meter.sol --contract Meter \
-     --spec examples/typed/meter.spec.json --out analysis-meter
+     --spec examples/typed/Meter.spec.json --out analysis-meter
 
 # two entrypoints sharing a name stay two entrypoints
 mulu analyze examples/overload/Over.sol --contract Over \
-     --spec examples/overload/over.spec.json --out analysis-over
+     --spec examples/overload/Over.spec.json --out analysis-over
 
 # a guard written `if (..) revert()` rather than `require(..)`
 mulu analyze examples/guards/Gate.sol --contract Gate \
-     --spec examples/guards/gate.spec.json --out analysis-gate
+     --spec examples/guards/Gate.spec.json --out analysis-gate
 
 # P1-01 alone: stop at the ProgramIR
 mulu ir examples/limits/Limits.sol --contract Limits --out ir-limits
@@ -87,7 +115,7 @@ mulu ir examples/limits/Limits.sol --contract Limits --out ir-limits
 # P0 alone: a hand-written finite model
 mulu validate examples/limits/model.json
 mulu analyze-model examples/limits/model.json --out a
-mulu analyze-model examples/fixtures/blocking-cycle.json --out b --objective safety
+mulu analyze-model examples/models/blocking-cycle.json --out b --objective safety
 ```
 
 ### `mulu analyze`
@@ -400,7 +428,13 @@ mulu/
 │   └── Tests/          kernel-checked fixture theorems and rejected tampers
 ├── schemas/            finite-product.v1.json, worker-protocol.v1.md
 ├── tools/              regen-yul-fixtures.sh
-└── examples/           fixtures/ (docs 09 §2), limits/ (docs 08 §3: source + hand-written model)
+└── examples/
+    ├── models/         hand-written finite models, for the core alone
+    ├── limits/         the worked example: two guards, one redundant
+    ├── access/         the first guard in a modifier in an imported file
+    ├── guards/         a guard written `if (..) revert()`
+    ├── overload/       two entrypoints sharing a name
+    └── typed/          a narrow argument type rules a violation out
 ```
 
 `crates/mulu-yul/tests/fixtures/` holds solc's real output for `Limits.sol` so
@@ -430,4 +464,4 @@ P3: annotations, LSP, Yul hints. P4: benchmarks.
 
 ## License
 
-MIT or Apache-2.0, at your option (see `LICENSE-MIT`, `LICENSE-APACHE`).
+MIT. See [`LICENSE`](LICENSE).

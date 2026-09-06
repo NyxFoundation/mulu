@@ -31,7 +31,7 @@ fn json(p: &Path) -> serde_json::Value {
 fn analysed(name: &str) -> PathBuf {
     let out = std::env::temp_dir().join(format!("mulu-ob-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
-    let spec = root().join("examples/limits/limits.spec.json");
+    let spec = root().join("examples/limits/Limits.spec.json");
     mulu()
         .args(["analyze", root().join("examples/limits/Limits.sol").to_str().unwrap()])
         .args(["--contract", "Limits", "--spec", spec.to_str().unwrap()])

@@ -52,7 +52,7 @@ fn from_solidity_to_certified_findings() {
     if !ready() {
         return;
     }
-    let spec = root().join("examples/limits/limits.spec.json");
+    let spec = root().join("examples/limits/Limits.spec.json");
     let (code, out) = analyze("spec", &["--spec", spec.to_str().unwrap()]);
     assert_eq!(code, 1, "a confirmed specification violation exits 1");
 
@@ -136,7 +136,7 @@ fn a_guard_in_an_imported_modifier_is_attributed_to_it() {
     }
     let out = std::env::temp_dir().join(format!("mulu-an-vault-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
-    let spec = root().join("examples/access/vault.spec.json");
+    let spec = root().join("examples/access/Vault.spec.json");
     let code = mulu()
         .args(["analyze", root().join("examples/access/Vault.sol").to_str().unwrap()])
         .args(["--contract", "Vault", "--spec", spec.to_str().unwrap()])
@@ -243,7 +243,7 @@ fn all_three_findings_come_out_of_the_source() {
     // docs/10: the point of the common model is that redundancy, spec
     // violation and overrestriction are answered on it together. Before the
     // reference plant was generated, analyze could only produce two of them.
-    let spec = root().join("examples/limits/limits.spec.json");
+    let spec = root().join("examples/limits/Limits.spec.json");
     let (code, out) = analyze("three", &["--spec", spec.to_str().unwrap()]);
     assert_eq!(code, 1);
     let report = json(&out.join("report.json"));
@@ -314,7 +314,7 @@ fn an_author_written_if_revert_guard_is_named_like_a_require() {
     // guard the author wrote from one the compiler inserted.
     let out = std::env::temp_dir().join(format!("mulu-an-gate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
-    let spec = root().join("examples/guards/gate.spec.json");
+    let spec = root().join("examples/guards/Gate.spec.json");
     let code = mulu()
         .args(["analyze", root().join("examples/guards/Gate.sol").to_str().unwrap()])
         .args(["--contract", "Gate", "--spec", spec.to_str().unwrap()])
@@ -360,7 +360,7 @@ fn the_counterexample_is_reproduced_on_a_local_evm() {
     }
     // docs/09 §7, P1-03: forceSet(1001) must be reproduced, and with no
     // specification the tool must not assert a hole.
-    let spec = root().join("examples/limits/limits.spec.json");
+    let spec = root().join("examples/limits/Limits.spec.json");
     let (code, out) = analyze("replay", &["--spec", spec.to_str().unwrap()]);
     assert_eq!(code, 1);
     let report = json(&out.join("report.json"));

@@ -34,6 +34,25 @@ cannot say more than it knows".
 - **Lean proofs use `decide`, never `native_decide`.** The axiom audit rejects
   anything outside `propext`, `Quot.sound` and `Classical.choice`.
 
+## Naming
+
+One convention per kind of thing, so a path says what it holds.
+
+| kind | case | example |
+|---|---|---|
+| directories | lower kebab | `crates/mulu-yul`, `examples/access` |
+| Solidity contracts | Pascal, matching the contract | `examples/limits/Limits.sol` |
+| a file *about* a contract | Pascal, matching it | `examples/limits/Limits.spec.json` |
+| hand-written models, schemas, scripts | lower kebab | `examples/models/blocking-cycle.json` |
+| solc output kept as a fixture | Pascal, by contract | `tests/fixtures/Limits.yul` |
+| a source copy kept for drift checks | `<example>-<Contract>` | `tests/fixtures/limits-Limits.sol` |
+| Rust | snake, as the language wants | `crates/mulu-yul/src/lower.rs` |
+| Lean | Pascal, as the language wants | `lean/Mulu/Core/Envelope.lean` |
+
+The last two rows are the languages' own conventions and are not ours to
+change. The rest exist so a reader can tell a contract from a model from a
+copy without opening it.
+
 ## Fixtures
 
 `crates/*/tests/fixtures/` holds real solc output, committed alongside the

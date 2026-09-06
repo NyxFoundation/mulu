@@ -38,7 +38,7 @@ fn ir_with_table() -> ProgramIr {
 }
 
 fn build(ir: &ProgramIr) -> Abstraction {
-    let props = Spec::parse(include_str!("../../../examples/overload/over.spec.json"))
+    let props = Spec::parse(include_str!("../../../examples/overload/Over.spec.json"))
         .unwrap()
         .compile("Over", &ir.storage_layout)
         .unwrap();

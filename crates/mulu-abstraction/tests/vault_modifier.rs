@@ -10,7 +10,7 @@ use mulu_abstraction::model::{Abstraction, Builder};
 use mulu_abstraction::spec::Spec;
 use mulu_yul::{lower_contract, ProgramIr};
 
-const SPEC: &str = include_str!("../../../examples/access/vault.spec.json");
+const SPEC: &str = include_str!("../../../examples/access/Vault.spec.json");
 
 fn build() -> (ProgramIr, Abstraction) {
     let ir = lower_contract(
@@ -100,7 +100,7 @@ fn the_two_examples_agree_on_the_shape_of_the_finding() {
         serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Limits.storage.json")).unwrap(),
     )
     .unwrap();
-    let props = Spec::parse(include_str!("../../../examples/limits/limits.spec.json"))
+    let props = Spec::parse(include_str!("../../../examples/limits/Limits.spec.json"))
         .unwrap()
         .compile("Limits", &limits_ir.storage_layout)
         .unwrap();

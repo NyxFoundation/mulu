@@ -9,7 +9,7 @@ use mulu_abstraction::spec::Spec;
 use mulu_model::schema::Control;
 use mulu_yul::{lower_contract, ProgramIr};
 
-const SPEC: &str = include_str!("../../../examples/limits/limits.spec.json");
+const SPEC: &str = include_str!("../../../examples/limits/Limits.spec.json");
 
 fn ir() -> ProgramIr {
     lower_contract(

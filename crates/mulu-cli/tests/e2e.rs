@@ -44,7 +44,7 @@ fn fixture_controllable() {
         eprintln!("skipped: build lean/ first");
         return;
     }
-    let (code, r, out) = analyze("examples/fixtures/product-controllable.json", &[]);
+    let (code, r, out) = analyze("examples/models/product-controllable.json", &[]);
     assert_eq!(code, 1, "proven violation → exit 1");
     let env = diag(&r, "envelope");
     assert_eq!(env["status"], "proven");
@@ -59,7 +59,7 @@ fn fixture_uncontrollable_is_unrealizable() {
     if !worker_available() {
         return;
     }
-    let (_, r, out) = analyze("examples/fixtures/product-uncontrollable.json", &[]);
+    let (_, r, out) = analyze("examples/models/product-uncontrollable.json", &[]);
     assert_eq!(diag(&r, "envelope")["claim"], "unrealizable");
     assert_eq!(verify(&out), 0);
 }
@@ -69,10 +69,10 @@ fn fixture_blocking_cycle_modes() {
     if !worker_available() {
         return;
     }
-    let (code, r, _) = analyze("examples/fixtures/blocking-cycle.json", &[]);
+    let (code, r, _) = analyze("examples/models/blocking-cycle.json", &[]);
     assert_eq!(code, 0);
     assert_eq!(diag(&r, "envelope")["detail"]["winning"], serde_json::json!(["q0"]));
-    let (_, r, _) = analyze("examples/fixtures/blocking-cycle.json", &["--objective", "safety"]);
+    let (_, r, _) = analyze("examples/models/blocking-cycle.json", &["--objective", "safety"]);
     assert_eq!(diag(&r, "envelope")["detail"]["winning"], serde_json::json!(["q0", "q1", "q2"]));
 }
 

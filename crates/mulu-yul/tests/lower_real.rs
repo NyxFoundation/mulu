@@ -22,7 +22,7 @@ fn ir() -> ProgramIr {
 /// from examples/, so the Yul and the source it was generated from always
 /// agree; the drift test below catches them going out of step.
 fn span_text(l: mulu_yul::Location) -> &'static str {
-    const SRC: &str = include_str!("fixtures/Limits.sol");
+    const SRC: &str = include_str!("fixtures/limits-Limits.sol");
     &SRC[l.byte_start as usize..(l.byte_start + l.byte_length) as usize]
 }
 
@@ -73,7 +73,7 @@ fn fixture_matches_the_example_contract() {
     // changes, every @src offset shifts, so the pair must be regenerated
     // together: tools/regen-yul-fixtures.sh.
     assert_eq!(
-        include_str!("fixtures/Limits.sol"),
+        include_str!("fixtures/limits-Limits.sol"),
         include_str!("../../../examples/limits/Limits.sol"),
         "examples/limits/Limits.sol changed; rerun tools/regen-yul-fixtures.sh"
     );

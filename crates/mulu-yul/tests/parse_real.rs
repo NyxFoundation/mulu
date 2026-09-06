@@ -53,7 +53,7 @@ fn keeps_the_source_span_of_each_require() {
     // docs/09: Location is (file-id, byte-start, byte-length); solc writes the
     // end offset, so the length is end - start. Check the spans by slicing the
     // source they came from rather than by hard-coded numbers.
-    const SRC: &str = include_str!("fixtures/Limits.sol");
+    const SRC: &str = include_str!("fixtures/limits-Limits.sol");
     let text = |s: mulu_yul::SrcSpan| &SRC[s.start as usize..s.end as usize];
     assert_eq!(text(spans[0]), r#"require(x <= 100, "cap")"#);
     assert_eq!(text(spans[1]), r#"require(x <= 1000, "bound")"#);

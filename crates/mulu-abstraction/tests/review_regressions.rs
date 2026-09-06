@@ -77,7 +77,7 @@ fn a_guard_written_as_if_revert_is_still_a_guard() {
         include_str!("../../mulu-yul/tests/fixtures/Gate.abi.json"),
         include_str!("../../mulu-yul/tests/fixtures/Gate.storage.json"),
     );
-    let a = build(&ir, include_str!("../../../examples/guards/gate.spec.json"), "Gate");
+    let a = build(&ir, include_str!("../../../examples/guards/Gate.spec.json"), "Gate");
     assert!(a.report.complete(), "unsupported: {:?}", a.report.unsupported);
 
     // It is a first-class check and it splits the argument domain at 100.

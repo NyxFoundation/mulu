@@ -29,28 +29,28 @@ ir: build
 # exits 1 here. Anything other than 0 or 1 is a real failure.
 analyze: build
 	./target/release/mulu analyze examples/limits/Limits.sol --contract Limits \
-	  --spec examples/limits/limits.spec.json --out analysis-limits; \
+	  --spec examples/limits/Limits.spec.json --out analysis-limits; \
 	  code=$$?; [ $$code -le 1 ] || exit $$code
 	./target/release/mulu verify analysis-limits
 	./target/release/mulu analyze examples/access/Vault.sol --contract Vault \
-	  --spec examples/access/vault.spec.json --out analysis-vault; \
+	  --spec examples/access/Vault.spec.json --out analysis-vault; \
 	  code=$$?; [ $$code -le 1 ] || exit $$code
 	./target/release/mulu verify analysis-vault
 	./target/release/mulu analyze examples/typed/Meter.sol --contract Meter \
-	  --spec examples/typed/meter.spec.json --out analysis-meter; \
+	  --spec examples/typed/Meter.spec.json --out analysis-meter; \
 	  code=$$?; [ $$code -le 1 ] || exit $$code
 	./target/release/mulu verify analysis-meter
 	./target/release/mulu analyze examples/overload/Over.sol --contract Over \
-	  --spec examples/overload/over.spec.json --out analysis-over; \
+	  --spec examples/overload/Over.spec.json --out analysis-over; \
 	  code=$$?; [ $$code -le 1 ] || exit $$code
 	./target/release/mulu verify analysis-over
 	./target/release/mulu analyze examples/guards/Gate.sol --contract Gate \
-	  --spec examples/guards/gate.spec.json --out analysis-gate; \
+	  --spec examples/guards/Gate.spec.json --out analysis-gate; \
 	  code=$$?; [ $$code -le 1 ] || exit $$code
 	./target/release/mulu verify analysis-gate
 
 fixtures: build
-	@for f in examples/fixtures/*.json examples/limits/model.json; do \
+	@for f in examples/models/*.json examples/limits/model.json; do \
 	  out=analysis-$$(basename $$(dirname $$f))-$$(basename $$f .json); \
 	  echo "== $$f"; ./target/release/mulu analyze-model $$f --out $$out; code=$$?; \
 	  ./target/release/mulu verify $$out || exit 1; \

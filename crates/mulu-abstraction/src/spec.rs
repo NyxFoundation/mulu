@@ -292,7 +292,7 @@ mod tests {
         })
     }
 
-    const LIMITS_SPEC: &str = include_str!("../../../examples/limits/limits.spec.json");
+    const LIMITS_SPEC: &str = include_str!("../../../examples/limits/Limits.spec.json");
 
     #[test]
     fn the_limits_property_compiles_to_an_interval() {

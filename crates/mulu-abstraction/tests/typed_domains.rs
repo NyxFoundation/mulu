@@ -20,7 +20,7 @@ fn build() -> (ProgramIr, Abstraction) {
         serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Meter.storage.json")).unwrap(),
     )
     .unwrap();
-    let props = Spec::parse(include_str!("../../../examples/typed/meter.spec.json"))
+    let props = Spec::parse(include_str!("../../../examples/typed/Meter.spec.json"))
         .unwrap()
         .compile("Meter", &ir.storage_layout)
         .unwrap();
