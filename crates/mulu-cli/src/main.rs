@@ -6,6 +6,7 @@
 
 mod analyze;
 mod build;
+mod reproduce;
 mod lean;
 mod report;
 mod worker;
@@ -175,7 +176,16 @@ fn run() -> Result<i32> {
             Ok(0)
         }
         Cmd::AnalyzeModel { model, out, objective, fail_on_candidate, max_states, tools } => {
-            analyze_model_at(&model, &out, &objective, fail_on_candidate, max_states, &tools, None)
+            analyze_model_at(
+                &model,
+                &out,
+                &objective,
+                fail_on_candidate,
+                max_states,
+                &tools,
+                None,
+                None,
+            )
         }
         Cmd::Verify { dir, tools } => verify(&dir, &tools),
     }
@@ -230,6 +240,10 @@ fn nat_set(v: &Value) -> BTreeSet<usize> {
     v.as_array().map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect()).unwrap_or_default()
 }
 
+/// Given a finished diagnostic, produce its concrete reproduction, if any.
+pub type Reproducer<'a> = &'a dyn Fn(&Diagnostic) -> Option<Value>;
+
+#[allow(clippy::too_many_arguments)]
 pub fn analyze_model_at(
     model: &Path,
     out: &Path,
@@ -238,6 +252,7 @@ pub fn analyze_model_at(
     max_states: usize,
     tools: &ToolArgs,
     provenance: Option<Value>,
+    reproducer: Option<Reproducer<'_>>,
 ) -> Result<i32> {
     if objective != "safety-nonblocking" && objective != "safety" {
         bail!("--objective must be safety-nonblocking or safety");
@@ -352,10 +367,29 @@ pub fn analyze_model_at(
         }
     }
 
+    // --- concrete reproduction (P1-03), beside the certificate rather than
+    //     in place of it
+    if let Some(rep) = reproducer {
+        for d in &mut ctx.diags {
+            if let Some(v) = rep(d) {
+                d.reproduction = Some(v);
+            }
+        }
+    }
+
     // --- exit code
     let any_unchecked = ctx.diags.iter().any(|d| d.evidence.as_ref().map(|e| !e.checked).unwrap_or(false));
     let code = if any_unchecked || kernel_ok == Some(false) || !ctx.cross_check_errors.is_empty() {
         4
+    } else if ctx
+        .diags
+        .iter()
+        .any(|d| d.reproduction.as_ref().is_some_and(|r| r["status"] == "not-reproduced"))
+    {
+        // The model and the EVM disagree. docs/08 §5: a replay that does not
+        // reproduce is not evidence the counterexample was spurious, so this
+        // is a gap to look at, not a finding to dismiss.
+        2
     } else if ctx.statuses.iter().any(|(_, s)| s == "partial" || s == "unsupported") {
         2
     } else if ctx.diags.iter().any(|d| d.kind == "spec-violation" && d.status == "proven")
@@ -436,6 +470,7 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             assumptions: MODEL_ASSUMPTIONS.to_vec(),
             evidence: None,
             detail: None,
+            reproduction: None,
         });
         return Ok(());
     }
@@ -457,6 +492,7 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             assumptions: MODEL_ASSUMPTIONS.to_vec(),
             evidence: evidence(Some(path), checked),
             detail: Some(json!({"path": steps})),
+            reproduction: None,
         });
     } else {
         let checked = a["checked"].as_bool() == Some(true);
@@ -474,6 +510,7 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             assumptions: MODEL_ASSUMPTIONS.to_vec(),
             evidence: if checked { evidence(path, true) } else { None },
             detail: None,
+            reproduction: None,
         });
     }
     Ok(())
@@ -517,6 +554,7 @@ fn handle_redundancy(ctx: &mut Ctx, fp: &FiniteProduct, n: &Normalized, a: &Valu
             assumptions: [MODEL_ASSUMPTIONS, &["pure-guard", "never-fails-not-removal-equivalent"]].concat(),
             evidence: ev,
             detail: None,
+            reproduction: None,
         });
     }
     Ok(fails)
@@ -562,6 +600,7 @@ fn handle_envelope(ctx: &mut Ctx, n: &Normalized, model: &str, a: &Value, on: &s
                 assumptions: [MODEL_ASSUMPTIONS, &["conservative-reference-plant", "partial-determinism"]].concat(),
                 evidence: evidence(Some(path), checked),
                 detail: Some(json!({"objective": a["objective"], "winning": winning_names, "disabled": disabled, "pruning_rounds": a["pruning_rounds"]})),
+                reproduction: None,
             });
             Ok(Some(w))
         }
@@ -579,6 +618,7 @@ fn handle_envelope(ctx: &mut Ctx, n: &Normalized, model: &str, a: &Value, on: &s
                 assumptions: MODEL_ASSUMPTIONS.to_vec(),
                 evidence: None,
                 detail: None,
+                reproduction: None,
             });
             Ok(None)
         }
@@ -592,6 +632,30 @@ fn handle_envelope(ctx: &mut Ctx, n: &Normalized, model: &str, a: &Value, on: &s
 #[allow(clippy::too_many_arguments)]
 fn overrestriction(ctx: &mut Ctx, fp: &FiniteProduct, impl_n: &Normalized, plant_n: &Normalized, impl_reach: &BTreeSet<usize>, impl_fails: &[(String, Vec<usize>)], plant_reach: &BTreeSet<usize>, w: &BTreeSet<usize>) {
     let cp = fp.control_plant.as_ref().unwrap();
+    // docs/04 §1: overrestriction is a comparison against a specification.
+    // Without one the envelope constrains nothing, so every rejection would
+    // qualify and the answer would say nothing.
+    if cp.bad.is_empty() && fp.bad.is_empty() {
+        ctx.status("overrestriction", "not-requested");
+        ctx.diags.push(Diagnostic {
+            id: "overrestriction".into(),
+            kind: "overrestriction",
+            claim: "spec-permits-rejected-request",
+            status: "not-requested",
+            scope: "abstract-model",
+            severity: "INFO",
+            message: "no specification: what a check is too strict *for* is undefined, so \
+                      overrestriction is not analysed"
+                .into(),
+            check_id: None,
+            depends_on: vec![],
+            assumptions: MODEL_ASSUMPTIONS.to_vec(),
+            evidence: None,
+            detail: None,
+            reproduction: None,
+        });
+        return;
+    }
     let accepting: BTreeSet<usize> = cp
         .accepting
         .as_ref()
@@ -631,6 +695,7 @@ fn overrestriction(ctx: &mut Ctx, fp: &FiniteProduct, impl_n: &Normalized, plant
                     assumptions: [MODEL_ASSUMPTIONS, &["conservative-reference-plant", "site-pair-correspondence-unproven"]].concat(),
                     evidence: None,
                     detail: Some(json!({"impl_state": pair.impl_state, "plant_state": pair.plant_state, "site": site.id, "continue_event": site.continue_event})),
+                    reproduction: None,
                 });
             }
         }

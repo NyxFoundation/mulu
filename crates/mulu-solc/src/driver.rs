@@ -54,7 +54,10 @@ impl Default for CompileOptions {
             evm_version: "cancun".into(),
             optimizer: false,
             via_ir: false,
-            include_bytecode: false,
+            // The creation code is what a counterexample is replayed on
+            // (P1-03). It is an artifact for reproduction, never the subject
+            // of a claim at this stage.
+            include_bytecode: true,
         }
     }
 }

@@ -352,3 +352,84 @@ fn an_author_written_if_revert_guard_is_named_like_a_require() {
     assert_eq!(v.code(), Some(0));
     let _ = std::fs::remove_dir_all(&out);
 }
+
+#[test]
+fn the_counterexample_is_reproduced_on_a_local_evm() {
+    if !ready() {
+        return;
+    }
+    // docs/09 §7, P1-03: forceSet(1001) must be reproduced, and with no
+    // specification the tool must not assert a hole.
+    let spec = root().join("examples/limits/limits.spec.json");
+    let (code, out) = analyze("replay", &["--spec", spec.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    let report = json(&out.join("report.json"));
+
+    let v = diag(&report, "spec-violation");
+    // the model proof and the execution sit side by side; neither replaces
+    // the other (docs/09 §5)
+    assert_eq!(v["status"], "proven");
+    assert_eq!(v["evidence"]["kernel_checked"], true);
+    let rep = &v["reproduction"];
+    assert_eq!(rep["status"], "reproduced");
+    assert_eq!(rep["calls"][0]["signature"], "forceSet(uint256)");
+    assert_eq!(rep["calls"][0]["argument"], "1001");
+    assert_eq!(rep["reason"], "violated: limit-bound");
+    // the EVM really left 1001 in the slot the specification is about
+    assert_eq!(rep["run"]["storage"]["0"], "1001");
+    assert!(rep["run"]["calls"][0]["success"].as_bool().unwrap());
+    assert!(!rep["assumptions"].as_array().unwrap().is_empty());
+
+    // and the record is on disk beside the certificates
+    let path = rep["path"].as_str().unwrap();
+    assert!(out.join(path).exists(), "missing {path}");
+
+    // the overrestriction is reproduced from the other side: the contract
+    // really rejects a call the specification permits
+    let o = report
+        .as_object()
+        .unwrap()
+        .get("diagnostics")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["kind"] == "overrestriction")
+        .unwrap();
+    assert_eq!(o["reproduction"]["status"], "reproduced");
+    assert_eq!(o["reproduction"]["calls"][0]["signature"], "setLimit(uint256)");
+    assert_eq!(o["reproduction"]["run"]["calls"][0]["success"], false);
+    assert_eq!(o["reproduction"]["run"]["calls"][0]["revert_reason"], "cap");
+
+    let v = mulu().args(["verify", out.to_str().unwrap()]).status().unwrap();
+    assert_eq!(v.code(), Some(0));
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn without_a_specification_nothing_is_asserted_about_holes() {
+    if !ready() {
+        return;
+    }
+    let (code, out) = analyze("noreplay", &[]);
+    assert_eq!(code, 0);
+    let report = json(&out.join("report.json"));
+
+    // no violation to reproduce, and none claimed
+    assert_eq!(diag(&report, "safety")["status"], "not-requested");
+    assert!(report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|d| d["kind"] != "spec-violation" || d["status"] == "not-requested"));
+
+    // and overrestriction is a comparison against a specification, so it is
+    // not answered either (docs/04 §1)
+    let o = diag(&report, "overrestriction");
+    assert_eq!(o["status"], "not-requested");
+    assert!(o["reproduction"].is_null());
+
+    // redundancy needs no specification and is still answered
+    assert_eq!(diag(&report, "check-B")["status"], "proven");
+    let _ = std::fs::remove_dir_all(&out);
+}

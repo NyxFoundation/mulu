@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 mulu-model = { path = "../mulu-model" }
 mulu-abstraction = { path = "../mulu-abstraction" }
+mulu-replay = { path = "../mulu-replay" }
 mulu-solc = { path = "../mulu-solc" }
 mulu-yul = { path = "../mulu-yul" }
 serde.workspace = true

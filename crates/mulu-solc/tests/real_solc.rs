@@ -32,7 +32,8 @@ fn compiles_limits_and_returns_the_artifacts_the_ir_needs() {
     let mut eps = c.entrypoints();
     eps.sort();
     assert_eq!(eps, vec!["forceSet(uint256)", "limit()", "setLimit(uint256)"]);
-    assert!(c.bytecode.is_none(), "bytecode is not requested by default");
+    // the creation code is requested so a counterexample can be replayed
+    assert!(c.bytecode.as_deref().is_some_and(|b| !b.is_empty()));
 }
 
 #[test]

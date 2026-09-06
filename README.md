@@ -28,6 +28,7 @@ The chain runs end to end for the P1a subset: Solidity in, certified findings ou
 | **P1-01** front end | `ir` | Solidity to ProgramIR through solc's unoptimized Yul |
 | **P1-02** abstraction | `analyze` | ProgramIR and a spec to a finite model, then analysed |
 | **P1-05** reference plant | `analyze` | the same walk again with the guards parameterised out |
+| **P1-03** replay | `analyze` | each counterexample run on an in-process EVM |
 | **P0** analysis core | `analyze-model`, `verify` | finite models in, certified findings out |
 
 All three findings of docs/10 now come out of Solidity source: a redundant
@@ -112,6 +113,37 @@ INFO     envelope         disable = {(setLimit@1_X2_LIM0, cont_B),
 INFO     overrestriction-A-setLimit#0_X1_LIM0
                           claim: spec-permits-rejected-request  status: candidate
 ```
+
+### Replay
+
+A region is not a counterexample anyone can act on. Each finding is turned
+into concrete calls and run on an in-process EVM, deploying the contract's own
+creation code:
+
+```
+WARNING  spec-violation   idle_LIM0 --call_forceSet#X2--> ... --next_tx--> bad
+                          claim: bad-reachable  status: proven
+                          reproduced on a local EVM: reproduced
+                            forceSet(1001)
+                            violated: limit-bound
+INFO     overrestriction-A-setLimit#0_X1_LIM0
+                          reproduced on a local EVM: reproduced
+                            setLimit(101)
+                            the contract rejects it: cap
+```
+
+The argument is the region's smallest member, so `X2 = [1001, MAX]` gives
+`forceSet(1001)`. The record, including the storage the EVM left behind, goes
+in `witnesses/`.
+
+A replay is **different evidence**, not a stronger version of the certificate:
+the model claim stays `proven` by the kernel and the run is recorded beside it.
+The specification is evaluated at every successful transaction end, so a
+violation a later call repairs is still seen, and a property that could not be
+evaluated is reported as such rather than counted as satisfied.
+
+A replay that does *not* reproduce means the model and the EVM disagree. That
+is a gap to look at, not a finding to dismiss, so it makes the unit incomplete.
 
 ### The reference plant
 
@@ -315,6 +347,7 @@ mulu/
 │   ├── mulu-solc/      solc Standard JSON driver, imports, AST index, hashes
 │   ├── mulu-yul/       Yul lexer/parser, CFG, effects, folding, ProgramIR, checks
 │   ├── mulu-abstraction/ uint256 intervals, guard predicates, spec DSL, model builder
+│   ├── mulu-replay/    concrete calls on an in-process EVM (revm)
 │   └── mulu-cli/       `mulu` — worker driver, Check.lean generator, report, exit codes
 ├── lean/
 │   ├── Mulu/Core/      FinitePlant, Reachability (lfp), Envelope (gfp), Correctness
@@ -337,13 +370,14 @@ live in the NyxFoundation `projects/mulu/docs` directory.
 
 ## Roadmap
 
-P1-01, P1-02 and P1-05 are done: `mulu analyze` builds by construction what
-`examples/limits/model.json` says by hand, and reaches all three findings.
+P1-01, P1-02, P1-05 and P1-03 are done: `mulu analyze` builds by construction
+what `examples/limits/model.json` says by hand, reaches all three findings, and
+runs each one on an EVM.
 
-Next is **P1-03**: solve a counterexample region for concrete arguments and
-replay it on a local EVM, so `forceSet(1001)` is reproduced rather than only
-derived. Then **P1-04**, the correspondence proofs that let a finding move from
-`abstract-model` to `yul-semantics`.
+Next is **P1-04**, the correspondence proofs that let a finding move from
+`abstract-model` to `yul-semantics`. Everything reported today is a claim about
+the generated model; the replay confirms a counterexample concretely but proves
+nothing about the paths that were *not* taken.
 P2: reentrancy, after checking the DFA-plant theory even applies.
 P3: annotations, LSP, Yul hints. P4: benchmarks.
 

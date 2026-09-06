@@ -84,6 +84,61 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
                        back to the Solidity source needs the correspondence proofs of P1-04.",
     });
 
+    // P1-03: turn each counterexample into concrete calls and run them on a
+    // local EVM. The record sits beside the certificate; a model proof and an
+    // execution are different evidence (docs/09 §5).
+    let bytecode = contract.bytecode.clone();
+    let layout = ir.storage_layout.clone();
+    let report = abstraction.report.clone();
+    let props_for_replay = props.clone();
+    let out_dir = args.out.clone();
+    let reproducer = move |d: &crate::report::Diagnostic| -> Option<serde_json::Value> {
+        let mut rep = match d.kind {
+            "spec-violation" if d.status == "proven" => {
+                let path = d.detail.as_ref()?.get("path")?;
+                match crate::reproduce::concretise(path, &report) {
+                    Ok(calls) => {
+                        let slots = crate::reproduce::spec_slots(&layout, &props_for_replay);
+                        crate::reproduce::run(
+                            bytecode.as_deref(),
+                            calls,
+                            &slots,
+                            &props_for_replay,
+                            &layout,
+                        )
+                    }
+                    Err(why) => crate::reproduce::Reproduction {
+                        status: "unsupported",
+                        reason: Some(why),
+                        calls: vec![],
+                        run: None,
+                        path: None,
+                        assumptions: crate::reproduce::ASSUMPTIONS.to_vec(),
+                    },
+                }
+            }
+            "overrestriction" => {
+                let state = d.detail.as_ref()?.get("impl_state")?.as_str()?;
+                match crate::reproduce::concretise_rejected_call(state, &report) {
+                    Ok(calls) => crate::reproduce::run_rejection(bytecode.as_deref(), calls),
+                    Err(why) => crate::reproduce::Reproduction {
+                        status: "unsupported",
+                        reason: Some(why),
+                        calls: vec![],
+                        run: None,
+                        path: None,
+                        assumptions: crate::reproduce::ASSUMPTIONS.to_vec(),
+                    },
+                }
+            }
+            _ => return None,
+        };
+        if let Err(e) = crate::reproduce::write_record(&out_dir, &d.id, &mut rep) {
+            eprintln!("warning: could not write the reproduction record: {e:#}");
+        }
+        serde_json::to_value(&rep).ok()
+    };
+
     println!("\n--- analysis of the generated model ---\n");
     let code = crate::analyze_model_at(
         &args.out.join("model.json"),
@@ -93,6 +148,7 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         args.max_states,
         tools,
         Some(provenance),
+        Some(&reproducer),
     )?;
 
     // An incomplete abstraction cannot be reported as a complete analysis.

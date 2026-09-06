@@ -36,9 +36,23 @@ pub struct PredicateInfo {
     pub set: IntervalSet,
 }
 
+/// What the model's name for an entrypoint stands for. Turning an abstract
+/// counterexample into calls needs this: the path names entrypoints the way
+/// the model does, and a replay needs the signature and the selector.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntrypointInfo {
+    /// The name the model's states and events are built from.
+    pub model_name: String,
+    pub signature: String,
+    pub selector: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AbstractionReport {
     pub environment_profile: &'static str,
+    pub entrypoints: Vec<EntrypointInfo>,
     pub entrypoints_modelled: Vec<String>,
     pub entrypoints_skipped: Vec<String>,
     pub argument_predicates: Vec<PredicateInfo>,
@@ -777,6 +791,15 @@ impl<'a> Walk<'a> {
 
         let report = AbstractionReport {
             environment_profile: ENVIRONMENT_PROFILE,
+            entrypoints: entries
+                .iter()
+                .map(|e| EntrypointInfo {
+                    model_name: e.solidity_name.clone(),
+                    signature: e.signature.clone(),
+                    selector: e.selector.clone(),
+                    param_type: e.param_type.clone(),
+                })
+                .collect(),
             entrypoints_modelled: entries.iter().map(|e| e.signature.clone()).collect(),
             entrypoints_skipped: self
                 .b

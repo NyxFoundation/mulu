@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mulu-model", "crates/mulu-solc", "crates/mulu-yul", "crates/mulu-abstraction", "crates/mulu-cli"]
+members = ["crates/mulu-model", "crates/mulu-solc", "crates/mulu-yul", "crates/mulu-abstraction", "crates/mulu-replay", "crates/mulu-cli"]
 
 [workspace.package]
 version = "0.1.0"

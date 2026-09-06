@@ -32,12 +32,22 @@ pub struct Diagnostic {
     pub evidence: Option<Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<Value>,
+    /// The concrete run of this counterexample, when there was one (P1-03).
+    /// It sits beside the certificate, not in place of it: a model proof and
+    /// an execution are different evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reproduction: Option<Value>,
 }
 
 pub const MODEL_ASSUMPTIONS: &[&str] = &[
     "finite-model-is-the-object", // claims are about model.json, not a source program
     "normalisation-by-mulu-model", // name→index mapping trusted (recorded in manifest)
 ];
+
+/// `forceSet(uint256)` -> `forceSet`, so a call reads like the source.
+fn strip_args(sig: &str) -> &str {
+    sig.split('(').next().unwrap_or(sig)
+}
 
 pub fn print_human(diags: &[Diagnostic], out_dir: &std::path::Path) {
     for d in diags {
@@ -50,6 +60,19 @@ pub fn print_human(diags: &[Diagnostic], out_dir: &std::path::Path) {
             meta.push_str(&format!("  depends on: {}", d.depends_on.join(", ")));
         }
         println!("         {meta}");
+        if let Some(r) = &d.reproduction {
+            let status = r["status"].as_str().unwrap_or("?");
+            println!("         reproduced on a local EVM: {status}");
+            if let Some(calls) = r["calls"].as_array() {
+                for c in calls {
+                    let arg = c["argument"].as_str().unwrap_or("");
+                    println!("           {}({arg})", strip_args(c["signature"].as_str().unwrap_or("?")));
+                }
+            }
+            if let Some(reason) = r["reason"].as_str() {
+                println!("           {reason}");
+            }
+        }
         if let Some(e) = &d.evidence {
             let k = match e.kernel_checked {
                 Some(true) => ", kernel-checked",
