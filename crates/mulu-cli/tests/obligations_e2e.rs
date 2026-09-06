@@ -300,3 +300,65 @@ fn a_model_given_directly_says_it_stands_for_nothing() {
     assert_eq!(mulu().args(["verify", out.to_str().unwrap()]).status().unwrap().code(), Some(0));
     let _ = std::fs::remove_dir_all(&out);
 }
+
+#[test]
+fn the_sarif_may_not_disagree_with_the_report() {
+    if !ready() {
+        return;
+    }
+    // The SARIF is what a reviewer sees on a pull request. If verify trusted
+    // it, turning a proven violation into a pass would take one edit and
+    // leave the report it came from untouched.
+    let out = analysed("sarif-edited");
+    let path = out.join("results.sarif");
+    let mut doc = json(&path);
+    for r in doc["runs"][0]["results"].as_array_mut().unwrap() {
+        if r["ruleId"] == "spec-violation" {
+            r["kind"] = serde_json::json!("pass");
+            r["level"] = serde_json::json!("none");
+        }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    let o = mulu().args(["verify", out.to_str().unwrap()]).output().unwrap();
+    assert_eq!(o.status.code(), Some(4));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("spec-violation") && err.contains("\"pass\""), "{err}");
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn a_finding_cannot_be_dropped_from_the_sarif() {
+    if !ready() {
+        return;
+    }
+    let out = analysed("sarif-dropped");
+    let path = out.join("results.sarif");
+    let mut doc = json(&path);
+    let results = doc["runs"][0]["results"].as_array_mut().unwrap();
+    results.retain(|r| r["ruleId"] != "spec-violation");
+    std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    let o = mulu().args(["verify", out.to_str().unwrap()]).output().unwrap();
+    assert_eq!(o.status.code(), Some(4));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("is in report.json and not in results.sarif"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn deleting_the_sarif_does_not_skip_the_check() {
+    if !ready() {
+        return;
+    }
+    let out = analysed("no-sarif");
+    std::fs::remove_file(out.join("results.sarif")).unwrap();
+
+    let o = mulu().args(["verify", out.to_str().unwrap()]).output().unwrap();
+    assert_eq!(o.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("results.sarif is missing"));
+    let _ = std::fs::remove_dir_all(&out);
+}

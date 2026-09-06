@@ -25,6 +25,7 @@ pub struct AnalyzeArgs {
 }
 
 pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
+    let root = crate::build::source_root(&args.sources);
     let (bundle, name, ir) = crate::build::compile_and_lower(
         &args.sources,
         args.contract.as_deref(),
@@ -151,9 +152,15 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         args.fail_on_candidate,
         args.max_states,
         tools,
-        Some(provenance),
-        Some(&reproducer),
-        Some(&ledger),
+        crate::Frontend {
+            provenance: Some(provenance),
+            reproducer: Some(&reproducer),
+            ledger: Some(&ledger),
+            sites: crate::build::check_sites(&bundle, &ir, &root),
+            // A finding about the contract as a whole is shown on the
+            // contract, not on an arbitrary line of it.
+            fallback_site: contract_site(&bundle, &ir, &root),
+        },
     )?;
 
     // An incomplete abstraction cannot be reported as a complete analysis.
@@ -222,4 +229,20 @@ fn print_abstraction(
             println!("    {u}");
         }
     }
+}
+
+/// The whole source file the contract is declared in, with no region: a
+/// specification violation is about the contract, and inventing a line for it
+/// would point the reader somewhere the finding is not.
+fn contract_site(
+    bundle: &mulu_solc::BuildBundle,
+    ir: &mulu_yul::ir::ProgramIr,
+    root: &std::path::Path,
+) -> Option<crate::build::Site> {
+    let src = bundle.sources.iter().find(|s| s.path == ir.source_path)?;
+    Some(crate::build::Site {
+        path: crate::build::source_uri(root, &src.path),
+        sha256: src.sha256.clone(),
+        region: None,
+    })
 }

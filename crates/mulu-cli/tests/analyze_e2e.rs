@@ -433,3 +433,178 @@ fn without_a_specification_nothing_is_asserted_about_holes() {
     assert_eq!(diag(&report, "check-B")["status"], "proven");
     let _ = std::fs::remove_dir_all(&out);
 }
+
+#[test]
+fn a_run_that_was_cut_off_never_reads_as_a_clean_one() {
+    if !ready() {
+        return;
+    }
+    // docs/09 §4: unsupported/partial must not be displayed as safe. The
+    // limits used to be labels — the worker wrote "partial" on the analyses
+    // and then reported `check-B: never-fails / proven` anyway, because the
+    // reachability search had its own fuel and finished. A reader skimming
+    // the findings could not tell the run had been cut off at all.
+    let spec = root().join("examples/limits/Limits.spec.json");
+    let (code, out) = analyze("cutoff", &["--spec", spec.to_str().unwrap(), "--max-states", "5"]);
+    assert_eq!(code, 2, "a cut-off run is inconclusive, not a pass and not a violation");
+
+    let report = json(&out.join("report.json"));
+    let diags = report["diagnostics"].as_array().unwrap();
+    assert!(!diags.is_empty(), "silence would read as nothing to report");
+
+    for d in diags {
+        let (id, status) = (d["id"].as_str().unwrap(), d["status"].as_str().unwrap());
+        assert_eq!(status, "unknown", "{id} claims {status} on a model that was never analysed");
+        // and it says why, so the reader can raise the limit
+        let msg = d["message"].as_str().unwrap();
+        assert!(msg.contains("limit is 5"), "{id} gives no reason: {msg}");
+    }
+
+    // the same three questions are still asked, so nothing silently vanished
+    let ids: Vec<&str> = diags.iter().map(|d| d["id"].as_str().unwrap()).collect();
+    for want in ["safety", "check-A", "check-B", "envelope"] {
+        assert!(ids.contains(&want), "missing {want} in {ids:?}");
+    }
+
+    // no certificate was emitted for a search that did not run
+    let manifest = json(&out.join("manifest.json"));
+    assert!(
+        manifest["certificates"].as_array().unwrap().is_empty(),
+        "a declined analysis has nothing to certify"
+    );
+
+    let statuses = &report["summary"]["analyses"];
+    assert!(
+        statuses.as_array().unwrap().iter().any(|s| s["status"] == "partial"),
+        "the summary must carry the cut-off too: {statuses}"
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Every SARIF result must obey the rule from the standard that makes the
+/// format safe to hand to a code-scanning viewer: a result whose `kind` is
+/// anything other than `fail` has `level` `none`. That is what stops a
+/// candidate or an undecided run from being drawn as an error.
+fn sarif_results(out: &Path) -> Vec<serde_json::Value> {
+    let doc = json(&out.join("results.sarif"));
+    assert_eq!(doc["version"], "2.1.0");
+    let run = &doc["runs"][0];
+    let rules: Vec<&str> =
+        run["tool"]["driver"]["rules"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    let results = run["results"].as_array().unwrap().clone();
+    for r in &results {
+        let (kind, level) = (r["kind"].as_str().unwrap(), r["level"].as_str().unwrap());
+        if kind != "fail" {
+            assert_eq!(level, "none", "SARIF forbids a level on a {kind} result: {r}");
+        }
+        let rule = r["ruleId"].as_str().unwrap();
+        assert!(rules.contains(&rule), "{rule} has no rule metadata");
+        assert_eq!(rules[r["ruleIndex"].as_u64().unwrap() as usize], rule, "ruleIndex disagrees with ruleId");
+        assert!(!r["partialFingerprints"]["muluFinding/v1"].as_str().unwrap().is_empty());
+    }
+    results
+}
+
+#[test]
+fn sarif_says_what_was_proven_and_what_was_only_suspected() {
+    if !ready() {
+        return;
+    }
+    let spec = root().join("examples/limits/Limits.spec.json");
+    let (code, out) = analyze("sarif", &["--spec", spec.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    let results = sarif_results(&out);
+
+    let by_rule = |id: &str| -> serde_json::Value {
+        results.iter().find(|r| r["ruleId"] == id).unwrap_or_else(|| panic!("no {id}")).clone()
+    };
+
+    // proven: a real finding, drawn at its severity
+    let v = by_rule("spec-violation");
+    assert_eq!(v["kind"], "fail");
+    assert_eq!(v["properties"]["status"], "proven");
+
+    // candidate: SARIF's word for it is `review`, and it carries no level
+    let o = by_rule("overrestriction");
+    assert_eq!(o["kind"], "review");
+    assert_eq!(o["properties"]["status"], "candidate");
+    assert!(o["message"]["text"].as_str().unwrap().contains("candidate"));
+
+    // the envelope is an answer, not a defect
+    assert_eq!(by_rule("envelope")["kind"], "informational");
+
+    // the scope the whole tool rests on is in every message and in properties
+    for r in &results {
+        assert_eq!(r["properties"]["scope"], "abstract-model");
+        assert!(
+            r["message"]["text"].as_str().unwrap().contains("finite model"),
+            "a viewer shows this line and nothing else: {}",
+            r["message"]["text"]
+        );
+    }
+
+    // the location is the line the check is written on, resolvable from the
+    // working directory rather than from solc's own source key
+    let b = by_rule("redundant-check");
+    let loc = &b["locations"][0]["physicalLocation"];
+    // Relative to the working directory when the source is under it, an
+    // absolute `file:` URI when it is not, as it is when cargo runs this test
+    // from the crate directory. Either way it names the file, not solc's key.
+    let uri = loc["artifactLocation"]["uri"].as_str().unwrap();
+    assert!(uri.ends_with("examples/limits/Limits.sol"), "{uri}");
+    let on_disk = PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri));
+    let on_disk = if on_disk.is_absolute() { on_disk } else { std::env::current_dir().unwrap().join(on_disk) };
+    assert!(on_disk.exists(), "{uri} does not resolve to a file");
+    let line = loc["region"]["startLine"].as_u64().unwrap();
+    let text = std::fs::read_to_string(&on_disk).unwrap();
+    let src_line = text.lines().nth(line as usize - 1).unwrap();
+    assert!(src_line.contains("require"), "line {line} is {src_line:?}, not check B");
+
+    // and the artifact it points into carries the digest mulu read
+    let artifacts = json(&out.join("results.sarif"))["runs"][0]["artifacts"].clone();
+    assert!(artifacts.as_array().unwrap().iter().any(|a| a["location"]["uri"] == uri
+        && a["hashes"]["sha-256"].as_str().is_some_and(|h| h.len() == 64)));
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn sarif_from_a_cut_off_run_decides_nothing() {
+    if !ready() {
+        return;
+    }
+    let spec = root().join("examples/limits/Limits.spec.json");
+    let (code, out) = analyze("sarif-cut", &["--spec", spec.to_str().unwrap(), "--max-states", "5"]);
+    assert_eq!(code, 2);
+    for r in sarif_results(&out) {
+        // `open` is SARIF's "evaluated, and could not decide". Not `pass`,
+        // which is what a viewer shows as a clean file.
+        assert_eq!(r["kind"], "open", "{} on a run that was cut off: {r}", r["ruleId"]);
+        assert_eq!(r["level"], "none");
+    }
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn the_same_input_produces_the_same_bytes() {
+    if !ready() {
+        return;
+    }
+    // docs/09 §4, the other half of P1-06: two runs of the same version on the
+    // same source must be comparable, or a diff of two reports is noise.
+    let spec = root().join("examples/limits/Limits.spec.json");
+    let (a_code, a) = analyze("det-a", &["--spec", spec.to_str().unwrap()]);
+    let (b_code, b) = analyze("det-b", &["--spec", spec.to_str().unwrap()]);
+    assert_eq!(a_code, b_code);
+    for f in ["model.json", "core-model.json", "abstraction.json", "report.json", "results.sarif"] {
+        let (x, y) = (std::fs::read(a.join(f)).unwrap(), std::fs::read(b.join(f)).unwrap());
+        assert_eq!(x, y, "{f} differs between two runs of the same input");
+    }
+    // manifest.json carries a timestamp, so only its analysis-bearing parts
+    // are expected to match.
+    let (ma, mb) = (json(&a.join("manifest.json")), json(&b.join("manifest.json")));
+    for k in ["input", "provenance", "certificates", "semantics", "kernel"] {
+        assert_eq!(ma[k], mb[k], "manifest.{k} differs between two runs");
+    }
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}

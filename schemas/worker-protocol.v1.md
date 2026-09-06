@@ -34,6 +34,26 @@ the **certificate** the worker produced *and re-checked* (`checked: true`).
 `complete` never means "safe": a completed search that found a violation is
 also `complete`.
 
+## Limits
+
+`limits` is enforced, not recorded. A model over `max_states` or `max_edges`
+is **declined**: no analysis runs, every requested analysis comes back
+`partial` with a `reason` naming the size and the limit, and the response
+carries `"cutoff_reason": "limits"`.
+
+```json
+{"protocol_version": 1, "request_id": "impl", "status": "partial",
+ "analyses": {"redundancy": {"status": "partial",
+                             "reason": "the model has 36 states and the limit is 5; nothing was analysed"}},
+ "statistics": {}, "cutoff_reason": "limits"}
+```
+
+Running the analyses and labelling the response `partial` would be worse than
+useless: each search has its own fuel, so a cut-off run could still finish and
+report a check as `never-fails / proven`. docs/09 §4 requires that a partial
+or unsupported result never be displayed as safe, and the only way to hold
+that is to not produce the result.
+
 ## Certificates
 
 ```json

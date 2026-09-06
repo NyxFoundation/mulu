@@ -79,6 +79,7 @@ The chain runs end to end for the P1a subset: Solidity in, certified findings ou
 | **P1-05** reference plant | `analyze` | the same walk again with the guards parameterised out |
 | **P1-03** replay | `analyze` | each counterexample run on an in-process EVM |
 | **P1-04** correspondence | `analyze`, `verify` | what stands between a model claim and the program |
+| **P1-06** output | `analyze`, `verify` | SARIF, deterministic artifacts, cut-off runs that decide nothing |
 | **P0** analysis core | `analyze-model`, `verify` | finite models in, certified findings out |
 
 Several source files, `import` statements and guards written in modifiers all
@@ -142,6 +143,28 @@ INFO     envelope         disable = {(setLimit@1_X2_LIM0, cont_B),
 INFO     overrestriction-A-setLimit#0_X1_LIM0
                           claim: spec-permits-rejected-request  status: candidate
 ```
+
+### SARIF, and what a viewer is allowed to draw
+
+Every run also writes `results.sarif` (SARIF 2.1.0), and `--sarif <path>` puts
+a copy where a CI step wants it. It is a second rendering of `report.json`,
+never a second analysis, and `verify` compares the two finding by finding.
+
+SARIF separates *what the tool concluded* (`kind`) from *how bad it is*
+(`level`), and requires `level` to be `none` whenever `kind` is not `fail`. So
+a candidate cannot be drawn as an error even by a viewer that ignores
+everything mulu says about scope:
+
+| mulu status | SARIF kind | what a viewer shows |
+| --- | --- | --- |
+| `proven`, `reproduced` | `fail` | a finding, at its severity |
+| `candidate` | `review` | needs a human |
+| `unknown` | `open` | undecided |
+| `not-requested` | `notApplicable` | not run |
+
+A run cut off by `--max-states` decides nothing: the analyses are declined
+rather than run and labelled, every finding comes back `unknown`, and the exit
+code is 2. Nothing from a cut-off run is ever shown as `pass`.
 
 ### What a finding is a claim about
 
@@ -314,6 +337,7 @@ analysis-limits/
 ├── core-model.json        normalised integer model the worker reads (+ core-plant.json)
 ├── worker-impl.json       raw worker responses (+ worker-plant.json)
 ├── report.json            machine-readable diagnostics (the source of truth)
+├── results.sarif          the same diagnostics as SARIF 2.1.0, for a code-scanning viewer
 └── certificates/
     ├── *.json             one certificate per finding (checked by the worker)
     ├── Check.lean         self-contained kernel re-check: `theorem … := by decide`
@@ -373,8 +397,13 @@ Mixed results use the priority 4 > 3 > 2 > 1 > 0.
 
 `verify` re-hashes `model.json`, re-normalises it, re-checks every certificate
 through the worker, regenerates `Check.lean` byte-for-byte and re-runs it under
-the kernel with an axiom audit. Changing an edge, a certificate or the proof
-tactic makes it fail (exit 4).
+the kernel with an axiom audit. It also checks that `results.sarif` says what
+`report.json` says, and that neither file is missing. Changing an edge, a
+certificate, the proof tactic or a line of the SARIF makes it fail (exit 4).
+
+Two runs of the same version on the same input produce byte-identical
+`model.json`, `core-model.json`, `abstraction.json`, `report.json` and
+`results.sarif`, so a diff of two runs is signal.
 
 ## What is proved, and by what
 
@@ -456,7 +485,7 @@ it. The one obligation everything else waits on is a formal semantics of solc's
 Yul in Lean, which is docs/09 §9's fourth open question and a piece of work in
 its own right.
 
-After that: **P1-06** (SARIF and cut-off handling), **P1b** (Foundry and
+After that: **P1b** (Foundry and
 Hardhat projects, incremental caching), **P2** reentrancy, after checking the
 DFA-plant theory even applies, **P3** annotations and LSP, **P4** benchmarks.
 P2: reentrancy, after checking the DFA-plant theory even applies.

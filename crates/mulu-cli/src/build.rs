@@ -28,11 +28,7 @@ pub fn compile_and_lower(
     evm_version: &str,
 ) -> Result<(mulu_solc::BuildBundle, String, ProgramIr)> {
     let solc = Solc::discover(solc_path)?;
-    let root = sources
-        .first()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let root = source_root(sources);
     let opts = CompileOptions { evm_version: evm_version.to_string(), ..Default::default() };
 
     let bundle = solc
@@ -262,4 +258,114 @@ pub fn print_summary(bundle: &mulu_solc::BuildBundle, ir: &ProgramIr, out: &Path
     }
     let _ = Purity::Pure;
     println!("\nartifacts: {}", out.display());
+}
+
+/// Where a finding is written. `region` is absent when the finding is about
+/// the file as a whole: inventing a line for it would point the reader at
+/// somewhere the finding is not.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Site {
+    /// Relative to the working directory when the file is under it, which is
+    /// what a code-scanning viewer resolves against. solc keys sources
+    /// relative to the first input's directory, so this is not that key.
+    pub path: String,
+    pub sha256: String,
+    pub region: Option<Region>,
+}
+
+/// 1-based lines, and 1-based columns in UTF-16 code units, as SARIF counts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Region {
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+/// The directory solc source keys are relative to: the first input's parent.
+pub fn source_root(sources: &[PathBuf]) -> PathBuf {
+    sources.first().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// A solc source key turned into a URI a reader can open. solc keys sources
+/// relative to the first input's directory, which locates nothing on its own.
+///
+/// A code-scanning viewer resolves a relative URI against the repository, so
+/// a file under the working directory gets a path relative to it, which is
+/// the same string on every machine. A file outside it gets an absolute
+/// `file:` URI, which is machine-specific but at least points at the file;
+/// the alternative is a path that resolves to the wrong file or to none.
+pub fn source_uri(root: &Path, key: &str) -> String {
+    let full = root.join(key);
+    let (Ok(full), Ok(cwd)) = (full.canonicalize(), std::env::current_dir()) else {
+        return key.to_string();
+    };
+    match full.strip_prefix(&cwd) {
+        Ok(rel) => join_uri(rel),
+        Err(_) => format!("file://{}", join_uri(&full)),
+    }
+}
+
+/// Path components as URI segments, escaping the characters that would end
+/// the path or start a query.
+fn join_uri(p: &Path) -> String {
+    let escape = |s: std::borrow::Cow<str>| {
+        s.chars()
+            .map(|c| match c {
+                '%' => "%25".to_string(),
+                ' ' => "%20".to_string(),
+                '#' => "%23".to_string(),
+                '?' => "%3F".to_string(),
+                _ => c.to_string(),
+            })
+            .collect::<String>()
+    };
+    let parts: Vec<String> =
+        p.components().map(|c| escape(c.as_os_str().to_string_lossy())).collect();
+    // An absolute path's first component is the root, which already is "/".
+    parts.join("/").replace("//", "/")
+}
+
+/// The structured form of [`where_of`]. `None` for a generated location:
+/// pointing a reader at a line that is not in their source is worse than
+/// pointing them at nothing.
+pub fn site_of(
+    bundle: &mulu_solc::BuildBundle,
+    ir: &ProgramIr,
+    root: &Path,
+    loc: Option<mulu_yul::Location>,
+) -> Option<Site> {
+    let l = loc?;
+    let src = bundle.source_by_id(l.file_id)?;
+    let start = l.byte_start as usize;
+    let (start_line, start_col) = src.line_col(start)?;
+    // A span that runs past the end of the file is a bug upstream, not a
+    // reason to drop the location: fall back to the start.
+    let (end_line, end_col) =
+        src.line_col(start + l.byte_length as usize).unwrap_or((start_line, start_col));
+    // `@use-src` names the file as the Yul refers to it, which is the name the
+    // user typed; `sources` names it as solc resolved it. Either way it is a
+    // key relative to the build root, so it goes through `source_uri`.
+    let key = ir.use_src.get(&l.file_id).cloned().unwrap_or_else(|| src.path.clone());
+    Some(Site {
+        path: source_uri(root, &key),
+        sha256: src.sha256.clone(),
+        region: Some(Region {
+            start_line,
+            start_column: start_col + 1,
+            end_line,
+            end_column: end_col + 1,
+        }),
+    })
+}
+
+/// Where each check of the model is written, keyed by the check id the model
+/// uses. The model itself carries no source location, on purpose: it is the
+/// front end's job to say where a finding about check `A` should be shown.
+pub fn check_sites(
+    bundle: &mulu_solc::BuildBundle,
+    ir: &ProgramIr,
+    root: &Path,
+) -> std::collections::BTreeMap<String, Site> {
+    ir.checks.iter().filter_map(|c| Some((c.id.clone(), site_of(bundle, ir, root, c.source)?))).collect()
 }

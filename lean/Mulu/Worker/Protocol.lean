@@ -165,12 +165,32 @@ instance : FromJson Request where
 
 def statusJson (s : String) : (String × Json) := ("status", s)
 
+/-- Over budget: the analyses are declined rather than run and labelled.
+Labelling a completed run `partial` while still handing back certificates
+invites a reader to take the certificate and leave the label, and running a
+model larger than the caller allowed is not a smaller answer, it is a
+different one. -/
+def declined (req : Request) (reason : String) : Json :=
+  let one := Json.mkObj [statusJson "partial", ("reason", Json.str reason)]
+  Json.mkObj [("protocol_version", 1), ("request_id", req.requestId),
+    ("status", "partial"),
+    ("analyses", Json.mkObj (req.analyses.map (fun a => (a, one)))),
+    ("statistics", Json.mkObj []),
+    ("cutoff_reason", "limits")]
+
 /-- Run the analyses. Every produced certificate is re-checked with
 `checkCertificate` before it is reported as checked. -/
 def analyze (m : CoreModel) (req : Request) : Json := Id.run do
   let p := m.plant
   let mut fields : List (String × Json) := []
-  let overLimit := p.numStates > req.limits.maxStates || p.edges.length > req.limits.maxEdges
+  if p.numStates > req.limits.maxStates then
+    return declined req
+      s!"the model has {p.numStates} states and the limit is {req.limits.maxStates}; nothing was analysed"
+  if p.edges.length > req.limits.maxEdges then
+    return declined req
+      s!"the model has {p.edges.length} edges and the limit is {req.limits.maxEdges}; nothing was analysed"
+  -- Past this point the model is within budget, so no analysis below has a
+  -- size reason to stop: a `partial` there means the check itself failed.
   let want (a : String) := req.analyses.contains a
   -- reachability
   let R := reachSet p
@@ -178,11 +198,10 @@ def analyze (m : CoreModel) (req : Request) : Json := Id.run do
   let reachOk := checkCertificate p reachCert
   if want "reachability" then
     fields := fields ++ [("reachability", Json.mkObj [
-      statusJson (if overLimit then "partial" else if reachOk then "complete" else "partial"),
+      statusJson (if reachOk then "complete" else "partial"),
       ("states", toJson R),
       ("certificate", toJson reachCert),
-      ("checked", toJson reachOk),
-      ("cutoff_reason", if overLimit then "max_states_or_max_edges" else Json.null)])]
+      ("checked", toJson reachOk)])]
   -- safety: direct search for a bad state
   if want "safety" then
     if p.bad.isEmpty then
@@ -200,7 +219,7 @@ def analyze (m : CoreModel) (req : Request) : Json := Id.run do
       | none =>
         let safe := reachOk && (R.all fun q => !p.bad.contains q)
         fields := fields ++ [("safety", Json.mkObj [
-          statusJson (if overLimit then "partial" else if safe then "complete" else "partial"),
+          statusJson (if safe then "complete" else "partial"),
           ("violation", Json.null),
           ("certificate", toJson reachCert),
           ("checked", toJson safe)])]
@@ -220,7 +239,7 @@ def analyze (m : CoreModel) (req : Request) : Json := Id.run do
         ("checked", toJson (ok && reached)),
         ("fail_witness_state", match witness with | some q => toJson q | none => Json.null)]
     fields := fields ++ [("redundancy", Json.mkObj [
-      statusJson (if overLimit then "partial" else if reachOk then "complete" else "partial"),
+      statusJson (if reachOk then "complete" else "partial"),
       ("checks", toJson items)])]
   -- envelope
   if want "envelope" then
@@ -237,7 +256,7 @@ def analyze (m : CoreModel) (req : Request) : Json := Id.run do
       let ok := checkCertificate p cert
       let W := finalW chain
       let realizable := p.initial.any (W.contains ·)
-      let st := if overLimit then "partial" else if !ok then "partial"
+      let st := if !ok then "partial"
         else if realizable then "complete" else "unrealizable"
       fields := fields ++ [("envelope", Json.mkObj [
         statusJson st,
@@ -250,7 +269,7 @@ def analyze (m : CoreModel) (req : Request) : Json := Id.run do
   let stats := Json.mkObj [("states", toJson p.numStates), ("edges", toJson p.edges.length),
     ("events", toJson p.numEvents), ("reachable_states", toJson R.length)]
   return Json.mkObj [("protocol_version", 1), ("request_id", req.requestId),
-    ("status", if overLimit then "partial" else "complete"),
+    ("status", "complete"),
     ("analyses", Json.mkObj fields), ("statistics", stats)]
 
 def verify (m : CoreModel) (req : Request) (cert : Certificate) : Json :=

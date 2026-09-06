@@ -10,6 +10,7 @@ mod obligations;
 mod reproduce;
 mod lean;
 mod report;
+mod sarif;
 mod worker;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -19,7 +20,7 @@ use mulu_model::hash::{canonical_json, sha256_hex};
 use mulu_model::{reference, validate::parse_and_validate, FiniteProduct};
 use report::{Diagnostic, Evidence, MODEL_ASSUMPTIONS};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -78,6 +79,9 @@ enum Cmd {
         fail_on_candidate: bool,
         #[arg(long, default_value = "100000")]
         max_states: usize,
+        /// Also write the SARIF results here (always written to <out>/results.sarif)
+        #[arg(long)]
+        sarif: Option<PathBuf>,
         #[command(flatten)]
         tools: ToolArgs,
     },
@@ -110,6 +114,9 @@ enum Cmd {
         fail_on_candidate: bool,
         #[arg(long, default_value = "100000")]
         max_states: usize,
+        /// Also write the SARIF results here (always written to <out>/results.sarif)
+        #[arg(long)]
+        sarif: Option<PathBuf>,
         #[command(flatten)]
         tools: ToolArgs,
     },
@@ -147,21 +154,27 @@ fn run() -> Result<i32> {
             objective,
             fail_on_candidate,
             max_states,
+            sarif,
             tools,
-        } => analyze::run(
-            &analyze::AnalyzeArgs {
-                sources,
-                contract,
-                spec,
-                out,
-                solc,
-                evm_version,
-                objective,
-                fail_on_candidate,
-                max_states,
-            },
-            &tools,
-        ),
+        } => {
+            let out2 = out.clone();
+            let code = analyze::run(
+                &analyze::AnalyzeArgs {
+                    sources,
+                    contract,
+                    spec,
+                    out,
+                    solc,
+                    evm_version,
+                    objective,
+                    fail_on_candidate,
+                    max_states,
+                },
+                &tools,
+            )?;
+            copy_sarif(&out2, sarif.as_deref())?;
+            Ok(code)
+        }
         Cmd::Ir { sources, contract, out, solc, evm_version } => build::run(&build::IrArgs {
             sources,
             contract,
@@ -176,21 +189,26 @@ fn run() -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&n.core)?);
             Ok(0)
         }
-        Cmd::AnalyzeModel { model, out, objective, fail_on_candidate, max_states, tools } => {
-            analyze_model_at(
-                &model,
-                &out,
-                &objective,
-                fail_on_candidate,
-                max_states,
-                &tools,
-                None,
-                None,
-                None,
-            )
+        Cmd::AnalyzeModel { model, out, objective, fail_on_candidate, max_states, sarif, tools } => {
+            let code =
+                analyze_model_at(&model, &out, &objective, fail_on_candidate, max_states, &tools, Frontend::default())?;
+            copy_sarif(&out, sarif.as_deref())?;
+            Ok(code)
         }
         Cmd::Verify { dir, tools } => verify(&dir, &tools),
     }
+}
+
+/// `--sarif` is a second copy of `<out>/results.sarif`, for a CI step that
+/// wants the file at a fixed path. It is never a different document.
+fn copy_sarif(out: &Path, to: Option<&Path>) -> Result<()> {
+    let Some(to) = to else { return Ok(()) };
+    let from = out.join("results.sarif");
+    if let Some(parent) = to.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&from, to).with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +263,21 @@ fn nat_set(v: &Value) -> BTreeSet<usize> {
 /// Given a finished diagnostic, produce its concrete reproduction, if any.
 pub type Reproducer<'a> = &'a dyn Fn(&Diagnostic) -> Option<Value>;
 
-#[allow(clippy::too_many_arguments)]
+/// What the Solidity front end knows and a bare model does not. `analyze-model`
+/// passes the default: no provenance, no replay, no obligations, no source
+/// locations, because there is no source.
+#[derive(Default)]
+pub struct Frontend<'a> {
+    pub provenance: Option<Value>,
+    pub reproducer: Option<Reproducer<'a>>,
+    pub ledger: Option<&'a obligations::Ledger>,
+    /// Check id -> where it is written. The model carries no source location
+    /// on purpose; saying where a finding belongs is the front end's job.
+    pub sites: BTreeMap<String, build::Site>,
+    /// Where to point a finding that belongs to no single check.
+    pub fallback_site: Option<build::Site>,
+}
+
 pub fn analyze_model_at(
     model: &Path,
     out: &Path,
@@ -253,10 +285,9 @@ pub fn analyze_model_at(
     fail_on_candidate: bool,
     max_states: usize,
     tools: &ToolArgs,
-    provenance: Option<Value>,
-    reproducer: Option<Reproducer<'_>>,
-    ledger: Option<&obligations::Ledger>,
+    fe: Frontend<'_>,
 ) -> Result<i32> {
+    let Frontend { provenance, reproducer, ledger, sites, fallback_site } = fe;
     if objective != "safety-nonblocking" && objective != "safety" {
         bail!("--objective must be safety-nonblocking or safety");
     }
@@ -425,7 +456,11 @@ pub fn analyze_model_at(
         "schema_version": 1,
         "tool": TOOL,
         "created_unix": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
-        "input": {"model": model.display().to_string(), "model_sha256": model_hash,
+        // The model analyse wrote into this directory is named by its place in
+        // it, not by where the directory happened to be: two runs of the same
+        // input differ in nothing.
+        "input": {"model": model.strip_prefix(out).unwrap_or(model).display().to_string(),
+                  "model_sha256": model_hash,
                   "core_model_sha256": sha256_hex(core_json.as_bytes())},
         "objective": objective,
         "semantics": {"finite-product": 1, "lean": "Mulu (lean/), kernel tactic: decide", "allowed_axioms": lean::ALLOWED_AXIOMS},
@@ -447,6 +482,18 @@ pub fn analyze_model_at(
         "statistics": {"impl": resp_impl["statistics"].clone()},
     });
     fs::write(out.join("report.json"), serde_json::to_string_pretty(&report)?)?;
+
+    // P1-06: the same findings in SARIF, for a code-scanning viewer. It is a
+    // second rendering of report.json, never a second analysis.
+    let doc = sarif::build(
+        &ctx.diags,
+        &sites,
+        code,
+        fallback_site.as_ref(),
+        sarif::invocation(code, &ctx.statuses, &ctx.cross_check_errors),
+    );
+    fs::write(out.join("results.sarif"), serde_json::to_string_pretty(&doc)?)?;
+
     report::print_human(&ctx.diags, out);
     println!("exit code: {code}");
     Ok(code)
@@ -482,6 +529,30 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             scope: "abstract-model",
             severity: "INFO",
             message: "no specification (no bad states): violation search not requested".into(),
+            check_id: None,
+            depends_on: vec![],
+            assumptions: MODEL_ASSUMPTIONS.to_vec(),
+            evidence: None,
+            detail: None,
+            reproduction: None,
+            obligations: vec![],
+        });
+        return Ok(());
+    }
+    if status == "partial" || status == "error" {
+        // Saying "no bad state is reachable" here would be reporting a search
+        // that did not run as a search that found nothing.
+        ctx.diags.push(Diagnostic {
+            id: "safety".into(),
+            kind: "spec-violation",
+            claim: "bad-reachable",
+            status: "unknown",
+            scope: "abstract-model",
+            severity: "INFO",
+            message: format!(
+                "the violation search did not run: {}",
+                a["reason"].as_str().unwrap_or("the analysis was cut off")
+            ),
             check_id: None,
             depends_on: vec![],
             assumptions: MODEL_ASSUMPTIONS.to_vec(),
@@ -542,6 +613,33 @@ fn handle_redundancy(ctx: &mut Ctx, fp: &FiniteProduct, n: &Normalized, a: &Valu
     ctx.status("redundancy", &status);
     let mut fails = vec![];
     let reach = reference::reach(&n.core);
+    if status == "partial" || status == "error" {
+        // The checks exist; they were not examined. Saying nothing about them
+        // reads as having nothing to say.
+        for decl in &fp.checks {
+            ctx.diags.push(Diagnostic {
+                id: format!("check-{}", decl.id),
+                kind: "check-unknown",
+                claim: "never-fails",
+                status: "unknown",
+                scope: "abstract-model",
+                severity: "INFO",
+                message: format!(
+                    "check {} was not examined: {}",
+                    decl.id,
+                    a["reason"].as_str().unwrap_or("the analysis was cut off")
+                ),
+                check_id: Some(decl.id.clone()),
+                depends_on: decl.depends_on.clone(),
+                assumptions: MODEL_ASSUMPTIONS.to_vec(),
+                evidence: None,
+                detail: None,
+                reproduction: None,
+                obligations: vec![],
+            });
+        }
+        return Ok(fails);
+    }
     for item in a["checks"].as_array().cloned().unwrap_or_default() {
         let idx = item["id"].as_u64().unwrap_or(0) as usize;
         let decl = &fp.checks[idx];
@@ -634,7 +732,10 @@ fn handle_envelope(ctx: &mut Ctx, n: &Normalized, model: &str, a: &Value, on: &s
                 status: if other == "not-requested" { "not-requested" } else { "unknown" },
                 scope: "abstract-model",
                 severity: "INFO",
-                message: format!("envelope {other}: {}", a["reason"].as_str().unwrap_or("")),
+                message: format!(
+                    "envelope {other}: {}",
+                    a["reason"].as_str().unwrap_or("no reason was given")
+                ),
                 check_id: None,
                 depends_on: vec![],
                 assumptions: MODEL_ASSUMPTIONS.to_vec(),
@@ -791,13 +892,41 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
             "obligations.json is missing, so no diagnostic's layer could be checked".into(),
         );
     }
-    if ledger_path.exists() {
+    let report: Option<Value> = if dir.join("report.json").exists() {
+        Some(serde_json::from_str(
+            &fs::read_to_string(dir.join("report.json")).context("reading report.json")?,
+        )?)
+    } else {
+        None
+    };
+
+    // The SARIF is what a reviewer actually sees. It has to say what the
+    // report says, or editing one file would be enough to hide a finding.
+    // Checked on its own and not inside the ledger block: two checks that can
+    // each be skipped by deleting the other's file are one check.
+    let sarif_path = dir.join("results.sarif");
+    match (&report, sarif_path.exists()) {
+        (_, false) => {
+            failures.push("results.sarif is missing, so the findings a viewer sees are unchecked".into())
+        }
+        (None, true) => {} // already reported: there is nothing to compare against
+        (Some(report), true) => {
+            let doc: Value = serde_json::from_str(
+                &fs::read_to_string(&sarif_path).context("reading results.sarif")?,
+            )
+            .context("parsing results.sarif")?;
+            let bad = sarif::check_against(report, &doc);
+            if bad.is_empty() {
+                println!("{:<9} results.sarif agrees with report.json", "OK");
+            }
+            failures.extend(bad);
+        }
+    }
+
+    if let (true, Some(report)) = (ledger_path.exists(), &report) {
         let ledger_text = fs::read_to_string(&ledger_path).context("reading obligations.json")?;
         let l: obligations::Ledger =
             serde_json::from_str(&ledger_text).context("parsing obligations.json")?;
-        let report: Value = serde_json::from_str(
-            &fs::read_to_string(dir.join("report.json")).context("reading report.json")?,
-        )?;
         // The ledger's kind decides what a finding rests on, so it is not the
         // report's to choose. Bind it to how the analysis was actually run.
         let from_solidity = !manifest["provenance"].is_null();
