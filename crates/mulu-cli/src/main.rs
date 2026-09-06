@@ -1020,6 +1020,20 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
         }
     }
     if failures.is_empty() {
+        // "OK" answers "is this directory internally consistent". On a run
+        // that was cut off it is also true and reads as "this analysis is
+        // fine", so say which analyses did not run.
+        let cut: Vec<String> = report
+            .as_ref()
+            .and_then(|r| r["summary"]["analyses"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter(|a| a["status"] == "partial" || a["status"] == "unsupported")
+            .map(|a| format!("{} ({})", a["analysis"].as_str().unwrap_or("?"), a["status"].as_str().unwrap_or("?")))
+            .collect();
+        if !cut.is_empty() {
+            println!("NOTE      this run decided nothing about: {}", cut.join(", "));
+        }
         println!("verify: OK ({} certificates, model sha256 {})", loaded.len(), &model_hash[..12]);
         Ok(0)
     } else {

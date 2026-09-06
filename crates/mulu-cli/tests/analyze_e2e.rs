@@ -478,6 +478,15 @@ fn a_run_that_was_cut_off_never_reads_as_a_clean_one() {
         statuses.as_array().unwrap().iter().any(|s| s["status"] == "partial"),
         "the summary must carry the cut-off too: {statuses}"
     );
+
+    // `verify` on this directory is honestly OK: nothing was claimed, so
+    // nothing needs a certificate. It has to say that rather than let "OK"
+    // read as "this analysis is fine".
+    let o = mulu().args(["verify", out.to_str().unwrap()]).output().unwrap();
+    assert_eq!(o.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert!(text.contains("decided nothing about"), "{text}");
+    assert!(text.contains("0 certificates"), "{text}");
     let _ = std::fs::remove_dir_all(&out);
 }
 
