@@ -53,3 +53,43 @@ example : checkCertificate f1 (.redundancy [0,1,2] ⟨0, 0, 1⟩) = false := by 
 #print axioms checkCertificate_sound
 #print axioms checkRedundancy_sound
 #print axioms checkPath_sound
+
+/-! ## Simulation (P1-04)
+
+The link that would carry a model claim to the program. It is proved here on a
+toy concrete system, which shows the theorem is usable; supplying the same
+conditions for solc's Yul is the open work, so nothing the analyser reports is
+promoted past `abstract-model`.
+-/
+open Mulu.Semantics
+
+/-- A concrete system with two states, mapped onto f1 by `abs`. -/
+def toy : Concrete Bool where
+  initial := fun s => s = false
+  step := fun s s' => s = false ∧ s' = true
+
+def toyAbs : Bool → Nat := fun s => if s then 1 else 0
+
+def toySim : Simulation toy f1 where
+  abs := toyAbs
+  initial_covered := by
+    intro s hs
+    simp [toy] at hs
+    subst hs
+    simp [toyAbs, f1]
+  step_covered := by
+    intro s s' _ hstep
+    obtain ⟨h, h'⟩ := hstep
+    subst h; subst h'
+    exact ⟨0, by simp [toyAbs, f1]⟩
+
+-- Reachability carries across, so a checked invariant of the model covers the
+-- concrete run.
+example : ∀ s, ReachableC toy s → Reachable f1 (toySim.abs s) := toySim.reachable
+
+example (h : isClosed f1 [0, 1, 2] = true) : ∀ s, ReachableC toy s → toySim.abs s ∈ [0, 1, 2] :=
+  toySim.invariant h
+
+#print axioms Mulu.Semantics.Simulation.reachable
+#print axioms Mulu.Semantics.Simulation.never_fails
+#print axioms Mulu.Semantics.Simulation.invariant

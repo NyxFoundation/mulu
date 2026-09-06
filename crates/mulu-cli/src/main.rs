@@ -6,6 +6,7 @@
 
 mod analyze;
 mod build;
+mod obligations;
 mod reproduce;
 mod lean;
 mod report;
@@ -185,6 +186,7 @@ fn run() -> Result<i32> {
                 &tools,
                 None,
                 None,
+                None,
             )
         }
         Cmd::Verify { dir, tools } => verify(&dir, &tools),
@@ -253,6 +255,7 @@ pub fn analyze_model_at(
     tools: &ToolArgs,
     provenance: Option<Value>,
     reproducer: Option<Reproducer<'_>>,
+    ledger: Option<&obligations::Ledger>,
 ) -> Result<i32> {
     if objective != "safety-nonblocking" && objective != "safety" {
         bail!("--objective must be safety-nonblocking or safety");
@@ -367,6 +370,19 @@ pub fn analyze_model_at(
         }
     }
 
+    // --- correspondence (P1-04): a finding is reported at the deepest layer
+    //     whose obligations are discharged. None is, so nothing moves past
+    //     the model, and the ledger says exactly what is missing.
+    if let Some(l) = ledger {
+        for d in &mut ctx.diags {
+            let deps = obligations::depends_on(d.kind, d.check_id.as_deref());
+            let refs: Vec<&str> = deps.iter().map(|s| s.as_str()).collect();
+            d.scope = l.promoted_scope(&refs);
+            d.obligations = deps;
+        }
+        fs::write(out.join("obligations.json"), serde_json::to_string_pretty(l)?)?;
+    }
+
     // --- concrete reproduction (P1-03), beside the certificate rather than
     //     in place of it
     if let Some(rep) = reproducer {
@@ -471,6 +487,7 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             evidence: None,
             detail: None,
             reproduction: None,
+            obligations: vec![],
         });
         return Ok(());
     }
@@ -493,6 +510,7 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             evidence: evidence(Some(path), checked),
             detail: Some(json!({"path": steps})),
             reproduction: None,
+            obligations: vec![],
         });
     } else {
         let checked = a["checked"].as_bool() == Some(true);
@@ -511,6 +529,7 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             evidence: if checked { evidence(path, true) } else { None },
             detail: None,
             reproduction: None,
+            obligations: vec![],
         });
     }
     Ok(())
@@ -555,6 +574,7 @@ fn handle_redundancy(ctx: &mut Ctx, fp: &FiniteProduct, n: &Normalized, a: &Valu
             evidence: ev,
             detail: None,
             reproduction: None,
+            obligations: vec![],
         });
     }
     Ok(fails)
@@ -601,6 +621,7 @@ fn handle_envelope(ctx: &mut Ctx, n: &Normalized, model: &str, a: &Value, on: &s
                 evidence: evidence(Some(path), checked),
                 detail: Some(json!({"objective": a["objective"], "winning": winning_names, "disabled": disabled, "pruning_rounds": a["pruning_rounds"]})),
                 reproduction: None,
+                obligations: vec![],
             });
             Ok(Some(w))
         }
@@ -619,6 +640,7 @@ fn handle_envelope(ctx: &mut Ctx, n: &Normalized, model: &str, a: &Value, on: &s
                 evidence: None,
                 detail: None,
                 reproduction: None,
+                obligations: vec![],
             });
             Ok(None)
         }
@@ -653,6 +675,7 @@ fn overrestriction(ctx: &mut Ctx, fp: &FiniteProduct, impl_n: &Normalized, plant
             evidence: None,
             detail: None,
             reproduction: None,
+            obligations: vec![],
         });
         return;
     }
@@ -696,6 +719,7 @@ fn overrestriction(ctx: &mut Ctx, fp: &FiniteProduct, impl_n: &Normalized, plant
                     evidence: None,
                     detail: Some(json!({"impl_state": pair.impl_state, "plant_state": pair.plant_state, "site": site.id, "continue_event": site.continue_event})),
                     reproduction: None,
+                    obligations: vec![],
                 });
             }
         }
@@ -753,6 +777,57 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
         }
         loaded.push((id, model, cert));
     }
+    // A reported scope must be one the ledger allows. Without this the layer
+    // a claim is made at would be a note in a file, not a checked property.
+    let ledger_path = dir.join("obligations.json");
+    if ledger_path.exists() {
+        let ledger_text = fs::read_to_string(&ledger_path).context("reading obligations.json")?;
+        let l: obligations::Ledger =
+            serde_json::from_str(&ledger_text).context("parsing obligations.json")?;
+        let report: Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("report.json")).context("reading report.json")?,
+        )?;
+        // The tool discharges nothing, so a discharge in the ledger is a claim
+        // no one checked. Refuse it rather than let it raise a scope.
+        for o in l.obligations.iter().filter(|o| !o.open()) {
+            failures.push(format!(
+                "obligation {} claims to be discharged by {:?}, and nothing here can check \
+                 that; P1-04 discharges none",
+                o.id,
+                o.discharged_by.as_deref().unwrap_or("?")
+            ));
+        }
+        let mut checked = 0usize;
+        for d in report["diagnostics"].as_array().cloned().unwrap_or_default() {
+            let id = d["id"].as_str().unwrap_or("?").to_string();
+            let claimed = d["scope"].as_str().unwrap_or("");
+            let deps: Vec<String> = d["obligations"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let refs: Vec<&str> = deps.iter().map(|s| s.as_str()).collect();
+            let allowed = l.promoted_scope(&refs);
+            if claimed != allowed {
+                failures.push(format!(
+                    "{id} is reported at {claimed:?} but its obligations reach {allowed:?}"
+                ));
+            }
+            // and every obligation it names must be in the ledger
+            for o in &deps {
+                if l.find(o).is_none() {
+                    failures.push(format!("{id} names an obligation the ledger does not: {o}"));
+                }
+            }
+            checked += 1;
+        }
+        println!(
+            "{:<9} {checked} diagnostic scope(s) against {} obligation(s), {} open",
+            "OK",
+            l.obligations.len(),
+            l.open().len()
+        );
+    }
+
     // kernel route: regenerate and compare byte-for-byte, then run
     let mut models: Vec<(&str, &mulu_model::CoreModel)> = vec![("model_impl", &impl_n.core)];
     if let Some(p) = &plant_n {

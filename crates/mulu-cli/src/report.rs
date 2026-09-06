@@ -28,6 +28,10 @@ pub struct Diagnostic {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
     pub assumptions: Vec<&'static str>,
+    /// Correspondence obligations this claim rests on (P1-04). While any is
+    /// open the claim stays at `abstract-model`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obligations: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]

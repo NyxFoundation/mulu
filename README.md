@@ -29,6 +29,7 @@ The chain runs end to end for the P1a subset: Solidity in, certified findings ou
 | **P1-02** abstraction | `analyze` | ProgramIR and a spec to a finite model, then analysed |
 | **P1-05** reference plant | `analyze` | the same walk again with the guards parameterised out |
 | **P1-03** replay | `analyze` | each counterexample run on an in-process EVM |
+| **P1-04** correspondence | `analyze`, `verify` | what stands between a model claim and the program |
 | **P0** analysis core | `analyze-model`, `verify` | finite models in, certified findings out |
 
 All three findings of docs/10 now come out of Solidity source: a redundant
@@ -113,6 +114,44 @@ INFO     envelope         disable = {(setLimit@1_X2_LIM0, cont_B),
 INFO     overrestriction-A-setLimit#0_X1_LIM0
                           claim: spec-permits-rejected-request  status: candidate
 ```
+
+### What a finding is a claim about
+
+Everything reported is a claim about the model the tool built. Moving one to
+the program means crossing the layers of docs/04 §7 — model, Yul semantics,
+Solidity source, deployed bytecode — and each crossing is an obligation.
+
+`lean/Mulu/Semantics/Simulation.lean` states the first crossing. Given an
+abstraction with `initial_covered` and `step_covered`, a checked invariant of
+the model covers every reachable concrete state, and a checked `never-fails`
+becomes a statement about the program, provided the concrete guard's failing
+branch is matched by that check's fail event.
+
+`obligations.json` is the ledger of those conditions for one analysis:
+
+```
+correspondence
+  findings are reported at: abstract-model
+  8 obligation(s), 8 open
+    semantics:yul-not-formalised             reaches yul-semantics
+    simulation:initial-covered               reaches yul-semantics
+    simulation:step-covered                  reaches yul-semantics
+    check:fail-step-matched:A                reaches yul-semantics
+    check:fail-step-matched:B                reaches yul-semantics
+    plant:policy-corresponds                 reaches yul-semantics
+    compilation:yul-corresponds-to-source    reaches solidity-source
+    compilation:optimised-bytecode           reaches evm-bytecode
+```
+
+**None of them is discharged**, because there is no formal semantics of solc's
+Yul to discharge them against. So every finding stays at `abstract-model`, and
+the reason is enumerated rather than described.
+
+The rule is executable, not documentary. `verify` recomputes each finding's
+scope from the ledger and refuses a report that claims more; it also refuses a
+ledger that claims a discharge, since the tool discharges nothing and cannot
+check one. A layer nothing is recorded for is not treated as reached: silence
+means the conditions were never enumerated.
 
 ### Replay
 
@@ -320,6 +359,9 @@ tactic makes it fail (exit 4).
 | `Core.envelope_unrealizable` | if no initial state survives, no supervisor meets the objective |
 | `Analysis.checkRedundancy_sound` | no reachable state enables the fail event of the check |
 | `Analysis.checkCertificate_sound` | `checkCertificate p c = true → Claim p c` for all of the above |
+| `Semantics.Simulation.reachable` | an abstraction covering initial states and steps carries reachability |
+| `Semantics.Simulation.invariant` | so a checked invariant covers every reachable concrete state |
+| `Semantics.Simulation.never_fails` | and a checked redundancy says the guard's failing branch is unreachable |
 
 The IR and abstraction stages prove nothing. They record, per check, the
 syntactic criterion matched and the semantic gap it leaves open. The
@@ -352,6 +394,7 @@ mulu/
 ├── lean/
 │   ├── Mulu/Core/      FinitePlant, Reachability (lfp), Envelope (gfp), Correctness
 │   ├── Mulu/Analysis/  Redundancy, Certificate (checkCertificate + soundness)
+│   ├── Mulu/Semantics/ Simulation: carrying a model claim to what it models
 │   ├── Mulu/Worker/    JSON protocol
 │   ├── Main.lean       mulu-worker
 │   └── Tests/          kernel-checked fixture theorems and rejected tampers
@@ -374,10 +417,14 @@ P1-01, P1-02, P1-05 and P1-03 are done: `mulu analyze` builds by construction
 what `examples/limits/model.json` says by hand, reaches all three findings, and
 runs each one on an EVM.
 
-Next is **P1-04**, the correspondence proofs that let a finding move from
-`abstract-model` to `yul-semantics`. Everything reported today is a claim about
-the generated model; the replay confirms a counterexample concretely but proves
-nothing about the paths that were *not* taken.
+P1-04 states the crossing and enumerates what it needs; it does not discharge
+it. The one obligation everything else waits on is a formal semantics of solc's
+Yul in Lean, which is docs/09 §9's fourth open question and a piece of work in
+its own right.
+
+After that: **P1-06** (SARIF and cut-off handling), **P1b** (Foundry and
+Hardhat projects, incremental caching), **P2** reentrancy, after checking the
+DFA-plant theory even applies, **P3** annotations and LSP, **P4** benchmarks.
 P2: reentrancy, after checking the DFA-plant theory even applies.
 P3: annotations, LSP, Yul hints. P4: benchmarks.
 

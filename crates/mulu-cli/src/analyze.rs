@@ -139,6 +139,10 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         serde_json::to_value(&rep).ok()
     };
 
+    // P1-04: what stands between a model claim and a claim about the program.
+    let ledger = crate::obligations::ledger(&ir, &abstraction.report);
+    print_obligations(&ledger);
+
     println!("\n--- analysis of the generated model ---\n");
     let code = crate::analyze_model_at(
         &args.out.join("model.json"),
@@ -149,6 +153,7 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         tools,
         Some(provenance),
         Some(&reproducer),
+        Some(&ledger),
     )?;
 
     // An incomplete abstraction cannot be reported as a complete analysis.
@@ -164,6 +169,19 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         return Ok(2);
     }
     Ok(code)
+}
+
+fn print_obligations(l: &crate::obligations::Ledger) {
+    let open = l.open();
+    println!("\ncorrespondence");
+    println!("  findings are reported at: {}", l.scope);
+    println!("  {} obligation(s), {} open", l.obligations.len(), open.len());
+    for o in &open {
+        println!("    {:<40} reaches {}", o.id, o.reaches);
+    }
+    if open.is_empty() {
+        println!("    none");
+    }
 }
 
 fn print_abstraction(
