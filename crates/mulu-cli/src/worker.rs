@@ -56,6 +56,7 @@ pub struct WorkerRequest<'a> {
     pub objective: &'a str,
     pub certificate_path: Option<&'a str>,
     pub max_states: usize,
+    pub max_edges: usize,
 }
 
 /// Run the worker in `dir`. A timeout yields `status: partial` per docs/09 §4.
@@ -68,7 +69,8 @@ pub fn call(tc: &Toolchain, dir: &Path, req: &WorkerRequest, timeout: Duration) 
         "model_path": req.model_path,
         "analyses": req.analyses,
         "objective": req.objective,
-        "limits": {"max_states": req.max_states, "timeout_ms": timeout.as_millis() as u64},
+        "limits": {"max_states": req.max_states, "max_edges": req.max_edges,
+                   "timeout_ms": timeout.as_millis() as u64},
     });
     if let Some(c) = req.certificate_path {
         body["certificate_path"] = json!(c);
@@ -103,7 +105,19 @@ pub fn call(tc: &Toolchain, dir: &Path, req: &WorkerRequest, timeout: Duration) 
         if start.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
+            // docs/09 section 4: a timeout the parent detects is `partial`.
+            // It has to be partial *per analysis* as well, because that is
+            // what the caller reads; a response with no `analyses` left every
+            // one of them looking like an error, and an error was not one of
+            // the statuses the exit code treats as undecided.
+            let reason =
+                format!("the worker was stopped after {} ms; nothing was analysed", timeout.as_millis());
+            let one = json!({"status": "partial", "reason": reason});
+            let analyses: serde_json::Map<String, Value> =
+                req.analyses.iter().map(|a| ((*a).to_string(), one.clone())).collect();
             return Ok(json!({"protocol_version": 1, "request_id": req.request_id, "status": "partial",
+                "analyses": Value::Object(analyses), "statistics": {},
+                "cutoff_reason": "timeout",
                 "error": format!("worker timeout after {} ms", timeout.as_millis())}));
         }
         std::thread::sleep(Duration::from_millis(5));

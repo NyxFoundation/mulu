@@ -79,6 +79,8 @@ enum Cmd {
         fail_on_candidate: bool,
         #[arg(long, default_value = "100000")]
         max_states: usize,
+        #[arg(long, default_value = "1000000")]
+        max_edges: usize,
         /// Also write the SARIF results here (always written to <out>/results.sarif)
         #[arg(long)]
         sarif: Option<PathBuf>,
@@ -114,6 +116,8 @@ enum Cmd {
         fail_on_candidate: bool,
         #[arg(long, default_value = "100000")]
         max_states: usize,
+        #[arg(long, default_value = "1000000")]
+        max_edges: usize,
         /// Also write the SARIF results here (always written to <out>/results.sarif)
         #[arg(long)]
         sarif: Option<PathBuf>,
@@ -154,6 +158,7 @@ fn run() -> Result<i32> {
             objective,
             fail_on_candidate,
             max_states,
+            max_edges,
             sarif,
             tools,
         } => {
@@ -169,6 +174,7 @@ fn run() -> Result<i32> {
                     objective,
                     fail_on_candidate,
                     max_states,
+                    max_edges,
                 },
                 &tools,
             )?;
@@ -189,9 +195,11 @@ fn run() -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&n.core)?);
             Ok(0)
         }
-        Cmd::AnalyzeModel { model, out, objective, fail_on_candidate, max_states, sarif, tools } => {
-            let code =
-                analyze_model_at(&model, &out, &objective, fail_on_candidate, max_states, &tools, Frontend::default())?;
+        Cmd::AnalyzeModel { model, out, objective, fail_on_candidate, max_states, max_edges, sarif, tools } => {
+            let code = analyze_model_at(
+                &model, &out, &objective, fail_on_candidate,
+                Limits { max_states, max_edges }, &tools, Frontend::default(),
+            )?;
             copy_sarif(&out, sarif.as_deref())?;
             Ok(code)
         }
@@ -263,6 +271,15 @@ fn nat_set(v: &Value) -> BTreeSet<usize> {
 /// Given a finished diagnostic, produce its concrete reproduction, if any.
 pub type Reproducer<'a> = &'a dyn Fn(&Diagnostic) -> Option<Value>;
 
+/// How large a model the caller is willing to have analysed. Over either
+/// bound the worker declines rather than analysing a model the caller did not
+/// ask for; see schemas/worker-protocol.v1.md.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub max_states: usize,
+    pub max_edges: usize,
+}
+
 /// What the Solidity front end knows and a bare model does not. `analyze-model`
 /// passes the default: no provenance, no replay, no obligations, no source
 /// locations, because there is no source.
@@ -276,6 +293,10 @@ pub struct Frontend<'a> {
     pub sites: BTreeMap<String, build::Site>,
     /// Where to point a finding that belongs to no single check.
     pub fallback_site: Option<build::Site>,
+    /// What the abstraction could not model. A finding proven on a model that
+    /// omits part of the contract is still proven on that model, and the run
+    /// has to say the model is not the whole contract.
+    pub unsupported: Vec<String>,
 }
 
 pub fn analyze_model_at(
@@ -283,11 +304,15 @@ pub fn analyze_model_at(
     out: &Path,
     objective: &str,
     fail_on_candidate: bool,
-    max_states: usize,
+    limits: Limits,
     tools: &ToolArgs,
     fe: Frontend<'_>,
 ) -> Result<i32> {
-    let Frontend { provenance, reproducer, ledger, sites, fallback_site } = fe;
+    let Frontend { provenance, reproducer, ledger, sites, fallback_site, unsupported } = fe;
+    // Recorded as an analysis status so it reaches the exit code, the report
+    // summary and the SARIF invocation by the same route as everything else.
+    let mut ctx_unsupported = unsupported.clone();
+    ctx_unsupported.sort();
     if objective != "safety-nonblocking" && objective != "safety" {
         bail!("--objective must be safety-nonblocking or safety");
     }
@@ -314,6 +339,9 @@ pub fn analyze_model_at(
         statuses: vec![],
         cross_check_errors: vec![],
     };
+    if !ctx_unsupported.is_empty() {
+        ctx.status("abstraction", "unsupported");
+    }
 
     // --- implementation model
     let impl_analyses: Vec<&str> = if plant_n.is_some() {
@@ -324,7 +352,7 @@ pub fn analyze_model_at(
     let resp_impl = worker::call(
         &ctx.tc,
         out,
-        &WorkerRequest { request_id: "impl", method: "analyze", model_path: "core-model.json", analyses: &impl_analyses, objective, certificate_path: None, max_states },
+        &WorkerRequest { request_id: "impl", method: "analyze", model_path: "core-model.json", analyses: &impl_analyses, objective, certificate_path: None, max_states: limits.max_states, max_edges: limits.max_edges },
         ctx.timeout,
     )?;
     fs::write(out.join("worker-impl.json"), serde_json::to_string_pretty(&resp_impl)?)?;
@@ -342,7 +370,7 @@ pub fn analyze_model_at(
         let resp_plant = worker::call(
             &ctx.tc,
             out,
-            &WorkerRequest { request_id: "plant", method: "analyze", model_path: "core-plant.json", analyses: &["reachability", "envelope"], objective, certificate_path: None, max_states },
+            &WorkerRequest { request_id: "plant", method: "analyze", model_path: "core-plant.json", analyses: &["reachability", "envelope"], objective, certificate_path: None, max_states: limits.max_states, max_edges: limits.max_edges },
             ctx.timeout,
         )?;
         fs::write(out.join("worker-plant.json"), serde_json::to_string_pretty(&resp_plant)?)?;
@@ -438,7 +466,14 @@ pub fn analyze_model_at(
         // reproduce is not evidence the counterexample was spurious, so this
         // is a gap to look at, not a finding to dismiss.
         2
-    } else if ctx.statuses.iter().any(|(_, s)| s == "partial" || s == "unsupported") {
+    } else if ctx.statuses.iter().any(|(_, s)| s != "complete" && s != "unrealizable" && s != "not-requested")
+        || ctx.diags.iter().any(|d| d.status == "unknown")
+    {
+        // Anything that is not a finished analysis leaves the run undecided,
+        // and so does a single finding mulu could not decide. Listing the
+        // statuses that mean "cut off" instead would make a status nobody
+        // listed -- a worker error, a name a later version invents -- exit 0,
+        // which is the one answer a run that decided nothing must not give.
         2
     } else if ctx.diags.iter().any(|d| d.kind == "spec-violation" && d.status == "proven")
         || (fail_on_candidate && ctx.diags.iter().any(|d| d.status == "candidate"))
@@ -477,7 +512,8 @@ pub fn analyze_model_at(
         "tool": TOOL,
         "manifest": "manifest.json",
         "summary": {"exit_code": code, "analyses": ctx.statuses.iter().map(|(a, s)| json!({"analysis": a, "status": s})).collect::<Vec<_>>(),
-                    "kernel_checked": kernel_ok, "cross_check_errors": ctx.cross_check_errors},
+                    "kernel_checked": kernel_ok, "cross_check_errors": ctx.cross_check_errors,
+                    "unsupported": ctx_unsupported},
         "diagnostics": ctx.diags,
         "statistics": {"impl": resp_impl["statistics"].clone()},
     });
@@ -500,7 +536,7 @@ pub fn analyze_model_at(
         &sites,
         code,
         fallback_site.as_ref(),
-        sarif::invocation(code, &ctx.statuses, &ctx.cross_check_errors),
+        sarif::invocation(code, &ctx.statuses, &ctx.cross_check_errors, &ctx_unsupported),
     );
     fs::write(out.join("results.sarif"), serde_json::to_string_pretty(&doc)?)?;
 
@@ -890,7 +926,7 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
         let resp = worker::call(
             &tc,
             dir,
-            &WorkerRequest { request_id: &id, method: "verify", model_path, analyses: &[], objective: "safety-nonblocking", certificate_path: Some(&rel), max_states: usize::MAX },
+            &WorkerRequest { request_id: &id, method: "verify", model_path, analyses: &[], objective: "safety-nonblocking", certificate_path: Some(&rel), max_states: usize::MAX, max_edges: usize::MAX },
             Duration::from_millis(tools.timeout_ms),
         )?;
         let ok = resp["checked"].as_bool() == Some(true);
@@ -930,7 +966,11 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
         (_, false) => {
             failures.push("results.sarif is missing, so the findings a viewer sees are unchecked".into())
         }
-        (None, true) => {} // already reported: there is nothing to compare against
+        (None, true) => failures.push(
+            "results.sarif could not be checked because report.json is missing, and the SARIF is \
+             what a reviewer sees"
+                .into(),
+        ),
         (Some(report), true) => {
             let doc: Value = serde_json::from_str(
                 &fs::read_to_string(&sarif_path).context("reading results.sarif")?,

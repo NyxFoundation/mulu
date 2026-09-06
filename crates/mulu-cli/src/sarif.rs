@@ -288,17 +288,39 @@ pub fn build(
 
 /// `executionSuccessful` is about mulu, not about the code under analysis: a
 /// run that finished and found a violation succeeded.
-pub fn invocation(exit_code: i32, statuses: &[(String, String)], errors: &[String]) -> Value {
-    let notifications: Vec<Value> = errors
+pub fn invocation(
+    exit_code: i32,
+    statuses: &[(String, String)],
+    errors: &[String],
+    unsupported: &[String],
+) -> Value {
+    let mut notifications: Vec<Value> = errors
         .iter()
         .map(|e| json!({"level": "error", "message": {"text": format!("cross-check mismatch (tool bug): {e}")}}))
         .collect();
+    // A finding proven on a model that omits part of the contract is a fact
+    // about that model. This is where the run says the model is not the whole
+    // contract, so the results below are not a statement about what was left
+    // out. It is a property of the run, not a finding, which is why it is a
+    // notification rather than a result.
+    if !unsupported.is_empty() {
+        notifications.push(json!({
+            "level": "warning",
+            "message": {"text": format!(
+                "the abstraction left {} thing(s) unmodelled, so the model is not the whole \
+                 contract and nothing here says anything about them: {}",
+                unsupported.len(),
+                unsupported.join("; ")
+            )},
+        }));
+    }
     json!({
         "executionSuccessful": exit_code != 4 && errors.is_empty(),
         "exitCode": exit_code,
         "toolExecutionNotifications": notifications,
         "properties": {
             "analyses": statuses.iter().map(|(a, s)| json!({"analysis": a, "status": s})).collect::<Vec<_>>(),
+            "unsupported": unsupported,
         },
     })
 }

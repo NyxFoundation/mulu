@@ -188,6 +188,12 @@ pub fn ledger(ir: &ProgramIr, report: &AbstractionReport) -> Ledger {
             }
         }
     }
+    // A behaviour the abstraction could not model is not a missing proof of
+    // step-covered, it is a reason step-covered is false. It belongs in the
+    // ledger next to the condition it defeats, not only in a warning.
+    for u in &report.unsupported {
+        step_raised.push(format!("not modelled: {u}"));
+    }
     initial_raised.sort();
     step_raised.sort();
 

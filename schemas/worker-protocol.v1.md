@@ -48,6 +48,10 @@ carries `"cutoff_reason": "limits"`.
  "statistics": {}, "cutoff_reason": "limits"}
 ```
 
+The parent process applies the same shape to its own timeout: it returns
+`partial` per analysis with a reason and `"cutoff_reason": "timeout"`, rather
+than a response with no `analyses` at all.
+
 Running the analyses and labelling the response `partial` would be worse than
 useless: each search has its own fuel, so a cut-off run could still finish and
 report a check as `never-fails / proven`. docs/09 §4 requires that a partial

@@ -232,6 +232,42 @@ contract C is B {
         checks.is_empty() || has_store,
         "a model with guards but no store would be the silent failure this guards against"
     );
+
+    // The report and the SARIF have to carry it too. A reader of either sees
+    // findings proven on a model that is not the whole contract, and the run
+    // is the only place that can say so.
+    let report = json(&out.join("report.json"));
+    assert_eq!(report["summary"]["exit_code"], 2, "the report must agree with the process");
+    assert!(!report["summary"]["unsupported"].as_array().unwrap().is_empty());
+    assert!(report["summary"]["analyses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["analysis"] == "abstraction" && a["status"] == "unsupported"));
+
+    let inv = json(&out.join("results.sarif"))["runs"][0]["invocations"][0].clone();
+    assert_eq!(inv["exitCode"], 2);
+    let notes: Vec<String> = inv["toolExecutionNotifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["message"]["text"].as_str().unwrap().to_string())
+        .collect();
+    assert!(notes.iter().any(|n| n.contains("unmodelled")), "{notes:?}");
+
+    // and the ledger records it against the condition it defeats, rather than
+    // leaving step-covered looking merely unproven
+    let ledger = json(&out.join("obligations.json"));
+    let step = ledger["obligations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "simulation:step-covered")
+        .unwrap()
+        .clone();
+    let raised: Vec<&str> =
+        step["raised_by"].as_array().unwrap().iter().map(|r| r.as_str().unwrap()).collect();
+    assert!(raised.iter().any(|r| r.starts_with("not modelled:")), "{raised:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -618,4 +654,47 @@ fn the_same_input_produces_the_same_bytes() {
     }
     let _ = std::fs::remove_dir_all(&a);
     let _ = std::fs::remove_dir_all(&b);
+}
+
+#[test]
+fn a_worker_that_was_stopped_never_exits_zero() {
+    if !ready() {
+        return;
+    }
+    // The parent's timeout used to return a response with no `analyses`, so
+    // every analysis defaulted to the status "error", and the exit code rule
+    // listed only partial and unsupported. A timed-out run therefore exited
+    // 0: green in CI, having decided nothing.
+    let spec = root().join("examples/limits/Limits.spec.json");
+    let (code, out) = analyze("timeout", &["--spec", spec.to_str().unwrap(), "--timeout-ms", "1"]);
+    assert_eq!(code, 2, "a run the worker never finished is not a pass");
+
+    let report = json(&out.join("report.json"));
+    for d in report["diagnostics"].as_array().unwrap() {
+        assert_eq!(d["status"], "unknown", "{}", d["id"]);
+        assert!(
+            d["message"].as_str().unwrap().contains("stopped after"),
+            "{} does not say the worker was stopped: {}",
+            d["id"],
+            d["message"]
+        );
+    }
+    assert!(report["summary"]["analyses"].as_array().unwrap().iter().all(|a| a["status"] == "partial"));
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn the_edge_count_is_a_limit_the_caller_can_set() {
+    if !ready() {
+        return;
+    }
+    // The CLI sent only max_states, so the worker always used its own default
+    // edge limit and --max-states was the only budget a caller could express.
+    let spec = root().join("examples/limits/Limits.spec.json");
+    let (code, out) = analyze("edges", &["--spec", spec.to_str().unwrap(), "--max-edges", "3"]);
+    assert_eq!(code, 2);
+    let report = json(&out.join("report.json"));
+    let msg = report["diagnostics"][0]["message"].as_str().unwrap().to_string();
+    assert!(msg.contains("edges and the limit is 3"), "{msg}");
+    let _ = std::fs::remove_dir_all(&out);
 }

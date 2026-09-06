@@ -22,6 +22,7 @@ pub struct AnalyzeArgs {
     pub objective: String,
     pub fail_on_candidate: bool,
     pub max_states: usize,
+    pub max_edges: usize,
 }
 
 pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
@@ -150,7 +151,7 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         &args.out,
         &args.objective,
         args.fail_on_candidate,
-        args.max_states,
+        crate::Limits { max_states: args.max_states, max_edges: args.max_edges },
         tools,
         crate::Frontend {
             provenance: Some(provenance),
@@ -160,11 +161,15 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
             // A finding about the contract as a whole is shown on the
             // contract, not on an arbitrary line of it.
             fallback_site: contract_site(&bundle, &ir, &root),
+            unsupported: abstraction.report.unsupported.clone(),
         },
     )?;
 
     // An incomplete abstraction cannot be reported as a complete analysis.
-    if !abstraction.report.complete() && code < 2 {
+    // The exit code already accounts for it, because the incompleteness is
+    // recorded as an analysis status rather than patched on afterwards; two
+    // places to compute one number is one place too many.
+    if !abstraction.report.complete() {
         eprintln!(
             "\nthe abstraction left {} thing(s) unmodelled, so this unit is not complete:",
             abstraction.report.unsupported.len()
@@ -172,8 +177,6 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         for u in &abstraction.report.unsupported {
             eprintln!("  {u}");
         }
-        println!("exit code: 2 (the model analysis alone would have been {code})");
-        return Ok(2);
     }
     Ok(code)
 }

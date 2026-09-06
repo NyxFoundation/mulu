@@ -162,9 +162,11 @@ everything mulu says about scope:
 | `unknown` | `open` | undecided |
 | `not-requested` | `notApplicable` | not run |
 
-A run cut off by `--max-states` decides nothing: the analyses are declined
-rather than run and labelled, every finding comes back `unknown`, and the exit
-code is 2. Nothing from a cut-off run is ever shown as `pass`.
+A run cut off by `--max-states`, `--max-edges` or `--timeout-ms` decides
+nothing: the analyses are declined rather than run and labelled, every finding
+comes back `unknown`, and the exit code is 2. Nothing from a cut-off run is
+ever shown as `pass`, and a single undecided finding is enough to keep the exit
+code off 0.
 
 ### What a finding is a claim about
 
