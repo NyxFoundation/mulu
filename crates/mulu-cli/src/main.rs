@@ -4,6 +4,7 @@
 //! violation; 2 partial / unsupported; 3 input or execution error;
 //! 4 certificate check failed. Mixed results use the priority 4 > 3 > 2 > 1 > 0.
 
+mod build;
 mod lean;
 mod report;
 mod worker;
@@ -21,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use worker::{Toolchain, WorkerRequest};
 
-const TOOL: &str = concat!("mulu ", env!("CARGO_PKG_VERSION"));
+pub const TOOL: &str = concat!("mulu ", env!("CARGO_PKG_VERSION"));
 
 #[derive(Parser)]
 #[command(name = "mulu", version, about = "A Supervisory Control-based static analyzer for code redundancy and gap detection")]
@@ -48,7 +49,7 @@ struct ToolArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Analyse a Solidity project (not implemented yet: P1)
+    /// Analyse a Solidity project (not implemented yet: P1-02 onwards)
     Analyze {
         project: PathBuf,
         #[arg(long)]
@@ -57,6 +58,22 @@ enum Cmd {
         spec: Option<PathBuf>,
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Compile Solidity with solc and write the ProgramIR (P1-01). No analysis.
+    Ir {
+        /// Solidity source files to compile
+        #[arg(required = true)]
+        sources: Vec<PathBuf>,
+        /// Which contract to lower; required when the build defines several
+        #[arg(long)]
+        contract: Option<String>,
+        #[arg(long)]
+        out: PathBuf,
+        /// Path to solc (default: $MULU_SOLC, then PATH)
+        #[arg(long)]
+        solc: Option<PathBuf>,
+        #[arg(long, default_value = "cancun")]
+        evm_version: String,
     },
     /// Analyse a finite-product model (schema v1) and write an analysis directory
     AnalyzeModel {
@@ -100,12 +117,21 @@ fn run() -> Result<i32> {
     match cli.cmd {
         Cmd::Analyze { project, .. } => {
             eprintln!(
-                "unsupported: `mulu analyze` (Solidity/Yul input, P1) is not implemented yet.\n\
-                 project: {}\nUse `mulu analyze-model <model.json>` with a finite-product model.",
+                "unsupported: `mulu analyze` needs the abstraction stage (P1-02), which is not \n\
+                 implemented yet. project: {}\n\
+                 Available today: `mulu ir` builds the ProgramIR from Solidity, and\n\
+                 `mulu analyze-model <model.json>` analyses a finite-product model.",
                 project.display()
             );
             Ok(2)
         }
+        Cmd::Ir { sources, contract, out, solc, evm_version } => build::run(&build::IrArgs {
+            sources,
+            contract,
+            out,
+            solc,
+            evm_version,
+        }),
         Cmd::Validate { model } => {
             let text = fs::read_to_string(&model).with_context(|| format!("reading {}", model.display()))?;
             let m = parse_and_validate(&text).map_err(|e| anyhow!("{}: {e}", model.display()))?;

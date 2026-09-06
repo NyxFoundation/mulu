@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 mulu-model = { path = "../mulu-model" }
+mulu-solc = { path = "../mulu-solc" }
+mulu-yul = { path = "../mulu-yul" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

@@ -202,6 +202,8 @@ dependencies = [
  "clap",
  "hex",
  "mulu-model",
+ "mulu-solc",
+ "mulu-yul",
  "serde",
  "serde_json",
  "sha2",
@@ -215,6 +217,26 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "mulu-solc"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "mulu-yul"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

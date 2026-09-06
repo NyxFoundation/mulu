@@ -4,7 +4,7 @@
 LEAN_DIR := $(CURDIR)/lean
 export MULU_LEAN_DIR := $(LEAN_DIR)
 
-.PHONY: build lean rust test check fixtures clean
+.PHONY: build lean rust test check fixtures ir regen-fixtures clean
 
 build: lean rust
 
@@ -17,6 +17,13 @@ rust:
 test: lean
 	cargo test
 	cd lean && lake env lean Tests/Fixtures.lean
+
+# Regenerate the committed solc output the mulu-yul tests read.
+regen-fixtures:
+	./tools/regen-yul-fixtures.sh
+
+ir: build
+	./target/release/mulu ir examples/limits/Limits.sol --contract Limits --out analysis-ir-limits
 
 fixtures: build
 	@for f in examples/fixtures/*.json examples/limits/model.json; do \

@@ -17,7 +17,14 @@ jobs:
           cd lean && lake env lean Tests/Fixtures.lean | tee /tmp/axioms.txt
           ! grep -E "sorryAx|native_decide" /tmp/axioms.txt
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install solc (needed by the mulu ir tests)
+        run: |
+          curl -sSfL https://github.com/ethereum/solidity/releases/download/v0.8.28/solc-static-linux -o /usr/local/bin/solc
+          chmod +x /usr/local/bin/solc
+          solc --version
       - name: Rust
         run: cargo build --release && cargo test
+      - name: Yul fixtures are in step with the example source
+        run: ./tools/regen-yul-fixtures.sh && git diff --exit-code crates/mulu-yul/tests/fixtures
       - name: Fixtures end to end
         run: make fixtures
