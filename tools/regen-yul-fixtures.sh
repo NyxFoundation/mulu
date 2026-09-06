@@ -38,4 +38,12 @@ cp "$OUT/.build/build/storage-layout.json" "$OUT/Over.storage.json"
 cargo run --quiet -p mulu-cli -- ir examples/overload/Over.sol --contract Over --out "$OUT/.build2" >/dev/null
 rm -rf "$OUT/.build" "$OUT/.build2"
 
+# the if-revert guard example
+cargo run --quiet -p mulu-cli -- ir examples/guards/Gate.sol --contract Gate --out "$OUT/.build" >/dev/null
+cp examples/guards/Gate.sol "$OUT/guards-Gate.sol"
+cp "$OUT/.build/build/Gate.yul" "$OUT/Gate.yul"
+cp "$OUT/.build/build/abi.json" "$OUT/Gate.abi.json"
+cp "$OUT/.build/build/storage-layout.json" "$OUT/Gate.storage.json"
+rm -rf "$OUT/.build"
+
 echo "regenerated $OUT from examples/ using $(solc --version | tail -1)"

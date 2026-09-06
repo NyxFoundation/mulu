@@ -41,6 +41,15 @@ fn access_fixtures_match_their_example_contracts() {
 }
 
 #[test]
+fn guards_fixture_matches_its_example_contract() {
+    assert_eq!(
+        include_str!("fixtures/guards-Gate.sol"),
+        include_str!("../../../examples/guards/Gate.sol"),
+        "examples/guards/Gate.sol changed; rerun tools/regen-yul-fixtures.sh"
+    );
+}
+
+#[test]
 fn overload_fixture_matches_its_example_contract() {
     assert_eq!(
         include_str!("fixtures/overload-Over.sol"),

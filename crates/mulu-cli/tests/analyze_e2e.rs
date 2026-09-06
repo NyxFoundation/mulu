@@ -72,7 +72,7 @@ fn from_solidity_to_certified_findings() {
     let v = diag(&report, "spec-violation");
     assert_eq!(v["status"], "proven");
     let trace = v["message"].as_str().unwrap();
-    assert!(trace.contains("call_forceSet_X2"), "{trace}");
+    assert!(trace.contains("call_forceSet#X2"), "{trace}");
     assert!(trace.contains("store_limit"), "{trace}");
 
     // the manifest carries where all of this came from
@@ -233,4 +233,122 @@ contract C is B {
         "a model with guards but no store would be the silent failure this guards against"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn all_three_findings_come_out_of_the_source() {
+    if !ready() {
+        return;
+    }
+    // docs/10: the point of the common model is that redundancy, spec
+    // violation and overrestriction are answered on it together. Before the
+    // reference plant was generated, analyze could only produce two of them.
+    let spec = root().join("examples/limits/limits.spec.json");
+    let (code, out) = analyze("three", &["--spec", spec.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    let report = json(&out.join("report.json"));
+    let kinds: Vec<&str> =
+        report["diagnostics"].as_array().unwrap().iter().map(|d| d["kind"].as_str().unwrap()).collect();
+    for k in ["redundant-check", "spec-violation", "overrestriction", "envelope"] {
+        assert!(kinds.contains(&k), "missing {k} in {kinds:?}");
+    }
+
+    // The candidate is the region docs/08 §3 names: setLimit(500) is allowed
+    // by the specification and rejected by check A.
+    let over: Vec<&serde_json::Value> = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["kind"] == "overrestriction")
+        .collect();
+    assert_eq!(over.len(), 1, "only the region between the two bounds qualifies");
+    let o = over[0];
+    assert_eq!(o["check_id"], "A");
+    assert_eq!(o["status"], "candidate", "an overrestriction is never proven here");
+    assert_eq!(o["scope"], "abstract-model");
+    // it is X1 = [101, 1000], which is where 500 lives
+    let model = json(&out.join("model.json"));
+    let abstraction = json(&out.join("abstraction.json"));
+    let region_name = o["detail"]["impl_state"].as_str().unwrap();
+    assert!(region_name.contains("X1"), "{region_name}");
+    let x1 = &abstraction["argument_regions"][1];
+    assert_eq!(x1["name"], "X1");
+    assert_eq!(x1["set"][0][0], "101");
+    assert_eq!(x1["set"][0][1], "1000");
+
+    // the supervisor's own answer: stop setLimit storing past the bound, and
+    // guard forceSet, which has no check at all
+    let env = diag(&report, "envelope");
+    assert_eq!(env["claim"], "maximal-permissive");
+    let disabled: Vec<String> = env["detail"]["disabled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["event"].as_str().unwrap().to_string())
+        .collect();
+    assert!(disabled.iter().any(|d| d == "cont_B"), "{disabled:?}");
+    assert!(disabled.iter().any(|d| d == "cont_entry_forceSet"), "{disabled:?}");
+
+    // the plant is analysed as its own model, with its own certificate
+    let manifest = json(&out.join("manifest.json"));
+    let certs: Vec<&str> = manifest["certificates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["model"].as_str().unwrap())
+        .collect();
+    assert!(certs.contains(&"model_plant"), "{certs:?}");
+    assert!(model["control_plant"].is_object());
+
+    let v = mulu().args(["verify", out.to_str().unwrap()]).status().unwrap();
+    assert_eq!(v.code(), Some(0));
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn an_author_written_if_revert_guard_is_named_like_a_require() {
+    if !ready() {
+        return;
+    }
+    // solc puts `if (..) revert()` on a branch, so only the AST separates a
+    // guard the author wrote from one the compiler inserted.
+    let out = std::env::temp_dir().join(format!("mulu-an-gate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let spec = root().join("examples/guards/gate.spec.json");
+    let code = mulu()
+        .args(["analyze", root().join("examples/guards/Gate.sol").to_str().unwrap()])
+        .args(["--contract", "Gate", "--spec", spec.to_str().unwrap()])
+        .args(["--out", out.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .code()
+        .unwrap();
+    assert_eq!(code, 1);
+
+    let ir = json(&out.join("program.json"));
+    let a = ir["checks"].as_array().unwrap().iter().find(|c| c["id"] == "A").expect("check A");
+    assert_eq!(a["origin"], "inline", "the author wrote it, the compiler did not");
+    assert_eq!(a["declared_in"], "Gate");
+    assert_eq!(a["written_in"], "setLimit");
+    // the compiler's own branch guards keep a generated id
+    assert!(ir["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["origin"] == "compiler" && c["id"].as_str().unwrap().starts_with("gen:")));
+
+    // and it behaves like any other guard: a site, and an overrestriction
+    let report = json(&out.join("report.json"));
+    let over: Vec<&serde_json::Value> = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["kind"] == "overrestriction")
+        .collect();
+    assert_eq!(over.len(), 1);
+    assert_eq!(over[0]["check_id"], "A");
+
+    let v = mulu().args(["verify", out.to_str().unwrap()]).status().unwrap();
+    assert_eq!(v.code(), Some(0));
+    let _ = std::fs::remove_dir_all(&out);
 }

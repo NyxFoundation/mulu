@@ -7,9 +7,12 @@
 //! behaviour instead records an assumption or refuses.
 
 use crate::interval::{IntervalSet, U256};
-use crate::predicate::{translate, Predicate};
+use crate::predicate::Predicate;
 use crate::spec::{storage_vars, CompiledProperty, StorageVar};
-use mulu_model::schema::{CheckDecl, Control, EventDecl, FiniteProduct, Initial, Transition};
+use mulu_model::schema::{
+    CheckDecl, Control, ControlPlant, ControlSite, EventDecl, FiniteProduct, Initial, SitePair,
+    Transition,
+};
 use mulu_yul::ir::{FunctionKind, Terminator};
 use mulu_yul::{Function, ProgramIr, Purity};
 use serde::Serialize;
@@ -71,6 +74,8 @@ struct Entry {
     /// The values that argument can take. docs/11 §5 admits type-correct
     /// calls only, so this is the domain the abstraction may reason over.
     domain: IntervalSet,
+    /// The 4-byte selector, which is unique where a name need not be.
+    selector: String,
 }
 
 /// The ABI parameter types of a signature: `setLimit(uint256)` -> `[uint256]`.
@@ -260,6 +265,7 @@ impl<'a> Builder<'a> {
                 param: f.parameters.first().cloned(),
                 param_type,
                 domain,
+                selector: e.selector.clone(),
             });
         }
         out
@@ -497,6 +503,29 @@ struct Walk<'a> {
     transitions: Vec<Transition>,
     checks: BTreeMap<String, CheckDecl>,
     bad_used: bool,
+    plant_states: BTreeSet<String>,
+    plant_marked: BTreeSet<String>,
+    plant_accepting: BTreeSet<String>,
+    plant_events: BTreeMap<String, EventDecl>,
+    plant_transitions: Vec<Transition>,
+    plant_sites: BTreeMap<String, ControlSite>,
+    plant_bad_used: bool,
+}
+
+/// One position of an abstract execution along the path where guards pass.
+enum Step {
+    Check { id: String, text: String, passes: bool, depends_on: Vec<String> },
+    Store { slot: usize, label: String, to: usize },
+}
+
+enum Ending {
+    Return,
+    Revert,
+}
+
+struct Trace {
+    steps: Vec<Step>,
+    ending: Ending,
 }
 
 impl<'a> Walk<'a> {
@@ -524,6 +553,13 @@ impl<'a> Walk<'a> {
             transitions: Vec::new(),
             checks: BTreeMap::new(),
             bad_used: false,
+            plant_states: BTreeSet::new(),
+            plant_marked: BTreeSet::new(),
+            plant_accepting: BTreeSet::new(),
+            plant_events: BTreeMap::new(),
+            plant_transitions: Vec::new(),
+            plant_sites: BTreeMap::new(),
+            plant_bad_used: false,
         }
     }
 
@@ -639,8 +675,14 @@ impl<'a> Walk<'a> {
                     None => vec![None],
                 };
                 for a in regions {
-                    if let Err(why) = self.walk_one(e, a, s) {
-                        self.b.refuse(format!("{}: {why}", e.signature));
+                    // One walk feeds both models, so their states line up and
+                    // the pairing in `sites` means what it says.
+                    match self.trace(e, a, s) {
+                        Ok(t) => {
+                            self.emit_impl(e, a, s, &t);
+                            self.emit_plant(e, a, s, &t);
+                        }
+                        Err(why) => self.b.refuse(format!("{}: {why}", e.signature)),
                     }
                 }
             }
@@ -653,6 +695,11 @@ impl<'a> Walk<'a> {
 
         let initial = format!("idle_{}", self.storage_name(&initial_storage));
         self.states.insert(initial.clone());
+
+        // Names the plant shares with the implementation, taken before any
+        // field of `self` is moved out below.
+        let idle_names: Vec<String> =
+            storage_regions.iter().map(|s| format!("idle_{}", self.storage_name(s))).collect();
 
         let mut states: Vec<String> = self.states.into_iter().collect();
         states.sort();
@@ -671,6 +718,49 @@ impl<'a> Walk<'a> {
             self.b.ir.contract, self.b.ir.compiler
         );
 
+        // The reference plant, when the walk produced one. Its envelope is
+        // what an overrestriction candidate is measured against.
+        let plant_bad = self.plant_bad_used;
+        if plant_bad {
+            self.plant_states.insert("bad".into());
+        }
+        let control_plant = if self.plant_transitions.is_empty() {
+            None
+        } else {
+            let mut pstates: Vec<String> = self.plant_states.into_iter().collect();
+            pstates.sort();
+            let mut pmarked: Vec<String> = self.plant_marked.into_iter().collect();
+            pmarked.sort();
+            let mut paccepting: Vec<String> = self.plant_accepting.into_iter().collect();
+            paccepting.sort();
+            let mut pevents: Vec<EventDecl> = self.plant_events.into_values().collect();
+            pevents.sort_by(|a, b| a.id.cmp(&b.id));
+            let mut sites: Vec<ControlSite> = self.plant_sites.into_values().collect();
+            sites.sort_by(|a, b| a.id.cmp(&b.id));
+            // idle states belong to the plant too: it shares the boundary.
+            let mut all = pstates;
+            for n in &idle_names {
+                if !all.contains(n) {
+                    all.push(n.clone());
+                }
+                if !pmarked.contains(n) {
+                    pmarked.push(n.clone());
+                }
+            }
+            all.sort();
+            pmarked.sort();
+            Some(ControlPlant {
+                states: all,
+                initial: Initial::One(initial.clone()),
+                marked: pmarked,
+                accepting: Some(paccepting),
+                bad: if plant_bad { vec!["bad".to_string()] } else { vec![] },
+                events: pevents,
+                transitions: self.plant_transitions,
+                sites,
+            })
+        };
+
         let model = FiniteProduct {
             schema_version: 1,
             kind: "finite-product".into(),
@@ -682,7 +772,7 @@ impl<'a> Walk<'a> {
             events,
             transitions: self.transitions,
             checks,
-            control_plant: None,
+            control_plant,
         };
 
         let report = AbstractionReport {
@@ -726,40 +816,26 @@ impl<'a> Walk<'a> {
         Abstraction { model, report }
     }
 
-    /// One abstract execution. Every guard is decided by the argument region,
-    /// so there is nothing to branch on, but the walk does follow internal
-    /// calls: a modifier is a separate Yul function, and its guard would
-    /// otherwise be invisible (and the model silently wrong).
-    fn walk_one(
+    /// One abstract execution along the path where every guard passes.
+    ///
+    /// Both models are built from this: the implementation stops at the first
+    /// guard the region makes fail, the reference plant keeps a controllable
+    /// continue and an uncontrollable reject at each site instead. Walking
+    /// once keeps them in step, which is what makes the state pairing in
+    /// `sites` meaningful.
+    fn trace(
         &mut self,
         e: &Entry,
         arg: Option<usize>,
         entry_storage: &StorageRegion,
-    ) -> Result<(), String> {
+    ) -> Result<Trace, String> {
         const MAX_DEPTH: usize = 32;
         const MAX_STEPS: usize = 10_000;
 
         let arg_set = arg.map(|a| self.arg_regions[a].clone());
-        let call_event = match arg {
-            Some(a) => format!("call_{}_{}", e.solidity_name, self.arg_name(a)),
-            None => format!("call_{}", e.solidity_name),
-        };
-        let desc = match &arg_set {
-            Some(s) => format!("CallRequest({}, argument in {s})", e.signature),
-            None => format!("CallRequest({})", e.signature),
-        };
-        self.event(&call_event, &desc);
-
-        let from = format!("idle_{}", self.storage_name(entry_storage));
-        let suffix = match arg {
-            Some(a) => format!("{}_{}", self.arg_name(a), self.storage_name(entry_storage)),
-            None => self.storage_name(entry_storage),
-        };
-        let mut cur = format!("{}#0_{suffix}", e.solidity_name);
-        self.add(&from, &call_event, &cur);
-
+        let region = arg_set.clone().unwrap_or_else(IntervalSet::full);
         let mut storage = entry_storage.clone();
-        let mut step = 0usize;
+        let mut steps: Vec<Step> = Vec::new();
         let mut seen_checks: Vec<String> = Vec::new();
         let mut frames: Vec<Frame> = vec![Frame {
             func: e.func.clone(),
@@ -768,12 +844,11 @@ impl<'a> Walk<'a> {
             arg_var: e.param.clone(),
             visited: BTreeSet::new(),
         }];
-        let region = arg_set.clone().unwrap_or_else(IntervalSet::full);
-        let mut steps = 0usize;
+        let mut n = 0usize;
 
         loop {
-            steps += 1;
-            if steps > MAX_STEPS {
+            n += 1;
+            if n > MAX_STEPS {
                 return Err("the abstract execution did not terminate within the step limit".into());
             }
             let depth = frames.len();
@@ -788,67 +863,39 @@ impl<'a> Walk<'a> {
                 frames.last_mut().unwrap().index += 1;
                 let ins = &blk.instructions[index];
 
-                // 1. a guard evaluated here
-                if let Some(c) = self.check_at(&f, block, ins) {
+                if let Some(c) = self.check_at(&f, block, index, ins) {
                     let guards = self.guards_of(&f, &e.domain);
                     let Some(p) = guards.get(&c.id) else {
                         return Err(format!("check {} could not be turned into a predicate", c.id));
                     };
                     let var = arg_var.clone().unwrap_or_default();
-                    let outcome = p.decide(&var, &region).ok_or_else(|| {
+                    let passes = p.decide(&var, &region).ok_or_else(|| {
                         format!("check {} is not decided by the argument region {region}", c.id)
                     })?;
-                    let pass = self.event(&format!("{}_pass", c.id), &format!("GuardResult({}, true)", c.id));
-                    let fail = self.event(&format!("{}_fail", c.id), &format!("GuardResult({}, false)", c.id));
-                    self.checks.entry(c.id.clone()).or_insert_with(|| CheckDecl {
+                    steps.push(Step::Check {
                         id: c.id.clone(),
-                        pass_event: pass.clone(),
-                        fail_event: fail.clone(),
+                        text: c.condition_text.clone(),
+                        passes,
                         depends_on: seen_checks.clone(),
-                        description: Some(format!("{} ({})", c.condition_text, e.signature)),
                     });
-                    if outcome {
-                        step += 1;
-                        let next = format!("{}#{step}_{suffix}", e.solidity_name);
-                        self.add(&cur.clone(), &pass, &next);
-                        cur = next;
-                        seen_checks.push(c.id.clone());
-                        continue;
-                    }
-                    let rev = format!("{}#rev_{}", e.solidity_name, self.storage_name(entry_storage));
-                    self.add(&cur.clone(), &fail, &rev);
-                    self.finish_revert(&rev, entry_storage);
-                    return Ok(());
+                    seen_checks.push(c.id.clone());
+                    continue;
                 }
 
-                // 2. a whole-slot storage write
                 if let Some(w) = ins.storage_write.clone() {
                     let (slot_idx, slot_label) = self.slot_of(&w.slot_text)?;
-                    // Evaluate what is stored over the argument's domain. A
-                    // narrowing cleanup such as `and(x, 0xff)` is the identity
-                    // exactly when the type says the argument fits the mask.
                     let values = crate::value::value_set(&w.value, arg_var.as_deref(), &region)
                         .map_err(|why| {
                             format!("the value written to {slot_label} is {}: {why}", w.value_text)
                         })?;
-                    let new_region = self.region_of(slot_idx, &values).ok_or_else(|| {
+                    let to = self.region_of(slot_idx, &values).ok_or_else(|| {
                         format!("the value written to {slot_label} straddles a specification boundary")
                     })?;
-                    storage[slot_idx] = new_region;
-                    let ev = self.event(
-                        &format!("store_{slot_label}"),
-                        &format!("InternalStep(store {slot_label})"),
-                    );
-                    step += 1;
-                    let next = format!("{}#{step}_{suffix}", e.solidity_name);
-                    self.add(&cur.clone(), &ev, &next);
-                    cur = next;
+                    storage[slot_idx] = to;
+                    steps.push(Step::Store { slot: slot_idx, label: slot_label, to });
                     continue;
                 }
 
-                // 3. a call into another function of this contract. A modifier
-                //    is one of these, and so is the `_inner` body solc splits
-                //    out, so not following them loses the guards entirely.
                 if let Some((callee, args)) = statement_call(ins) {
                     if let Some(g) = self.b.ir.function(&callee) {
                         let matters = g.effects.writes_storage
@@ -871,7 +918,6 @@ impl<'a> Walk<'a> {
                     }
                 }
 
-                // 4. anything else must be inert, or the model would lose it
                 if ins.effects.writes_storage || ins.effects.can_revert {
                     return Err(format!(
                         "an instruction in {func} carries effects the model does not represent \
@@ -883,7 +929,6 @@ impl<'a> Walk<'a> {
                 continue;
             }
 
-            // terminator
             match &blk.terminator {
                 Terminator::Jump { target } => {
                     let fr = frames.last_mut().unwrap();
@@ -894,6 +939,48 @@ impl<'a> Walk<'a> {
                     fr.index = 0;
                 }
                 Terminator::Branch { cond, then_block, else_block } => {
+                    // A guard written as `if (..) revert()` sits on the
+                    // terminator rather than on a helper call. Treating it as
+                    // an ordinary branch would leave it out of both models:
+                    // no redundancy verdict, and no control site to
+                    // parameterise it out of the plant.
+                    if let Some(c) = self.branch_check(&f, block) {
+                        let guards = self.guards_of(&f, &e.domain);
+                        let Some(p) = guards.get(&c.id) else {
+                            return Err(format!(
+                                "check {} could not be turned into a predicate",
+                                c.id
+                            ));
+                        };
+                        let var = arg_var.clone().unwrap_or_default();
+                        let passes = p.decide(&var, &region).ok_or_else(|| {
+                            format!(
+                                "check {} is not decided by the argument region {region}",
+                                c.id
+                            )
+                        })?;
+                        steps.push(Step::Check {
+                            id: c.id.clone(),
+                            text: c.condition_text.clone(),
+                            passes,
+                            depends_on: seen_checks.clone(),
+                        });
+                        seen_checks.push(c.id.clone());
+                        let target = match (&c.pass_edge, &c.fail_edge) {
+                            (
+                                mulu_yul::ir::CheckEdge::Block { id: pass },
+                                mulu_yul::ir::CheckEdge::Block { .. },
+                            ) => *pass,
+                            _ => return Err(format!("check {} has no block edges", c.id)),
+                        };
+                        let fr = frames.last_mut().unwrap();
+                        if !fr.visited.insert((target, 0)) {
+                            return Err("the abstract execution revisits a block; P1a does not model loops".into());
+                        }
+                        fr.block = target;
+                        fr.index = 0;
+                        continue;
+                    }
                     let p = crate::predicate::translate_in(cond, &f.parameters, &e.domain)
                         .map_err(|w| {
                         format!("a branch condition is outside the P1a fragment: {w}")
@@ -911,29 +998,15 @@ impl<'a> Walk<'a> {
                     fr.index = 0;
                 }
                 Terminator::Revert { .. } => {
-                    let rev = format!("{}#rev_{}", e.solidity_name, self.storage_name(entry_storage));
-                    let ev = self.event("revert", "TxRevert");
-                    self.add(&cur.clone(), &ev, &rev);
-                    self.finish_revert(&rev, entry_storage);
-                    return Ok(());
+                    return Ok(Trace { steps, ending: Ending::Revert })
                 }
                 Terminator::Return { .. } | Terminator::Stop => {
-                    let ret = format!("{}#ret_{}", e.solidity_name, self.storage_name(&storage));
-                    let ev = self.event("return", "TxReturn");
-                    self.add(&cur.clone(), &ev, &ret);
-                    self.finish_return(&ret, &storage);
-                    return Ok(());
+                    return Ok(Trace { steps, ending: Ending::Return })
                 }
                 Terminator::Leave => {
-                    // Falling off a Yul function returns to its caller. When
-                    // the entry body does it, the transaction succeeded.
                     frames.pop();
                     if frames.is_empty() {
-                        let ret = format!("{}#ret_{}", e.solidity_name, self.storage_name(&storage));
-                        let ev = self.event("return", "TxReturn");
-                        self.add(&cur.clone(), &ev, &ret);
-                        self.finish_return(&ret, &storage);
-                        return Ok(());
+                        return Ok(Trace { steps, ending: Ending::Return });
                     }
                 }
                 Terminator::Switch { .. } => {
@@ -941,6 +1014,252 @@ impl<'a> Walk<'a> {
                 }
                 Terminator::Unsupported { reason } => return Err(reason.clone()),
             }
+        }
+    }
+
+    /// The implementation model: guard results follow from the code, so the
+    /// walk stops at the first one the region makes fail.
+    fn emit_impl(
+        &mut self,
+        e: &Entry,
+        arg: Option<usize>,
+        entry_storage: &StorageRegion,
+        t: &Trace,
+    ) {
+        let suffix = self.suffix(e, arg, entry_storage);
+        let call_event = self.call_event(e, arg);
+        let from = format!("idle_{}", self.storage_name(entry_storage));
+        let mut cur = format!("{}#0_{suffix}", e.solidity_name);
+        self.add(&from, &call_event.clone(), &cur);
+
+        // Declare every check on the path, including those beyond the point
+        // the implementation stops at. A check no region reaches is dead code,
+        // and the core reports it as unreachable; leaving it undeclared would
+        // instead leave the plant's site pointing at nothing.
+        for step in &t.steps {
+            if let Step::Check { id, text, depends_on, .. } = step {
+                let pass = self.event(&format!("{id}_pass"), &format!("GuardResult({id}, true)"));
+                let fail = self.event(&format!("{id}_fail"), &format!("GuardResult({id}, false)"));
+                self.checks.entry(id.clone()).or_insert_with(|| CheckDecl {
+                    id: id.clone(),
+                    pass_event: pass,
+                    fail_event: fail,
+                    depends_on: depends_on.clone(),
+                    description: Some(format!("{text} ({})", e.signature)),
+                });
+            }
+        }
+
+        let mut storage = entry_storage.clone();
+        for (i, step) in t.steps.iter().enumerate() {
+            let next = format!("{}#{}_{suffix}", e.solidity_name, i + 1);
+            match step {
+                Step::Check { id, passes, .. } => {
+                    let pass = format!("{id}_pass");
+                    let fail = format!("{id}_fail");
+                    if *passes {
+                        self.add(&cur.clone(), &pass, &next);
+                    } else {
+                        let rev = format!(
+                            "{}#rev_{}",
+                            e.solidity_name,
+                            self.storage_name(entry_storage)
+                        );
+                        self.add(&cur.clone(), &fail, &rev);
+                        self.finish_revert(&rev, entry_storage);
+                        return;
+                    }
+                }
+                Step::Store { slot, label, to } => {
+                    storage[*slot] = *to;
+                    let ev = self
+                        .event(&format!("store_{label}"), &format!("InternalStep(store {label})"));
+                    self.add(&cur.clone(), &ev, &next);
+                }
+            }
+            cur = next;
+        }
+        match t.ending {
+            Ending::Return => {
+                let ret = format!("{}#ret_{}", e.solidity_name, self.storage_name(&storage));
+                let ev = self.event("return", "TxReturn");
+                self.add(&cur.clone(), &ev, &ret);
+                self.finish_return(&ret, &storage);
+            }
+            Ending::Revert => {
+                let rev = format!("{}#rev_{}", e.solidity_name, self.storage_name(entry_storage));
+                let ev = self.event("revert", "TxRevert");
+                self.add(&cur.clone(), &ev, &rev);
+                self.finish_revert(&rev, entry_storage);
+            }
+        }
+    }
+
+    /// The conservative reference plant of docs/11 §4: at each control site
+    /// the supervisor may forbid continuing, and rejecting stays possible
+    /// whatever it decides. The guard's own condition plays no part here,
+    /// which is exactly what "parameterised out" means.
+    fn emit_plant(
+        &mut self,
+        e: &Entry,
+        arg: Option<usize>,
+        entry_storage: &StorageRegion,
+        t: &Trace,
+    ) {
+        let suffix = self.suffix(e, arg, entry_storage);
+        let call_event = self.call_event(e, arg);
+        self.plant_event(&call_event, "CallRequest", Control::Uncontrollable);
+        let from = format!("idle_{}", self.storage_name(entry_storage));
+        let rev = format!("{}@rev_{}", e.solidity_name, self.storage_name(entry_storage));
+        let mut cur = format!("{}@0_{suffix}", e.solidity_name);
+        self.plant_add(&from, &call_event, &cur);
+
+        // An entrypoint that changes storage without a guard still has a place
+        // a guard could go: the entry. Without it the plant cannot express
+        // "this needs a check", which is the whole question for forceSet.
+        // A read-only entrypoint gets none: there is nothing there to forbid.
+        let writes = t.steps.iter().any(|s| matches!(s, Step::Store { .. }));
+        let guarded = t.steps.iter().any(|s| matches!(s, Step::Check { .. }));
+        if writes && !guarded {
+            let site = format!("entry_{}", e.solidity_name);
+            let cont = format!("cont_{site}");
+            let rej = format!("rej_{site}");
+            self.plant_event(&cont, "Continue(entry site)", Control::Controllable);
+            self.plant_event(&rej, "Reject(entry site)", Control::Uncontrollable);
+            let next = format!("{}@e_{suffix}", e.solidity_name);
+            self.plant_add(&cur.clone(), &cont, &next);
+            self.plant_add(&cur.clone(), &rej, &rev);
+            self.plant_sites.entry(site.clone()).or_insert(ControlSite {
+                id: site,
+                check: None,
+                continue_event: cont,
+                pairs: vec![],
+            });
+            cur = next;
+        }
+
+        let mut storage = entry_storage.clone();
+        // The implementation stops at the first guard the region makes fail,
+        // so beyond that point it has no state to pair a site with.
+        let mut impl_reaches = true;
+        for (i, step) in t.steps.iter().enumerate() {
+            let next = format!("{}@{}_{suffix}", e.solidity_name, i + 1);
+            match step {
+                Step::Check { id, passes, .. } => {
+                    let cont = format!("cont_{id}");
+                    let rej = format!("rej_{id}");
+                    self.plant_event(&cont, &format!("Continue(site {id})"), Control::Controllable);
+                    // docs/11 §4: rejection stays available whatever the
+                    // supervisor allows, which is what makes this plant
+                    // conservative rather than the exact implementation.
+                    self.plant_event(&rej, &format!("Reject(site {id})"), Control::Uncontrollable);
+                    self.plant_add(&cur.clone(), &cont, &next);
+                    self.plant_add(&cur.clone(), &rej, &rev);
+                    let impl_state = format!("{}#{}_{suffix}", e.solidity_name, i);
+                    let reached = impl_reaches;
+                    let entry = self.plant_sites.entry(id.clone()).or_insert(ControlSite {
+                        id: id.clone(),
+                        check: Some(id.clone()),
+                        continue_event: cont,
+                        pairs: vec![],
+                    });
+                    if reached && !entry.pairs.iter().any(|p| p.plant_state == cur) {
+                        entry.pairs.push(SitePair { plant_state: cur.clone(), impl_state });
+                    }
+                    if !*passes {
+                        impl_reaches = false;
+                    }
+                }
+                Step::Store { slot, label, to } => {
+                    storage[*slot] = *to;
+                    let ev = format!("store_{label}");
+                    self.plant_event(&ev, &format!("InternalStep(store {label})"), Control::Uncontrollable);
+                    self.plant_add(&cur.clone(), &ev, &next);
+                }
+            }
+            cur = next;
+        }
+        match t.ending {
+            Ending::Return => {
+                let ret = format!("{}@ret_{}", e.solidity_name, self.storage_name(&storage));
+                self.plant_event("return", "TxReturn", Control::Uncontrollable);
+                self.plant_add(&cur.clone(), "return", &ret);
+                self.plant_finish(&ret, &storage, true);
+            }
+            Ending::Revert => {
+                self.plant_event("revert", "TxRevert", Control::Uncontrollable);
+                self.plant_add(&cur.clone(), "revert", &rev);
+            }
+        }
+        self.plant_finish(&rev, entry_storage, false);
+    }
+
+    fn suffix(&self, _e: &Entry, arg: Option<usize>, s: &StorageRegion) -> String {
+        match arg {
+            Some(a) => format!("{}_{}", self.arg_name(a), self.storage_name(s)),
+            None => self.storage_name(s),
+        }
+    }
+
+    fn call_event(&mut self, e: &Entry, arg: Option<usize>) -> String {
+        // `#` cannot occur in a Solidity identifier, so the entrypoint and the
+        // region it is called with stay separable. Joining them with `_` let a
+        // function actually named `f_X0` share an event with `f` called on
+        // region X0, and one event with two targets is not a model the
+        // supervisory-control core accepts.
+        let id = match arg {
+            Some(a) => format!("call_{}#{}", e.solidity_name, self.arg_name(a)),
+            None => format!("call_{}", e.solidity_name),
+        };
+        let desc = match arg {
+            Some(a) => format!(
+                "CallRequest({}, argument in {})",
+                e.signature, self.arg_regions[a]
+            ),
+            None => format!("CallRequest({})", e.signature),
+        };
+        self.event(&id, &desc)
+    }
+
+    fn plant_event(&mut self, id: &str, description: &str, control: Control) {
+        self.plant_events.entry(id.to_string()).or_insert_with(|| EventDecl {
+            id: id.to_string(),
+            control,
+            description: Some(description.to_string()),
+        });
+    }
+
+    fn plant_add(&mut self, from: &str, event: &str, to: &str) {
+        self.plant_states.insert(from.to_string());
+        self.plant_states.insert(to.to_string());
+        let t = Transition { from: from.to_string(), event: event.to_string(), to: to.to_string() };
+        if !self
+            .plant_transitions
+            .iter()
+            .any(|x| x.from == t.from && x.event == t.event && x.to == t.to)
+        {
+            self.plant_transitions.push(t);
+        }
+    }
+
+    /// A terminal phase of the plant, and the boundary transition after it.
+    /// `accepting` marks the ends that completed the request, which is what
+    /// tells an overrestriction candidate from a rejection nobody wanted.
+    fn plant_finish(&mut self, state: &str, storage: &StorageRegion, accepting: bool) {
+        self.plant_marked.insert(state.to_string());
+        if accepting {
+            self.plant_accepting.insert(state.to_string());
+        }
+        self.plant_event("next_tx", "the transaction boundary", Control::Uncontrollable);
+        // The plant carries the same monitor as the implementation. Without
+        // it nothing is unsafe, the envelope forbids nothing, and every
+        // rejection looks like an overrestriction.
+        if accepting && self.violates_spec(storage) {
+            self.plant_bad_used = true;
+            self.plant_add(state, "next_tx", "bad");
+        } else {
+            let idle = format!("idle_{}", self.storage_name(storage));
+            self.plant_add(state, "next_tx", &idle);
         }
     }
 
@@ -967,11 +1286,27 @@ impl<'a> Walk<'a> {
         g
     }
 
+    /// The check this block's branch terminator evaluates, if any.
+    fn branch_check(&self, f: &Function, block: usize) -> Option<mulu_yul::Check> {
+        self.b
+            .ir
+            .checks
+            .iter()
+            .find(|c| {
+                c.function == f.id
+                    && c.pre_location == block
+                    && c.pre_instruction.is_none()
+                    && matches!(c.pass_edge, mulu_yul::ir::CheckEdge::Block { .. })
+            })
+            .cloned()
+    }
+
     /// The check evaluated by this instruction, if it is a guard-helper call.
     fn check_at(
         &self,
         f: &Function,
         block: usize,
+        index: usize,
         ins: &mulu_yul::ir::Instruction,
     ) -> Option<mulu_yul::Check> {
         self.b
@@ -980,7 +1315,12 @@ impl<'a> Walk<'a> {
             .iter()
             .find(|c| {
                 c.function == f.id
+                    // Position, not just the block: two guards can share one,
+                    // and matching on the helper name alone substitutes the
+                    // first guard's condition for the second's when both
+                    // `require`s lower to the same helper.
                     && c.pre_location == block
+                    && c.pre_instruction == Some(index)
                     && matches!(c.pass_edge, mulu_yul::ir::CheckEdge::Continue)
                     && ins.storage_write.is_none()
                     && instruction_calls(ins, c.helper.as_deref())
@@ -1014,7 +1354,16 @@ impl<'a> Walk<'a> {
 
     fn violates_spec(&self, storage: &StorageRegion) -> bool {
         for p in self.b.props {
-            let Some(var) = &p.var else { continue };
+            let Some(var) = &p.var else {
+                // A property with no variable is constant. `false` forbids
+                // every successful end; skipping it would read a
+                // specification that permits nothing as one that permits
+                // everything.
+                if p.predicate == Predicate::False {
+                    return true;
+                }
+                continue;
+            };
             let Some(slot) = self.per_slot.iter().position(|(l, _)| l == var) else { continue };
             let region = &self.per_slot[slot].1[storage[slot]];
             if region.disjoint_from(&p.predicate.set()) {
@@ -1029,18 +1378,61 @@ impl<'a> Walk<'a> {
 /// from it would merge two different control flows into one. Give each the
 /// parameter types that tell them apart.
 fn disambiguate(entries: &mut [Entry]) {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for e in entries.iter() {
-        *counts.entry(e.solidity_name.clone()).or_default() += 1;
-    }
-    for e in entries.iter_mut() {
-        if counts.get(&e.solidity_name).copied().unwrap_or(0) > 1 {
-            let params = signature_params(&e.signature).join("_");
-            if !params.is_empty() {
-                e.solidity_name = format!("{}_{params}", e.solidity_name);
+    // Two entrypoints sharing a name share their states, merging two control
+    // flows into one, so the result has to be injective. A readable name is
+    // preferred, but correctness is not traded for it: each candidate is
+    // taken only if nothing has claimed it.
+    let mut taken: BTreeSet<String> = BTreeSet::new();
+    let shared: BTreeSet<String> = {
+        let mut seen = BTreeSet::new();
+        let mut dup = BTreeSet::new();
+        for e in entries.iter() {
+            if !seen.insert(e.solidity_name.clone()) {
+                dup.insert(e.solidity_name.clone());
             }
         }
+        dup
+    };
+
+    for e in entries.iter_mut() {
+        let base = e.solidity_name.clone();
+        let params = signature_params(&e.signature).join("_");
+        let sel = e.selector.trim_start_matches("0x").to_string();
+        // In order of preference; the last is unique because a selector is.
+        let mut candidates = Vec::new();
+        if !shared.contains(&base) {
+            candidates.push(base.clone());
+        }
+        if !params.is_empty() {
+            candidates.push(format!("{base}_{params}"));
+        }
+        candidates.push(format!("{base}_{sel}"));
+        candidates.push(format!("fn_{sel}"));
+
+        let chosen = candidates
+            .into_iter()
+            .find(|c| !taken.contains(c))
+            .unwrap_or_else(|| {
+                // Only reachable if a source name already reads like every
+                // fallback. Number it rather than collide.
+                let mut n = 0usize;
+                loop {
+                    let c = format!("fn_{sel}_{n}");
+                    if !taken.contains(&c) {
+                        break c;
+                    }
+                    n += 1;
+                }
+            });
+        taken.insert(chosen.clone());
+        e.solidity_name = chosen;
     }
+
+    debug_assert_eq!(
+        taken.len(),
+        entries.len(),
+        "entrypoint names must be injective"
+    );
 }
 
 /// One activation on the walk's call stack.
@@ -1112,4 +1504,82 @@ fn instruction_calls(ins: &mulu_yul::ir::Instruction, name: Option<&str>) -> boo
 
 fn short(label: &str) -> String {
     label.chars().take(3).collect::<String>().to_uppercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, sig: &str, selector: &str) -> Entry {
+        Entry {
+            solidity_name: name.into(),
+            signature: sig.into(),
+            func: format!("fun_{name}"),
+            param: Some("x".into()),
+            param_type: signature_params(sig).first().cloned(),
+            domain: IntervalSet::full(),
+            selector: selector.into(),
+        }
+    }
+
+    fn names(v: &[Entry]) -> Vec<String> {
+        v.iter().map(|e| e.solidity_name.clone()).collect()
+    }
+
+    #[test]
+    fn overloads_are_told_apart_by_their_parameter_types() {
+        let mut v = vec![
+            entry("set", "set(uint256)", "0x11111111"),
+            entry("set", "set(uint8)", "0x22222222"),
+            entry("limit", "limit()", "0x33333333"),
+        ];
+        disambiguate(&mut v);
+        assert_eq!(names(&v), vec!["set_uint256", "set_uint8", "limit"]);
+    }
+
+    #[test]
+    fn names_stay_injective_however_adversarial_the_source_is() {
+        // Every fallback form is also a real function name here.
+        let mut v = vec![
+            entry("set", "set(uint256)", "0x60fe47b1"),
+            entry("set", "set(uint8)", "0x24b8ba5f"),
+            entry("set_uint256", "set_uint256(uint256)", "0xcccccccc"),
+            entry("set_uint256_60fe47b1", "set_uint256_60fe47b1(uint256)", "0xdddddddd"),
+            entry("fn_60fe47b1", "fn_60fe47b1(uint256)", "0xeeeeeeee"),
+        ];
+        disambiguate(&mut v);
+        let got = names(&v);
+        let mut sorted = got.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), got.len(), "names must be injective, got {got:?}");
+    }
+
+    #[test]
+    fn a_name_a_real_function_already_uses_is_not_reused() {
+        // `set(uint256)` wants `set_uint256`, which is also the plain name of
+        // the third entry. Whoever asks second takes another form.
+        let mut v = vec![
+            entry("set", "set(uint256)", "0xaaaaaaaa"),
+            entry("set", "set(uint8)", "0xbbbbbbbb"),
+            entry("set_uint256", "set_uint256(uint256)", "0xcccccccc"),
+        ];
+        disambiguate(&mut v);
+        let got = names(&v);
+        let mut sorted = got.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), got.len(), "names must be injective, got {got:?}");
+        assert_eq!(got[1], "set_uint8", "the readable form is kept where it is free");
+    }
+
+    #[test]
+    fn distinct_names_are_left_alone() {
+        let mut v = vec![
+            entry("setLimit", "setLimit(uint256)", "0x11111111"),
+            entry("forceSet", "forceSet(uint256)", "0x22222222"),
+        ];
+        disambiguate(&mut v);
+        assert_eq!(names(&v), vec!["setLimit", "forceSet"]);
+    }
 }

@@ -97,13 +97,13 @@ fn each_overload_gets_the_domain_of_its_own_argument() {
         .map(|e| e.id.as_str())
         .filter(|e| e.starts_with("call_set"))
         .collect();
-    let narrow: Vec<&&str> = calls.iter().filter(|c| c.starts_with("call_set_uint8_")).collect();
-    let wide: Vec<&&str> = calls.iter().filter(|c| c.starts_with("call_set_uint256_")).collect();
+    let narrow: Vec<&&str> = calls.iter().filter(|c| c.starts_with("call_set_uint8#")).collect();
+    let wide: Vec<&&str> = calls.iter().filter(|c| c.starts_with("call_set_uint256#")).collect();
     assert!(!narrow.is_empty() && !wide.is_empty());
     assert!(wide.len() > narrow.len(), "the uint256 overload reaches more regions");
 
     for c in &narrow {
-        let idx: usize = c.rsplit('X').next().unwrap().parse().unwrap();
+        let idx: usize = c.rsplit("#X").next().unwrap().parse().unwrap();
         assert!(
             a.report.argument_regions[idx].set.subset_of(&byte),
             "{c} would receive a value no uint8 can hold"

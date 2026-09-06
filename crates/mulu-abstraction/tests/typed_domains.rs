@@ -58,7 +58,7 @@ fn a_uint8_argument_never_leaves_its_type() {
         .collect();
     assert!(!calls.is_empty());
     for c in &calls {
-        let idx: usize = c.rsplit('X').next().unwrap().parse().unwrap();
+        let idx: usize = c.rsplit("#X").next().unwrap().parse().unwrap();
         assert!(
             a.report.argument_regions[idx].set.subset_of(&byte),
             "{c} would receive a value no uint8 can hold"
@@ -93,7 +93,7 @@ fn the_wide_entrypoint_still_can() {
     };
     // the last region is the one above the bound
     let last = a.report.argument_regions.len() - 1;
-    let s1 = goes("idle_REA0", &format!("call_force_X{last}")).expect("force on the top region");
+    let s1 = goes("idle_REA0", &format!("call_force#X{last}")).expect("force on the top region");
     let s2 = goes(&s1, "store_reading").unwrap();
     let s3 = goes(&s2, "return").unwrap();
     assert_eq!(goes(&s3, "next_tx").as_deref(), Some("bad"));

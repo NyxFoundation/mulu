@@ -27,7 +27,11 @@ The chain runs end to end for the P1a subset: Solidity in, certified findings ou
 |---|---|---|
 | **P1-01** front end | `ir` | Solidity to ProgramIR through solc's unoptimized Yul |
 | **P1-02** abstraction | `analyze` | ProgramIR and a spec to a finite model, then analysed |
+| **P1-05** reference plant | `analyze` | the same walk again with the guards parameterised out |
 | **P0** analysis core | `analyze-model`, `verify` | finite models in, certified findings out |
+
+All three findings of docs/10 now come out of Solidity source: a redundant
+check, a specification violation, and an overrestriction.
 
 * The P1a subset is one argument per entrypoint typed `uintN`, `address` or
   `bool`, pure comparison guards, storage variables that own their slot, no
@@ -71,6 +75,10 @@ mulu analyze examples/typed/Meter.sol --contract Meter \
 mulu analyze examples/overload/Over.sol --contract Over \
      --spec examples/overload/over.spec.json --out analysis-over
 
+# a guard written `if (..) revert()` rather than `require(..)`
+mulu analyze examples/guards/Gate.sol --contract Gate \
+     --spec examples/guards/gate.spec.json --out analysis-gate
+
 # P1-01 alone: stop at the ProgramIR
 mulu ir examples/limits/Limits.sol --contract Limits --out ir-limits
 
@@ -99,7 +107,34 @@ WARNING  spec-violation   idle_LIM0 --call_forceSet_X2--> ... --next_tx--> bad
 INFO     check-A          can fail from setLimit#0_X1_LIM0, setLimit#0_X2_LIM0
 HINT     check-B          never fails on any reachable model state
                           claim: never-fails  status: proven  depends on: A
+INFO     envelope         disable = {(setLimit@1_X2_LIM0, cont_B),
+                                     (forceSet@0_X2_LIM0, cont_entry_forceSet)}
+INFO     overrestriction-A-setLimit#0_X1_LIM0
+                          claim: spec-permits-rejected-request  status: candidate
 ```
+
+### The reference plant
+
+The third finding needs a second model. The same walk runs again with each
+guard replaced by a control site: continuing is **controllable**, rejecting is
+**uncontrollable**, and the guard's own condition plays no part. That is the
+conservative plant of docs/11 §4, and its maximal permissive envelope is the
+largest behaviour a supervisor could allow.
+
+An overrestriction is where the two disagree: the implementation rejects a
+request the envelope would accept, and the request could still complete. For
+`examples/limits` that is exactly the region between the two bounds, so
+`setLimit(500)` is a candidate while `setLimit(2000)` is not.
+
+The plant carries the same specification monitor as the implementation. Without
+it nothing is unsafe, the envelope forbids nothing, and every rejection looks
+like an overrestriction. It also gets a site at the entry of an entrypoint that
+writes storage with no guard at all, which is how `forceSet` is reported as
+needing one.
+
+Both models come from one walk, so their states correspond and the pairing in
+`sites` means what it says. A candidate is always `candidate`, never proven: it
+says the specification permits the request, not that the check can be removed.
 
 The argument domain is split by the guard conditions **and** by the
 specification pulled back through `limit = x`, which is what makes every guard
@@ -302,14 +337,13 @@ live in the NyxFoundation `projects/mulu/docs` directory.
 
 ## Roadmap
 
-P1-01 and P1-02 are done: `mulu analyze` builds by construction what
-`examples/limits/model.json` says by hand, and reaches the same two findings.
+P1-01, P1-02 and P1-05 are done: `mulu analyze` builds by construction what
+`examples/limits/model.json` says by hand, and reaches all three findings.
 
 Next is **P1-03**: solve a counterexample region for concrete arguments and
 replay it on a local EVM, so `forceSet(1001)` is reproduced rather than only
 derived. Then **P1-04**, the correspondence proofs that let a finding move from
-`abstract-model` to `yul-semantics`, and **P1-05**, the reference control plant
-that turns the envelope into overrestriction candidates on generated models.
+`abstract-model` to `yul-semantics`.
 P2: reentrancy, after checking the DFA-plant theory even applies.
 P3: annotations, LSP, Yul hints. P4: benchmarks.
 

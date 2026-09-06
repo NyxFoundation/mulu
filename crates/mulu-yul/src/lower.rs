@@ -933,7 +933,11 @@ impl<'a> Lowering<'a> {
                         g.params.iter().cloned().zip(args.iter().cloned()).collect();
                     let raw = g.pass_condition.substitute(&map);
                     let condition = self.simplify(&raw, f, blk.id, idx);
-                    let origin = if name.starts_with("require_helper_") {
+                    // A `require` with no message lowers to a helper named
+                    // exactly `require_helper`; one with a message gets the
+                    // string literal appended.
+                    let origin = if name == "require_helper" || name.starts_with("require_helper_")
+                    {
                         CheckOrigin::Require
                     } else {
                         CheckOrigin::Compiler
@@ -950,6 +954,7 @@ impl<'a> Lowering<'a> {
                         declared_in: None,
                         written_in: None,
                         pre_location: blk.id,
+                        pre_instruction: Some(idx),
                         pass_edge: CheckEdge::Continue,
                         fail_edge: CheckEdge::Revert { via: Some(name.clone()) },
                         source: loc(*src),
@@ -996,6 +1001,7 @@ impl<'a> Lowering<'a> {
                         declared_in: None,
                         written_in: None,
                         pre_location: blk.id,
+                        pre_instruction: None,
                         pass_edge: CheckEdge::Block { id: pass_block },
                         fail_edge: CheckEdge::Block { id: fail_block },
                         source: loc(cond.src()),
@@ -1009,7 +1015,10 @@ impl<'a> Lowering<'a> {
         // from where they sit, so adding a require does not renumber them.
         found.sort_by_key(|c| {
             (
-                !matches!(c.origin, CheckOrigin::Require | CheckOrigin::Modifier),
+                !matches!(
+                    c.origin,
+                    CheckOrigin::Require | CheckOrigin::Modifier | CheckOrigin::Inline
+                ),
                 c.source.map(|l| (l.file_id, l.byte_start, l.byte_length)).unwrap_or((u32::MAX, u32::MAX, u32::MAX)),
                 c.function.clone(),
                 c.pre_location,
@@ -1021,20 +1030,38 @@ impl<'a> Lowering<'a> {
             for c in found.iter_mut() {
                 let Some(l) = c.source else { continue };
                 let o = lookup(l.file_id, l.byte_start, l.byte_start + l.byte_length);
+                let in_a_member = o.member.is_some();
                 c.declared_in = o.contract;
                 c.written_in = o.member;
                 if o.in_modifier && c.origin == CheckOrigin::Require {
                     c.origin = CheckOrigin::Modifier;
                 }
+                // A guard written as `if (..) revert()` reaches here as a
+                // branch, with no `require_helper_` to name it. The AST is
+                // what separates one the author wrote, inside a function or
+                // modifier body, from one the compiler inserted, whose span
+                // is the whole contract.
+                if c.origin == CheckOrigin::Compiler && in_a_member {
+                    c.origin = CheckOrigin::Inline;
+                }
             }
         }
         let mut nth = 0usize;
         for c in found.iter_mut() {
-            if matches!(c.origin, CheckOrigin::Require | CheckOrigin::Modifier) {
+            if matches!(
+                c.origin,
+                CheckOrigin::Require | CheckOrigin::Modifier | CheckOrigin::Inline
+            ) {
                 c.id = check_id(nth);
                 nth += 1;
             } else {
-                c.id = format!("gen:{}#{}", c.function, c.pre_location);
+                // The block alone does not identify a check: several can
+                // sit in one, and a colliding id silently substitutes one
+                // guard's condition for another's.
+                c.id = match c.pre_instruction {
+                    Some(i) => format!("gen:{}#{}:{i}", c.function, c.pre_location),
+                    None => format!("gen:{}#{}:t", c.function, c.pre_location),
+                };
             }
         }
         self.checks = found;

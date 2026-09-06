@@ -180,6 +180,11 @@ pub struct Check {
     pub written_in: Option<String>,
     /// Block whose execution reaches the check.
     pub pre_location: BlockId,
+    /// Index of the instruction that evaluates it, or `None` when the check
+    /// is the block's branch terminator. Two guards can share a block, so the
+    /// block alone does not identify one.
+    #[serde(default)]
+    pub pre_instruction: Option<usize>,
     pub pass_edge: CheckEdge,
     pub fail_edge: CheckEdge,
     pub purity: Purity,

@@ -44,6 +44,10 @@ analyze: build
 	  --spec examples/overload/over.spec.json --out analysis-over; \
 	  code=$$?; [ $$code -le 1 ] || exit $$code
 	./target/release/mulu verify analysis-over
+	./target/release/mulu analyze examples/guards/Gate.sol --contract Gate \
+	  --spec examples/guards/gate.spec.json --out analysis-gate; \
+	  code=$$?; [ $$code -le 1 ] || exit $$code
+	./target/release/mulu verify analysis-gate
 
 fixtures: build
 	@for f in examples/fixtures/*.json examples/limits/model.json; do \

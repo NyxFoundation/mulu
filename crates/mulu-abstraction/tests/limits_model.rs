@@ -108,13 +108,13 @@ fn forceset_reaches_bad_and_setlimit_does_not() {
     assert_eq!(a.model.bad, vec!["bad".to_string()]);
 
     // forceSet with an argument above the bound stores it and violates the spec
-    let s1 = goes(&a, "idle_LIM0", "call_forceSet_X2").expect("forceSet on X2");
+    let s1 = goes(&a, "idle_LIM0", "call_forceSet#X2").expect("forceSet on X2");
     let s2 = goes(&a, s1, "store_limit").expect("the store");
     let s3 = goes(&a, s2, "return").expect("a successful return");
     assert_eq!(goes(&a, s3, "next_tx"), Some("bad"), "the specification is violated");
 
     // setLimit cannot: the guard rejects X2 before any store
-    let t1 = goes(&a, "idle_LIM0", "call_setLimit_X2").expect("setLimit on X2");
+    let t1 = goes(&a, "idle_LIM0", "call_setLimit#X2").expect("setLimit on X2");
     let t2 = goes(&a, t1, "A_fail").expect("A rejects it");
     assert!(t2.contains("rev"), "the transaction reverts, got {t2}");
     assert_eq!(goes(&a, t2, "next_tx"), Some("idle_LIM0"), "revert restores the entry storage");
@@ -124,10 +124,16 @@ fn forceset_reaches_bad_and_setlimit_does_not() {
 fn every_event_is_uncontrollable_in_the_implementation_model() {
     let (_, a) = build(true);
     // docs/11 §4: a request arrives and a guard result follows from the code;
-    // neither is something a supervisor can forbid. Control sites belong to
-    // the reference plant, which is P1-05.
+    // neither is something a supervisor can forbid. Everything controllable
+    // lives in the reference plant instead.
     assert!(a.model.events.iter().all(|e| e.control == Control::Uncontrollable));
-    assert!(a.model.control_plant.is_none());
+    let plant = a.model.control_plant.as_ref().expect("a reference plant");
+    assert!(plant.events.iter().any(|e| e.control == Control::Controllable));
+    assert!(plant
+        .events
+        .iter()
+        .filter(|e| e.control == Control::Controllable)
+        .all(|e| e.id.starts_with("cont_")));
 }
 
 #[test]

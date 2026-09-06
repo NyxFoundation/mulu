@@ -49,7 +49,7 @@ fn the_modifier_guard_reaches_the_model() {
 fn setlimit_is_not_a_no_op() {
     let (_, a) = build();
     // the regression: guard, guard, store, return, all present on the X0 path
-    let s0 = goes(&a, "idle_LIM0", "call_setLimit_X0").expect("the call");
+    let s0 = goes(&a, "idle_LIM0", "call_setLimit#X0").expect("the call");
     let s1 = goes(&a, s0, "A_pass").expect("the modifier's guard");
     let s2 = goes(&a, s1, "B_pass").expect("the function's own guard");
     let s3 = goes(&a, s2, "store_limit").expect("the storage write inside the inner body");
@@ -57,7 +57,7 @@ fn setlimit_is_not_a_no_op() {
     assert!(s4.contains("ret"));
 
     // and an argument the modifier rejects reverts before any store
-    let r0 = goes(&a, "idle_LIM0", "call_setLimit_X1").expect("the call");
+    let r0 = goes(&a, "idle_LIM0", "call_setLimit#X1").expect("the call");
     let r1 = goes(&a, r0, "A_fail").expect("the modifier rejects it");
     assert!(r1.contains("rev"), "got {r1}");
     assert_eq!(goes(&a, r1, "next_tx"), Some("idle_LIM0"));
@@ -80,7 +80,7 @@ fn the_partition_is_refined_by_the_guard_in_the_imported_modifier() {
 #[test]
 fn forceset_still_violates_the_specification() {
     let (_, a) = build();
-    let s1 = goes(&a, "idle_LIM0", "call_forceSet_X2").unwrap();
+    let s1 = goes(&a, "idle_LIM0", "call_forceSet#X2").unwrap();
     let s2 = goes(&a, s1, "store_limit").unwrap();
     let s3 = goes(&a, s2, "return").unwrap();
     assert_eq!(goes(&a, s3, "next_tx"), Some("bad"));
