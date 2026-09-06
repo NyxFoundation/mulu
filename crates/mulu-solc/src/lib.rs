@@ -15,7 +15,9 @@ pub mod ast;
 mod bundle;
 mod driver;
 pub mod imports;
+pub mod project;
 
 pub use ast::{AstIndex, AstKind, AstNode};
 pub use bundle::{normalise_selector, BuildBundle, ContractArtifact, SourceFile};
 pub use driver::{select_contract as driver_select, CompileOptions, Solc, SolcError};
+pub use project::{BuildInfo, Drift};

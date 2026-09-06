@@ -10,10 +10,13 @@ use mulu_abstraction::model::Builder;
 use mulu_abstraction::spec::Spec;
 use serde_json::json;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct AnalyzeArgs {
     pub sources: Vec<PathBuf>,
+    /// A Foundry or Hardhat project directory, or one build-info file.
+    pub project: Option<PathBuf>,
+    pub build_info: Option<PathBuf>,
     pub contract: Option<String>,
     pub spec: Option<PathBuf>,
     pub out: PathBuf,
@@ -25,14 +28,71 @@ pub struct AnalyzeArgs {
     pub max_edges: usize,
 }
 
-pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
-    let root = crate::build::source_root(&args.sources);
-    let (bundle, name, ir) = crate::build::compile_and_lower(
-        &args.sources,
+/// Where the sources and the compiler settings come from: the command line,
+/// or the project's own build. With a build-info the settings are the
+/// project's, so the analysis is of the code the project builds rather than of
+/// a compilation mulu chose; every way the two still differ comes back as
+/// `Drift` and is said out loud.
+fn front_end(
+    args: &AnalyzeArgs,
+) -> Result<(PathBuf, mulu_solc::BuildBundle, String, mulu_yul::ir::ProgramIr, Option<mulu_solc::Drift>)>
+{
+    let named = match (&args.build_info, &args.project) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("pass --build-info or --project, not both")
+        }
+        (Some(f), None) => Some((f.clone(), f.parent().unwrap_or(Path::new(".")).to_path_buf())),
+        (None, Some(dir)) => {
+            let found = mulu_solc::project::discover(dir);
+            let Some(first) = found.first() else {
+                anyhow::bail!(
+                    "no build-info under {}: build the project first (forge build / npx hardhat \
+                     compile), or pass the source files directly",
+                    dir.display()
+                )
+            };
+            Some((first.clone(), dir.clone()))
+        }
+        (None, None) => None,
+    };
+    let Some((file, project_root)) = named else {
+        if args.sources.is_empty() {
+            anyhow::bail!("pass Solidity source files, or --project / --build-info");
+        }
+        let root = crate::build::source_root(&args.sources);
+        let (bundle, name, ir) = crate::build::compile_and_lower(
+            &args.sources,
+            args.contract.as_deref(),
+            args.solc.clone(),
+            &args.evm_version,
+        )?;
+        return Ok((root, bundle, name, ir, None));
+    };
+    if !args.sources.is_empty() {
+        anyhow::bail!("--project / --build-info supply the sources; do not also list files");
+    }
+    let bi = mulu_solc::project::read(&file)?;
+    println!(
+        "build   {} ({} source(s), solc {})",
+        file.display(),
+        bi.sources.len(),
+        bi.solc_version
+    );
+    // `--evm-version` at its default means "whatever the project used"; given
+    // explicitly it overrides, and that is itself a difference worth seeing.
+    let evm = (args.evm_version != crate::DEFAULT_EVM_VERSION).then_some(args.evm_version.as_str());
+    let (bundle, name, ir, drift) = crate::build::compile_project(
+        &bi,
         args.contract.as_deref(),
         args.solc.clone(),
-        &args.evm_version,
+        evm,
+        &project_root,
     )?;
+    Ok((project_root, bundle, name, ir, Some(drift)))
+}
+
+pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
+    let (root, bundle, name, ir, drift) = front_end(args)?;
     let contract = bundle.contract(&name).expect("selected contract");
     fs::create_dir_all(&args.out)?;
     crate::build::write_artifacts(&args.out, &bundle, contract, &ir)?;
@@ -82,6 +142,13 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
             "unsupported": abstraction.report.unsupported,
             "complete": abstraction.report.complete(),
         },
+        // P1b: what the project builds, and how this differs from it. Absent
+        // when the sources came from the command line, where there is no
+        // project build to differ from.
+        "project_build": drift.as_ref().map(|d| json!({
+            "differences": d.lines(),
+            "detail": d,
+        })),
         "scope_note": "Every finding below is about the generated finite model. Carrying one \
                        back to the Solidity source needs the correspondence proofs of P1-04.",
     });
@@ -141,8 +208,19 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         serde_json::to_value(&rep).ok()
     };
 
+    if let Some(d) = &drift {
+        if d.is_empty() {
+            println!("\n  this is the project's own build: same sources, same compiler");
+        } else {
+            println!("\n  this analysis is not the build the project ships:");
+            for line in d.lines() {
+                println!("    {line}");
+            }
+        }
+    }
+
     // P1-04: what stands between a model claim and a claim about the program.
-    let ledger = crate::obligations::ledger(&ir, &abstraction.report);
+    let ledger = crate::obligations::ledger(&ir, &abstraction.report, drift.as_ref());
     print_obligations(&ledger);
 
     println!("\n--- analysis of the generated model ---\n");

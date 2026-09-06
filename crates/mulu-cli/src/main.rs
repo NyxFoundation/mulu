@@ -28,6 +28,11 @@ use worker::{Toolchain, WorkerRequest};
 
 pub const TOOL: &str = concat!("mulu ", env!("CARGO_PKG_VERSION"));
 
+/// The default `--evm-version`. Named so `analyze` can tell "the user asked
+/// for cancun" from "the user said nothing", which decides whether a
+/// project's own EVM version is overridden.
+pub const DEFAULT_EVM_VERSION: &str = "cancun";
+
 #[derive(Parser)]
 #[command(name = "mulu", version, about = "A Supervisory Control-based static analyzer for code redundancy and gap detection")]
 struct Cli {
@@ -55,9 +60,15 @@ pub struct ToolArgs {
 enum Cmd {
     /// Analyse Solidity: compile, abstract, and check the model (P1-02)
     Analyze {
-        /// Solidity source files to compile
-        #[arg(required = true)]
+        /// Solidity source files to compile. Omit with --project or --build-info
         sources: Vec<PathBuf>,
+        /// A Foundry or Hardhat project: read the newest build-info under it
+        /// for the sources and settings the project actually built with
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// One build-info file, named directly
+        #[arg(long)]
+        build_info: Option<PathBuf>,
         /// Which contract to analyse; required when the build defines several
         #[arg(long)]
         contract: Option<String>,
@@ -69,7 +80,7 @@ enum Cmd {
         /// Path to solc (default: $MULU_SOLC, then PATH)
         #[arg(long)]
         solc: Option<PathBuf>,
-        #[arg(long, default_value = "cancun")]
+        #[arg(long, default_value = DEFAULT_EVM_VERSION)]
         evm_version: String,
         /// safety-nonblocking (default) or safety
         #[arg(long, default_value = "safety-nonblocking")]
@@ -100,7 +111,7 @@ enum Cmd {
         /// Path to solc (default: $MULU_SOLC, then PATH)
         #[arg(long)]
         solc: Option<PathBuf>,
-        #[arg(long, default_value = "cancun")]
+        #[arg(long, default_value = DEFAULT_EVM_VERSION)]
         evm_version: String,
     },
     /// Analyse a finite-product model (schema v1) and write an analysis directory
@@ -150,6 +161,8 @@ fn run() -> Result<i32> {
     match cli.cmd {
         Cmd::Analyze {
             sources,
+            project,
+            build_info,
             contract,
             spec,
             out,
@@ -166,6 +179,8 @@ fn run() -> Result<i32> {
             let code = analyze::run(
                 &analyze::AnalyzeArgs {
                     sources,
+                    project,
+                    build_info,
                     contract,
                     spec,
                     out,

@@ -34,6 +34,42 @@ pub fn compile_and_lower(
     let bundle = solc
         .compile_files(&root, sources, &opts)
         .with_context(|| format!("compiling with {}", solc.path().display()))?;
+    lower_bundle(bundle, contract)
+}
+
+/// Compile the sources a project's own build recorded, with the settings it
+/// recorded, except the two mulu cannot follow: the optimizer stays off and
+/// the IR pipeline stays off, because the analysed artifact is the
+/// unoptimized `ir`. Both differences come back in the [`Drift`] so the run
+/// can say them out loud instead of quietly analysing something else.
+pub fn compile_project(
+    bi: &mulu_solc::BuildInfo,
+    contract: Option<&str>,
+    solc_path: Option<PathBuf>,
+    evm_version: Option<&str>,
+    project_root: &Path,
+) -> Result<(mulu_solc::BuildBundle, String, ProgramIr, mulu_solc::Drift)> {
+    let solc = Solc::discover(solc_path)?;
+    let drift = bi.drift(solc.version(), project_root);
+    let opts = CompileOptions {
+        evm_version: evm_version
+            .map(String::from)
+            .or_else(|| bi.evm_version())
+            .unwrap_or_else(|| "cancun".into()),
+        remappings: bi.remappings(),
+        ..Default::default()
+    };
+    let bundle = solc
+        .compile(&bi.sources, &opts)
+        .with_context(|| format!("recompiling the build of {} with {}", bi.path.display(), solc.path().display()))?;
+    let (bundle, name, ir) = lower_bundle(bundle, contract)?;
+    Ok((bundle, name, ir, drift))
+}
+
+fn lower_bundle(
+    bundle: mulu_solc::BuildBundle,
+    contract: Option<&str>,
+) -> Result<(mulu_solc::BuildBundle, String, ProgramIr)> {
     for w in &bundle.warnings {
         eprintln!("solc warning: {}", w.lines().next().unwrap_or(w));
     }

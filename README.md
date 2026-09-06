@@ -110,6 +110,9 @@ mulu analyze examples/overload/Over.sol --contract Over \
 mulu analyze examples/guards/Gate.sol --contract Gate \
      --spec examples/guards/Gate.spec.json --out analysis-gate
 
+# P1b: a Foundry or Hardhat project, using the settings it built with
+mulu analyze --project ./my-project --contract Limits --spec ./limits.spec.json --out ./analysis
+
 # P1-01 alone: stop at the ProgramIR
 mulu ir examples/limits/Limits.sol --contract Limits --out ir-limits
 
@@ -143,6 +146,33 @@ INFO     envelope         disable = {(setLimit@1_X2_LIM0, cont_B),
 INFO     overrestriction-A-setLimit#0_X1_LIM0
                           claim: spec-permits-rejected-request  status: candidate
 ```
+
+### Reading a project's own build
+
+`--project <dir>` reads the newest **build-info** file Foundry and Hardhat
+write under `out/build-info` or `artifacts/build-info`: the exact Standard JSON
+input and output of a real build. `--build-info <file>` names one directly.
+The settings a project built with are a fact recorded there, so mulu takes
+them from the file rather than evaluating `foundry.toml` or, worse,
+`hardhat.config.js`. Remappings come from it too, which is what makes an
+imported guard resolve at all.
+
+mulu does not analyse the build-info's own output: a normal build does not
+request `ir`, and it usually has the optimizer on, which is not the artifact
+any claim here is about. The build supplies the sources and the settings; mulu
+compiles them again for the artifact it reads, and says every way the two
+still differ:
+
+```
+this analysis is not the build the project ships:
+  the project built with solc 0.8.26 and mulu ran 0.8.28, so this is not the compilation the project ships
+  the project builds with the optimizer on; the analysed Yul is unoptimized
+  lib/oz/token/Cap.sol has been edited since the build
+```
+
+Each of those lines is also recorded against `compilation:optimised-bytecode`
+in the obligation ledger, because each is a reason the deployed bytecode is
+not this artifact. A warning scrolls past; an obligation does not.
 
 ### SARIF, and what a viewer is allowed to draw
 
@@ -445,7 +475,7 @@ obligation (docs 11 E9); nothing is said about inputs outside the model.
 mulu/
 ├── crates/
 │   ├── mulu-model/     schema v1, validator, normalisation, hashes, reference algorithms
-│   ├── mulu-solc/      solc Standard JSON driver, imports, AST index, hashes
+│   ├── mulu-solc/      solc Standard JSON driver, imports, AST index, hashes, build-info
 │   ├── mulu-yul/       Yul lexer/parser, CFG, effects, folding, ProgramIR, checks
 │   ├── mulu-abstraction/ uint256 intervals, guard predicates, spec DSL, model builder
 │   ├── mulu-replay/    concrete calls on an in-process EVM (revm)

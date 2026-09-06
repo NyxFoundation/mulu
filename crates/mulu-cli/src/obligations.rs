@@ -154,7 +154,11 @@ fn ob(
 }
 
 /// Build the ledger for one analysis.
-pub fn ledger(ir: &ProgramIr, report: &AbstractionReport) -> Ledger {
+pub fn ledger(
+    ir: &ProgramIr,
+    report: &AbstractionReport,
+    drift: Option<&mulu_solc::Drift>,
+) -> Ledger {
     let mut out = Vec::new();
 
     // The root. Everything above needs a semantics to be stated against, and
@@ -260,13 +264,21 @@ pub fn ledger(ir: &ProgramIr, report: &AbstractionReport) -> Ledger {
         None,
         vec!["the front end reads solc's `ir` output".into()],
     ));
+    // P1b: when the project's own build was read, every way this compilation
+    // differs from it is a reason the deployed bytecode is not this artifact,
+    // and belongs on the obligation that says so rather than in a warning
+    // that scrolls past.
+    let mut deployed_raised = vec!["the analysis reads unoptimized Yul".to_string()];
+    if let Some(d) = drift {
+        deployed_raised.extend(d.lines());
+    }
     out.push(ob(
         "compilation:optimised-bytecode",
         "evm-bytecode",
         "The deployed bytecode behaves as the unoptimized Yul does. Not attempted: the \
          optimizer is off and the analysed artifact is not what would be deployed.",
         None,
-        vec!["the analysis reads unoptimized Yul".into()],
+        deployed_raised,
     ));
 
     // A layer that is not one of `LAYERS` can neither block nor promote, so a

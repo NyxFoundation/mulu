@@ -46,6 +46,10 @@ pub struct CompileOptions {
     pub optimizer: bool,
     pub via_ir: bool,
     pub include_bytecode: bool,
+    /// `prefix=target` as the project wrote them. Import statements in the
+    /// sources are written against these, so compiling a project's own
+    /// sources without them fails to resolve what the project resolved.
+    pub remappings: Vec<String>,
 }
 
 impl Default for CompileOptions {
@@ -58,6 +62,7 @@ impl Default for CompileOptions {
             // (P1-03). It is an artifact for reproduction, never the subject
             // of a claim at this stage.
             include_bytecode: true,
+            remappings: vec![],
         }
     }
 }
@@ -105,12 +110,16 @@ impl Solc {
         if opts.include_bytecode {
             outputs.push("evm.bytecode.object");
         }
-        json!({
+        let mut settings = json!({
             "optimizer": {"enabled": opts.optimizer},
             "evmVersion": opts.evm_version,
             "viaIR": opts.via_ir,
             "outputSelection": {"*": {"*": outputs, "": ["ast"]}}
-        })
+        });
+        if !opts.remappings.is_empty() {
+            settings["remappings"] = json!(opts.remappings);
+        }
+        settings
     }
 
     /// Compile in-memory sources. `sources` is `(path, content)`.

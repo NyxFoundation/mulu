@@ -706,3 +706,178 @@ fn the_edge_count_is_a_limit_the_caller_can_set() {
     assert!(msg.contains("edges and the limit is 3"), "{msg}");
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// Write a Foundry/Hardhat-shaped project: two sources behind a remapping,
+/// and the build-info a real build would have left.
+fn project(name: &str, settings: serde_json::Value, solc_version: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mulu-proj-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("lib/oz/token")).unwrap();
+    std::fs::create_dir_all(dir.join("out/build-info")).unwrap();
+    let limits = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+import "@oz/token/Cap.sol";
+contract Limits is Cap {
+    uint256 public limit;
+    function setLimit(uint256 x) external capped(x) {
+        require(x <= 1000, "hard");
+        limit = x;
+    }
+    function forceSet(uint256 x) external { limit = x; }
+}
+"#;
+    let cap = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+abstract contract Cap {
+    modifier capped(uint256 x) {
+        require(x <= 100, "cap");
+        _;
+    }
+}
+"#;
+    std::fs::write(dir.join("src/Limits.sol"), limits).unwrap();
+    std::fs::write(dir.join("lib/oz/token/Cap.sol"), cap).unwrap();
+    let bi = serde_json::json!({
+        "_format": "hh-sol-build-info-1",
+        "id": "test",
+        "solcVersion": solc_version,
+        "input": {
+            "language": "Solidity",
+            "sources": {
+                "src/Limits.sol": {"content": limits},
+                "lib/oz/token/Cap.sol": {"content": cap},
+            },
+            "settings": settings,
+        },
+        "output": {},
+    });
+    std::fs::write(dir.join("out/build-info/test.json"), serde_json::to_string_pretty(&bi).unwrap())
+        .unwrap();
+    std::fs::copy(root().join("examples/limits/Limits.spec.json"), dir.join("spec.json")).unwrap();
+    dir
+}
+
+fn analyze_project(dir: &Path) -> (i32, PathBuf, String) {
+    let out = dir.join("analysis");
+    let o = mulu()
+        .args(["analyze", "--project", dir.to_str().unwrap()])
+        .args(["--contract", "Limits", "--spec", dir.join("spec.json").to_str().unwrap()])
+        .args(["--out", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    (o.status.code().unwrap(), out, String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+fn local_solc_version() -> String {
+    let solc = std::env::var("MULU_SOLC").unwrap_or_else(|_| "solc".into());
+    let out = Command::new(solc).arg("--version").output().unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Version:"))
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_project_build_supplies_the_sources_and_the_settings() {
+    if !ready() {
+        return;
+    }
+    // docs/08 §4: read the build-info rather than write an evaluator for
+    // foundry.toml or hardhat.config.js. The remapping is the point: without
+    // settings.remappings the import does not resolve, and the guard in the
+    // imported modifier would not be found at all.
+    let settings = serde_json::json!({
+        "optimizer": {"enabled": false},
+        "evmVersion": "paris",
+        "remappings": ["@oz/=lib/oz/"],
+    });
+    let dir = project("clean", settings, &local_solc_version());
+    let (code, out, stdout) = analyze_project(&dir);
+    assert_eq!(code, 1, "the example contains a violation");
+    assert!(stdout.contains("this is the project's own build"), "{stdout}");
+
+    // the project's own EVM version was used, not mulu's default
+    let manifest = json(&out.join("manifest.json"));
+    assert_eq!(manifest["provenance"]["solidity"]["settings"]["evmVersion"], "paris");
+    assert_eq!(
+        manifest["provenance"]["solidity"]["settings"]["remappings"][0],
+        "@oz/=lib/oz/"
+    );
+
+    // and the guard written in the imported modifier is attributed to it
+    let sarif = json(&out.join("results.sarif"));
+    let a = sarif["runs"][0]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["properties"]["id"] == "check-A")
+        .unwrap()
+        .clone();
+    let uri = a["locations"][0]["physicalLocation"]["artifactLocation"]["uri"].as_str().unwrap();
+    assert!(uri.ends_with("lib/oz/token/Cap.sol"), "{uri}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_build_this_is_not_says_so() {
+    if !ready() {
+        return;
+    }
+    // Analysing a project's sources is not analysing the project's build. The
+    // optimizer, a different solc and a file edited since are each a reason
+    // the deployed bytecode is not this artifact, so each goes on the
+    // obligation that says so rather than into a warning that scrolls past.
+    let settings = serde_json::json!({
+        "optimizer": {"enabled": true, "runs": 200},
+        "viaIR": true,
+        "remappings": ["@oz/=lib/oz/"],
+    });
+    let dir = project("drifted", settings, "0.4.11");
+    // edit one source after the build
+    let cap = dir.join("lib/oz/token/Cap.sol");
+    let text = std::fs::read_to_string(&cap).unwrap();
+    std::fs::write(&cap, text.replace("// SPDX", "// edited\n// SPDX")).unwrap();
+
+    let (code, out, stdout) = analyze_project(&dir);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("not the build the project ships"), "{stdout}");
+
+    let raised: Vec<String> = json(&out.join("obligations.json"))["obligations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "compilation:optimised-bytecode")
+        .unwrap()["raised_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap().to_string())
+        .collect();
+    let joined = raised.join("\n");
+    assert!(joined.contains("solc 0.4.11"), "{joined}");
+    assert!(joined.contains("optimizer on"), "{joined}");
+    assert!(joined.contains("IR pipeline"), "{joined}");
+    assert!(joined.contains("Cap.sol has been edited"), "{joined}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_project_with_no_build_is_told_to_build_it() {
+    if !ready() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("mulu-nobuild-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let o = mulu()
+        .args(["analyze", "--project", dir.to_str().unwrap()])
+        .args(["--out", dir.join("out").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_ne!(o.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("build the project first"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
