@@ -232,6 +232,16 @@ impl<'a> Builder<'a> {
                     if ins.storage_write.is_some() {
                         continue;
                     }
+                    // A call that defines a value is followed too. The walk
+                    // enters one, so a guard inside it is reached; leaving it
+                    // out here meant that guard never refined the partition,
+                    // and the walk then found it undecided in a region that
+                    // was only coarse because of this.
+                    if let Some((_, callee, _)) = defining_call(ins) {
+                        if self.ir.function(&callee).is_some() {
+                            queue.push(callee);
+                        }
+                    }
                     if let Some((callee, _)) = statement_call(ins) {
                         if self.ir.checks.iter().any(|c| c.helper.as_deref() == Some(callee.as_str())) {
                             continue;

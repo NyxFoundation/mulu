@@ -234,3 +234,4 @@ fn a_function_named_like_a_region_does_not_share_its_call_event() {
         .expect("the model and its plant must satisfy finite-product v1");
     assert!(parsed.control_plant.is_some());
 }
+

@@ -1069,3 +1069,73 @@ contract Sw {
     let _ = std::fs::remove_dir_all(&ok_out);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_guard_inside_a_call_made_for_its_value_is_reached_and_refines() {
+    if !ready() {
+        return;
+    }
+    // A `require` inside a function called for its value is a revert path the
+    // model must have, and a guard whose boundary the regions must respect.
+    //
+    // Both halves were missing and were fixed separately, which is why this
+    // pins them together. The walk skipped a definition whose value can
+    // revert, dropping the path; when it began entering them, the reachable
+    // set still followed only calls made as statements, so the guard never
+    // refined the partition and the walk then found it undecided in a region
+    // that was coarse only for that reason.
+    let dir = std::env::temp_dir().join(format!("mulu-valuecall-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("C.sol"),
+        r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract C {
+    uint256 public v;
+    function f(uint256 x) public { v = g(x); }
+    function g(uint256 x) internal pure returns (uint256) {
+        require(x <= 10, "g");
+        return x;
+    }
+}"#,
+    )
+    .unwrap();
+    let out = dir.join("out");
+    let code = mulu()
+        .args(["analyze", dir.join("C.sol").to_str().unwrap()])
+        .args(["--contract", "C", "--out", out.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .code()
+        .unwrap();
+    assert_eq!(code, 0, "nothing here is unsupported and there is no specification");
+
+    let a = json(&out.join("abstraction.json"));
+    assert!(a["unsupported"].as_array().unwrap().is_empty(), "{}", a["unsupported"]);
+
+    // the guard's boundary is in the partition
+    let sets: Vec<String> = a["argument_regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["set"].to_string())
+        .collect();
+    assert!(sets.iter().any(|s| s.contains("10")), "{sets:?}");
+
+    // and the model has the check with both outcomes reachable, the failing
+    // one being the revert path the walk used to skip
+    let model = json(&out.join("model.json"));
+    let checks = model["checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 1, "one guard, one check");
+    let (pass, fail) = (
+        checks[0]["pass_event"].as_str().unwrap(),
+        checks[0]["fail_event"].as_str().unwrap(),
+    );
+    let has = |ev: &str| {
+        model["transitions"].as_array().unwrap().iter().any(|t| t["event"] == ev)
+    };
+    assert!(has(pass), "the passing branch");
+    assert!(has(fail), "the reverting branch, which is the point");
+    let _ = std::fs::remove_dir_all(&dir);
+}
