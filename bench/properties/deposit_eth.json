@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "use_case": "deposit_eth",
+  "source": "contracts/deposit_eth/certora/*.spec",
+  "note": "The benchmark ships one encoding per tool: `certora/` for Certora, `solcmc/` for solc's model checker. This is mulu's. Each property is the same rule as the file it names, written in the terms mulu's paths are written in. deposit_eth's revert rules turn on the *sender's* ether balance, which the model does not have, so none of them is written here.",
+  "call_properties": []
+}

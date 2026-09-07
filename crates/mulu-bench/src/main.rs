@@ -109,6 +109,8 @@ struct Scored {
 struct AnswerKey {
     /// use case -> the properties written for it
     properties: BTreeMap<String, Vec<mulu_abstraction::call_property::CallProperty>>,
+    /// use case -> the invariants its properties may rest on
+    invariants: BTreeMap<String, Vec<mulu_abstraction::call_property::Invariant>>,
     /// (use case, property, version) -> does it hold
     truth: BTreeMap<(String, String, String), bool>,
 }
@@ -116,6 +118,7 @@ struct AnswerKey {
 impl AnswerKey {
     fn load(dir: &std::path::Path, corpus: &std::path::Path) -> Result<Self> {
         let mut properties = BTreeMap::new();
+        let mut invariants = BTreeMap::new();
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -131,6 +134,7 @@ impl AnswerKey {
             } else {
                 file.use_case.clone()
             };
+            invariants.insert(use_case.clone(), file.invariants);
             properties.insert(use_case, file.call_properties);
         }
 
@@ -156,7 +160,7 @@ impl AnswerKey {
                 );
             }
         }
-        Ok(Self { properties, truth })
+        Ok(Self { properties, invariants, truth })
     }
 
     /// `bank/Bank_v1.sol` -> the use case and the version.
@@ -172,7 +176,7 @@ impl AnswerKey {
         name: &str,
         paths: &[mulu_abstraction::model::PathSummary],
     ) -> Vec<Scored> {
-        use mulu_abstraction::call_property::{check, Verdict};
+        use mulu_abstraction::call_property::{check_with, Verdict};
         let Some((use_case, version)) = Self::split(name) else { return vec![] };
         let Some(props) = self.properties.get(&use_case) else { return vec![] };
         let mut out = vec![];
@@ -182,7 +186,8 @@ impl AnswerKey {
             else {
                 continue;
             };
-            let a = check(p, paths);
+            let inv = self.invariants.get(&use_case).map(|v| v.as_slice()).unwrap_or(&[]);
+            let a = check_with(p, inv, paths);
             let (said, outcome) = match a.verdict {
                 Verdict::Holds if truth => ("holds", "correct"),
                 Verdict::Holds => ("holds", "wrong"),
@@ -196,7 +201,11 @@ impl AnswerKey {
                 said: said.to_string(),
                 truth,
                 outcome,
-                because: a.because,
+                because: if a.assuming.is_empty() {
+                    a.because
+                } else {
+                    format!("{} [assuming {}]", a.because, a.assuming.join(", "))
+                },
             });
         }
         out
@@ -374,7 +383,11 @@ fn compile_and_lower(
         &c.ir,
         &c.abi,
         c.storage_layout.clone(),
-        mulu_yul::SolcFacts { origins: Some(&lookup), selectors },
+        mulu_yul::SolcFacts {
+            origins: Some(&lookup),
+            selectors,
+            immutables: bundle.ast_index.immutables.clone(),
+        },
     )?;
     Ok((bundle, selected, ir))
 }

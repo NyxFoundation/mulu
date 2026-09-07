@@ -75,16 +75,66 @@ invariants at the end of a successful transaction. Scoring waits on that.
 
 What the histogram says to implement, in the order the corpus asks for it:
 
-27 of the 47 now reach a model, and 25 of those hold a guard mulu would
-report on. What stops the other 20:
+42 of the 47 now reach a model, and 40 of those hold a guard mulu would
+report on. Three loops and two contracts that run out of the time budget are
+what is left.
 
-| cases | what stops it |
+### The score, 2026-09-08
+
+`bench/properties/` holds mulu's encodings, one file per use case, beside the
+`certora/` and `solcmc/` encodings the benchmark ships for the other tools.
+Each property names the file it was written from.
+
+| | |
 | --- | --- |
-| 8 | an argument that is not a numeric word: `string`, `bytes32` |
-| 5 | an instruction whose effects the model cannot represent |
-| 5 | more forks on one path than the limit allows |
-| 1 | a loop |
-| 1 | a switch value that straddles a case |
+| (property, version) pairs asked | 35 |
+| correct | 32 |
+| wrong | 3 |
+| no answer | 0 |
+
+The three are all cases where mulu produces a concrete request that the
+answer key says cannot exist. They are left in the score as wrong, because a
+tool does not get to grade its own disagreements, but each is checkable in a
+minute:
+
+- **`vault/wd-fin-before` v3.** v3 removes `require(block.number >=
+  request_time + wait_time)` from `finalize`, so `finalize` succeeds before
+  the wait time has passed and the property does not hold. The key says it
+  holds. The benchmark's own experiment table in `contracts/vault/README.md`
+  marks Certora `FN` on this cell, which is only possible if the truth is
+  that it fails.
+- **`zerotoken_bank/wd-not-revert` v5.** v5 adds `require(amount <= 100)` to
+  `withdraw`. The property is "does not revert if `amount` is bigger than
+  zero and less or equal to the balance entry", and `withdraw(150)` against
+  a balance of 200 reverts. The key says it holds.
+- **`zerotoken_bank/dep-not-revert` v7.** `deposit` is byte-identical in v1
+  through v7, and the key says the property fails in v1 through v6 (deposit
+  reverts on overflow) and holds in v7.
+
+`contracts/vault/README.md` and `contracts/vault/ground-truth.csv` also
+disagree with each other on `wd-fin-before` and `fin-canc-twice`.
+
+### What the encoding rests on
+
+Two things, both declared and both printed with the answer.
+
+`bench/properties/zerotoken_bank.json` supplies one invariant,
+`cbal-ge-bal`: the contract's total is at least any one balance entry. mulu's
+abstraction carries no inductive invariant over storage, so without it the
+walk produces a path where `withdraw` underflows the total, which the
+contract cannot be on. The benchmark lists `cbal-ge-bal` as a property of its
+own and scores it 1 for every version. An answer that used an invariant says
+which.
+
+`zerotoken_bank/wd-not-revert` follows the README's wording, which says
+`amount is bigger than zero and less or equal to the balance entry`. The
+Certora file drops the first half, and with it the counterexample
+`withdraw(0)`.
+
+Nine of the sixteen use cases have no file yet. Their revert rules turn on
+things the model does not have: the *sender's* ether balance, `msg.value`
+(the environment profile fixes it at zero), or several transactions in
+sequence.
 
 ## What the corpus said, 2026-09-07
 
@@ -106,7 +156,8 @@ report on. What stops the other 20:
 | | **28.3%** | a call made for its value is followed when finding what is reachable |
 | | 28.4% | `call` is modelled, under a stated no-reentrancy assumption |
 | | 31.9% | a constructor write the model cannot follow widens the initial state |
-| latest | 49.9% | a choice the regions do not settle forks the walk instead of refusing |
+| | 49.9% | a choice the regions do not settle forks the walk instead of refusing |
+| latest | 66.7% | a type is a slot's universe, a narrow write is a write, a panic forks |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every

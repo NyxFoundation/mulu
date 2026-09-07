@@ -41,6 +41,8 @@ pub struct Lowering<'a> {
     store_helpers: BTreeMap<String, (usize, usize)>,
     /// selector (8 lowercase hex digits) -> signature, from the compiler
     selectors: BTreeMap<String, String>,
+    /// AST id -> name, for the contract's `immutable` variables
+    immutables: BTreeMap<String, String>,
 }
 
 fn loc(s: Option<SrcSpan>) -> Option<Location> {
@@ -127,6 +129,11 @@ impl<'a> Lowering<'a> {
     }
 
     /// solc's selector table, which decides which overload a selector is.
+    pub fn with_immutables(mut self, m: BTreeMap<String, String>) -> Self {
+        self.immutables = m;
+        self
+    }
+
     pub fn with_selectors(mut self, selectors: BTreeMap<String, String>) -> Self {
         self.selectors = selectors;
         self
@@ -148,6 +155,7 @@ impl<'a> Lowering<'a> {
             aliases: BTreeMap::new(),
             store_helpers: BTreeMap::new(),
             selectors: BTreeMap::new(),
+            immutables: BTreeMap::new(),
         }
     }
 
@@ -1146,6 +1154,7 @@ impl<'a> Lowering<'a> {
             functions: self.functions,
             checks: self.checks,
             storage_layout,
+            immutables: std::mem::take(&mut self.immutables),
             unsupported,
         }
     }

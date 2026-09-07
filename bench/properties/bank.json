@@ -2,35 +2,69 @@
   "schema_version": 1,
   "use_case": "bank",
   "source": "contracts/bank/certora/*.spec",
-  "note": "The benchmark ships one encoding per tool: `certora/` for Certora, `solcmc/` for solc's model checker. This is mulu's. Each property here is the same rule as the file it names, written in the terms mulu's paths are written in.",
+  "note": "The benchmark ships one encoding per tool: `certora/` for Certora, `solcmc/` for solc's model checker. This is mulu's. Each property is the same rule as the file it names, written in the terms mulu's paths are written in.",
   "call_properties": [
     {
       "id": "withdraw-revert",
       "from": "certora/withdraw-revert.spec",
-      "entrypoint": "withdraw(uint256)",
-      "given": {
-        "op": "or",
-        "args": [
-          { "op": "eq", "left": { "argument": 0 }, "right": { "uint256": "0" } },
-          {
-            "op": "ugt",
-            "left": { "argument": 0 },
-            "right": { "cell": { "var": "balances", "key": { "env": "caller" } } }
-          }
-        ]
-      },
-      "assert": "reverts"
+      "rules": [
+        {
+          "entrypoint": "withdraw(uint256)",
+          "given": {
+            "op": "or",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ugt",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "cell": {
+                    "var": "balances",
+                    "key": {
+                      "env": "caller"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "assert": "reverts"
+        }
+      ]
     },
     {
       "id": "withdraw-not-revert",
       "from": "certora/withdraw-not-revert.spec",
-      "entrypoint": "withdraw(uint256)",
-      "given": {
-        "op": "ule",
-        "left": { "argument": 0 },
-        "right": { "cell": { "var": "balances", "key": { "env": "caller" } } }
-      },
-      "assert": "does-not-revert"
+      "rules": [
+        {
+          "entrypoint": "withdraw(uint256)",
+          "given": {
+            "op": "ule",
+            "left": {
+              "argument": 0
+            },
+            "right": {
+              "cell": {
+                "var": "balances",
+                "key": {
+                  "env": "caller"
+                }
+              }
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
     }
   ]
 }

@@ -112,7 +112,11 @@ fn lower_bundle(
         &c.ir,
         &c.abi,
         c.storage_layout.clone(),
-        mulu_yul::SolcFacts { origins: Some(&lookup), selectors },
+        mulu_yul::SolcFacts {
+            origins: Some(&lookup),
+            selectors,
+            immutables: bundle.ast_index.immutables.clone(),
+        },
     )
     .with_context(|| format!("lowering the Yul of {}", c.name))?;
     Ok((bundle, selected, ir))

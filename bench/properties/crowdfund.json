@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "use_case": "crowdfund",
+  "source": "contracts/crowdfund/certora/*.spec",
+  "note": "The benchmark ships one encoding per tool: `certora/` for Certora, `solcmc/` for solc's model checker. This is mulu's. Each property is the same rule as the file it names, written in the terms mulu's paths are written in.",
+  "call_properties": [
+    {
+      "id": "no-donate-after-deadline",
+      "from": "certora/no-donate-after-deadline.spec",
+      "rules": [
+        {
+          "entrypoint": "donate()",
+          "given": {
+            "op": "ugt",
+            "left": {
+              "env": "number"
+            },
+            "right": {
+              "immutable": "end_donate"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "no-wd-if-no-goal",
+      "from": "certora/no-wd-if-no-goal.spec",
+      "rules": [
+        {
+          "entrypoint": "withdraw()",
+          "given": {
+            "op": "ult",
+            "left": {
+              "env": "balance"
+            },
+            "right": {
+              "immutable": "goal"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    }
+  ]
+}

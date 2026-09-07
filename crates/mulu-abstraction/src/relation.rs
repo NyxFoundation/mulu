@@ -26,11 +26,30 @@ use std::collections::BTreeMap;
 /// literal slot.
 pub trait Layout {
     fn label_at(&self, slot: crate::interval::U256) -> Option<String>;
+    /// The name of the `immutable` variable solc gave this AST id.
+    fn immutable(&self, _id: &str) -> Option<String> {
+        None
+    }
 }
 
 impl<F: Fn(crate::interval::U256) -> Option<String>> Layout for F {
     fn label_at(&self, slot: crate::interval::U256) -> Option<String> {
         self(slot)
+    }
+}
+
+/// A slot table and an immutable table together.
+pub struct Names {
+    pub slots: BTreeMap<crate::interval::U256, String>,
+    pub immutables: BTreeMap<String, String>,
+}
+
+impl Layout for Names {
+    fn label_at(&self, slot: crate::interval::U256) -> Option<String> {
+        self.slots.get(&slot).cloned()
+    }
+    fn immutable(&self, id: &str) -> Option<String> {
+        self.immutables.get(id).cloned()
     }
 }
 
@@ -83,10 +102,36 @@ pub fn strip(e: &Expr) -> Expr {
             if args.len() == 1 && is_encoding_wrapper(name) {
                 return strip(&args[0]);
             }
+            // `and(x, 2^k - 1)` is what `cleanup_t_address` and its kin
+            // become once the lowerer has inlined them, and it is the
+            // identity on a value that already fits in k bits. solc emits it
+            // exactly where the value does, which is the `typed-domains`
+            // assumption the model already records. Only masks of that shape:
+            // `and(add(size, 31), not(31))` clears low bits and is arithmetic.
+            if name == "and" && args.len() == 2 {
+                if let Some(k) = low_bit_mask(&args[1]) {
+                    if k > 0 && k <= 256 && k % 8 == 0 {
+                        return strip(&args[0]);
+                    }
+                }
+            }
             Expr::Call { name: name.clone(), args: args.iter().map(strip).collect(), src: *src }
         }
         other => other.clone(),
     }
+}
+
+/// `2^k - 1` as a width in bits, when the literal is one.
+fn low_bit_mask(e: &Expr) -> Option<u32> {
+    let Expr::Literal { text, .. } = e else { return None };
+    let v = crate::interval::parse_decimal(text).ok()?;
+    let bits = 256 - v.leading_zeros() as u32;
+    let all_ones = if bits >= 256 {
+        crate::interval::max_u256()
+    } else {
+        (crate::interval::U256::from(1u8) << bits as usize) - crate::interval::U256::from(1u8)
+    };
+    (v == all_ones).then_some(bits)
 }
 
 fn is_encoding_wrapper(name: &str) -> bool {
@@ -142,6 +187,16 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
     if name.starts_with("mapping_index_access") && args.len() == 2 {
         return call("mapping", args);
     }
+    // `loadimmutable("13")` is a read of the immutable declared at AST node
+    // 13. The id is solc's and changes with the source; the name does not.
+    if name == "loadimmutable" && args.len() == 1 {
+        if let Expr::Literal { text, .. } = &args[0] {
+            let id = text.trim_matches('"');
+            if let Some(n) = layout.immutable(id) {
+                return call("immutable", vec![Expr::Ident { name: n, src: None }]);
+            }
+        }
+    }
     Expr::Call { name: name.clone(), args, src: *src }
 }
 
@@ -178,6 +233,20 @@ fn rel(e: &Expr, negated: bool) -> Option<Relation> {
     let b = strip(&args[1]).render();
     // `not(a < b)` is `b <= a`, and `not(a == b)` has no form here: it is a
     // disequality, which is two relations, so it is left alone.
+    // `sub(a, b) <= a` is solc's underflow check, and it says exactly
+    // `b <= a`. Leaving it in the arithmetic hid a relation the rest of the
+    // walk already had, so the same fact was assumed twice, once each way.
+    if let (Expr::Call { name: sub, args: sa, .. }, b) = (&strip(&args[0]), &strip(&args[1])) {
+        if sub == "sub" && sa.len() == 2 && strip(&sa[0]).render() == b.render() {
+            let (x, y) = (strip(&sa[0]).render(), strip(&sa[1]).render());
+            match (name.as_str(), negated) {
+                // gt(sub(a, b), a) negated is sub(a, b) <= a, i.e. b <= a
+                ("gt", true) => return Some(Relation { op: Op::Le, left: y, right: x }),
+                ("gt", false) => return Some(Relation { op: Op::Lt, left: x, right: y }),
+                _ => {}
+            }
+        }
+    }
     let (op, left, right) = match (name.as_str(), negated) {
         ("lt", false) => (Op::Lt, a, b),
         ("lt", true) => (Op::Le, b, a),
@@ -257,6 +326,20 @@ mod tests {
         assert_eq!(r.key(), "var_amount_20 <= sload(mapping(0, caller()))");
     }
 
+    /// solc compares two addresses by masking both to 160 bits. The mask is
+    /// the identity on an address, which is what the values being compared
+    /// are, so the question is about the two addresses.
+    #[test]
+    fn the_mask_solc_puts_on_a_typed_value_is_not_part_of_the_question() {
+        let m = "1461501637330902918203684832716283019655932542975";
+        let t = BTreeMap::new();
+        let r = of(&parse(&format!("eq(and(caller(), {m}), and(o, {m}))")), &t).expect("a relation");
+        assert_eq!(r.key(), "caller() == o");
+        // and a mask that is not `2^k - 1` is arithmetic, and stays
+        let keep = parse("and(add(size, 31), 115792089237316195423570985008687907853269984665640564039457584007913129639904)");
+        assert_eq!(strip(&keep).render(), keep.render());
+    }
+
     /// The point of the whole module: the guard the compiler wrote and the
     /// line a specification would write reach the same key.
     #[test]
@@ -282,6 +365,20 @@ mod tests {
         t.insert("g".to_string(), parse("read_from_storage_split_offset_0_t_uint256(0x00)"));
         let r = of_in(&parse("lt(g, x)"), &t, &layout).expect("a relation");
         assert_eq!(r.key(), "storage(balances) < x");
+    }
+
+    /// solc checks `a - b` for underflow by asking whether the difference
+    /// came out bigger than `a`. That is `b <= a`, and saying so joins the
+    /// check up with the guard the source wrote.
+    #[test]
+    fn the_underflow_check_is_the_relation_it_stands_for() {
+        let t = BTreeMap::new();
+        let r = of(&parse("iszero(gt(sub(cleanup_t_uint256(bal), cleanup_t_uint256(amt)), cleanup_t_uint256(bal)))"), &t)
+            .expect("a relation");
+        assert_eq!(r.key(), "amt <= bal");
+        // and the other side of it
+        let r = of(&parse("gt(sub(bal, amt), bal)"), &t).expect("a relation");
+        assert_eq!(r.key(), "bal < amt");
     }
 
     #[test]

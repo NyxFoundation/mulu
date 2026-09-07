@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "use_case": "zerotoken_bank",
+  "source": "contracts/zerotoken_bank/certora/*.spec",
+  "note": "The benchmark ships one encoding per tool: `certora/` for Certora, `solcmc/` for solc's model checker. This is mulu's. Each property is the same rule as the file it names, written in the terms mulu's paths are written in. `wd-not-revert` follows the README's wording, which says `amount is bigger than zero and less or equal to the balance entry`. The Certora file drops the first half, and with it the counterexample `withdraw(0)`.",
+  "call_properties": [
+    {
+      "id": "wd-not-revert",
+      "from": "certora/wd-not-revert.spec, with the README's `amount is bigger than zero`",
+      "rules": [
+        {
+          "entrypoint": "withdraw(uint256)",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ugt",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ule",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "cell": {
+                    "var": "balances",
+                    "key": {
+                      "env": "caller"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "dep-not-revert",
+      "from": "certora/dep-not-revert.spec",
+      "rules": [
+        {
+          "entrypoint": "deposit(uint256)",
+          "assert": "does-not-revert"
+        }
+      ]
+    }
+  ],
+  "invariants": [
+    {
+      "id": "cbal-ge-bal",
+      "from": "the corpus's own property list, where it is scored 1 for every version",
+      "holds": {
+        "op": "ule",
+        "left": {
+          "cell": {
+            "var": "balances",
+            "key": {
+              "env": "caller"
+            }
+          }
+        },
+        "right": {
+          "storage": "contract_balance"
+        }
+      }
+    }
+  ]
+}

@@ -239,6 +239,9 @@ pub struct ProgramIr {
     pub functions: Vec<Function>,
     pub checks: Vec<Check>,
     pub storage_layout: serde_json::Value,
+    /// AST id to name, for the contract's `immutable` variables.
+    #[serde(default)]
+    pub immutables: BTreeMap<String, String>,
     pub unsupported: Vec<Unsupported>,
 }
 

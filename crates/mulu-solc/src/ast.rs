@@ -54,6 +54,11 @@ fn parse_ast_src(text: &str) -> Option<(u32, u32, u32)> {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AstIndex {
     pub nodes: Vec<AstNode>,
+    /// AST id to name, for every `immutable` variable declared anywhere in
+    /// the build. solc compiles a read of one to `loadimmutable("13")`, where
+    /// 13 is this id, and a guard on it is unreadable without the name.
+    #[serde(default)]
+    pub immutables: std::collections::BTreeMap<String, String>,
 }
 
 impl AstIndex {
@@ -65,7 +70,11 @@ impl AstIndex {
         }
         // Innermost first when spans nest, so a plain scan finds the tightest.
         nodes.sort_by_key(|n| (n.file_id, n.start, n.length));
-        Self { nodes }
+        let mut immutables = std::collections::BTreeMap::new();
+        for ast in asts.values() {
+            collect_immutables(ast, &mut immutables);
+        }
+        Self { nodes, immutables }
     }
 
     /// The tightest node containing the span, if any.
@@ -99,6 +108,36 @@ impl AstIndex {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+}
+
+/// Every `VariableDeclaration` marked `immutable`, by its AST id.
+fn collect_immutables(
+    node: &serde_json::Value,
+    out: &mut std::collections::BTreeMap<String, String>,
+) {
+    if node.get("nodeType").and_then(|v| v.as_str()) == Some("VariableDeclaration")
+        && node.get("mutability").and_then(|v| v.as_str()) == Some("immutable")
+    {
+        if let (Some(id), Some(name)) = (
+            node.get("id").and_then(|v| v.as_u64()),
+            node.get("name").and_then(|v| v.as_str()),
+        ) {
+            out.insert(id.to_string(), name.to_string());
+        }
+    }
+    match node {
+        serde_json::Value::Object(m) => {
+            for v in m.values() {
+                collect_immutables(v, out);
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for v in a {
+                collect_immutables(v, out);
+            }
+        }
+        _ => {}
     }
 }
 

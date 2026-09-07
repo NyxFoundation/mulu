@@ -50,6 +50,10 @@ pub struct SolcFacts<'a> {
     /// pairing has to be guessed from the dispatcher and the ABI, which is
     /// wrong as soon as a function is overloaded.
     pub selectors: std::collections::BTreeMap<String, String>,
+    /// AST id to name, for the contract's `immutable` variables. solc reads
+    /// one as `loadimmutable("13")`, where 13 is the declaration's AST id,
+    /// and a reader of a guard needs the name the source gave it.
+    pub immutables: std::collections::BTreeMap<String, String>,
 }
 
 /// As `lower_contract`, using what the compiler reported alongside the Yul.
@@ -69,5 +73,6 @@ pub fn lower_contract_with(
         lowering = lowering.with_origins(o);
     }
     lowering = lowering.with_selectors(facts.selectors);
+    lowering = lowering.with_immutables(facts.immutables);
     Ok(lowering.run(&parsed.object, parsed.use_src, storage_layout, abi))
 }

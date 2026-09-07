@@ -48,8 +48,27 @@ pub struct PropertyFile {
     pub source: String,
     #[serde(default)]
     pub note: String,
+    /// Facts about the contract's storage that hold in every reachable state,
+    /// and that the model does not derive: `contract_balance` is at least any
+    /// one balance entry, say. mulu's abstraction has no inductive invariant
+    /// over storage, so without these it reports paths the contract cannot be
+    /// on. Each one is a claim about the contract, and an answer that used
+    /// one says so.
+    #[serde(default)]
+    pub invariants: Vec<Invariant>,
     #[serde(default)]
     pub call_properties: Vec<CallProperty>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Invariant {
+    pub id: String,
+    /// Where the claim comes from: the corpus's own property list, ideally,
+    /// so it can be checked against the same answer key.
+    #[serde(default)]
+    pub from: String,
+    pub holds: Condition,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,9 +79,18 @@ pub struct CallProperty {
     /// can put them side by side.
     #[serde(default)]
     pub from: String,
+    /// One rule per entrypoint the property is about. A file of the
+    /// benchmark's may hold several rules under one name, and the answer key
+    /// has one row for the name, so the property holds when all of them do.
+    pub rules: Vec<Rule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rule {
     /// The ABI signature, matching an entrypoint of the contract.
     pub entrypoint: String,
-    /// The requests the property is about. Absent means all of them.
+    /// The requests the rule is about. Absent means all of them.
     #[serde(default)]
     pub given: Option<Condition>,
     #[serde(rename = "assert")]
@@ -79,11 +107,18 @@ pub enum Term {
     Storage(String),
     /// A mapping cell: the variable, and the key.
     Cell { var: String, key: Box<Term> },
-    /// Transaction context: `caller`, `callvalue`, `number`, `timestamp`,
-    /// `origin`, `selfbalance`.
+    /// Transaction or block context: `caller`, `callvalue`, `number`,
+    /// `timestamp`, `origin`. `balance` is the contract's own ether balance,
+    /// which solc reads as `balance(address())`.
     Env(String),
+    /// An `immutable` variable, by the name the source gave it.
+    Immutable(String),
     /// A literal, in decimal or 0x hex.
     Uint256(String),
+    /// Wrapping addition and subtraction, as the EVM does them. `request_time
+    /// + wait_time` is a term a rule about a deadline needs.
+    Add { left: Box<Term>, right: Box<Term> },
+    Sub { left: Box<Term>, right: Box<Term> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +152,9 @@ pub enum Verdict {
 #[derive(Debug, Clone, Serialize)]
 pub struct Answer {
     pub id: String,
+    /// Invariants the answer rests on, by id. Empty when it rests on none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assuming: Vec<String>,
     pub entrypoint: String,
     pub verdict: Verdict,
     /// Why, in one line.
@@ -163,9 +201,15 @@ fn render(t: &Term, p: &PathSummary) -> Option<String> {
     Some(match t {
         Term::Argument(i) => p.parameters.get(*i)?.clone(),
         Term::Storage(v) => format!("storage({v})"),
+        Term::Immutable(v) => format!("immutable({v})"),
         Term::Cell { var, key } => format!("cell({var}, {})", render(key, p)?),
-        Term::Env(name) => format!("{name}()"),
+        Term::Env(name) => match name.as_str() {
+            "balance" | "selfbalance" => "balance(address())".to_string(),
+            other => format!("{other}()"),
+        },
         Term::Uint256(text) => parse_decimal(text).ok()?.to_string(),
+        Term::Add { left, right } => format!("add({}, {})", render(left, p)?, render(right, p)?),
+        Term::Sub { left, right } => format!("sub({}, {})", render(left, p)?, render(right, p)?),
     })
 }
 
@@ -175,16 +219,23 @@ fn values(t: &Term, p: &PathSummary) -> Option<IntervalSet> {
         Term::Argument(i) => p.arguments.get(*i).cloned(),
         Term::Storage(v) => p.storage.get(v).cloned(),
         Term::Uint256(text) => parse_decimal(text).ok().map(IntervalSet::point),
-        // A mapping cell and the transaction context are not in the model's
-        // state. What is known about them is what the path assumed, which is
-        // read as a relation rather than as a set.
-        Term::Cell { .. } | Term::Env(_) => None,
+        // A mapping cell, the transaction context and arithmetic over them
+        // are not in the model's state. What is known about them is what the
+        // path assumed, which is read as a relation rather than as a set.
+        Term::Cell { .. }
+        | Term::Env(_)
+        | Term::Immutable(_)
+        | Term::Add { .. }
+        | Term::Sub { .. } => None,
     }
 }
 
 /// Does the relation `left OP right` hold on this path?
 fn holds(op: Op, left: &Term, right: &Term, p: &PathSummary) -> Tri {
-    // Intervals first: exact where both sides are in the model's state.
+    // Intervals first: exact where both sides are in the model's state. A
+    // region that does not settle it is not the end of the matter, though:
+    // a slot with one region settles nothing by its interval and everything
+    // by what the path assumed about it.
     if let (Some(a), Some(b)) = (values(left, p), values(right, p)) {
         if let (Some((alo, ahi)), Some((blo, bhi))) = (a.bounds(), b.bounds()) {
             let (yes, no) = match op {
@@ -199,7 +250,6 @@ fn holds(op: Op, left: &Term, right: &Term, p: &PathSummary) -> Tri {
                 return Tri::False;
             }
         }
-        return Tri::Unknown;
     }
     // Otherwise the path has to have taken a side on it.
     let (Some(l), Some(r)) = (render(left, p), render(right, p)) else { return Tri::Unknown };
@@ -211,6 +261,22 @@ fn holds(op: Op, left: &Term, right: &Term, p: &PathSummary) -> Tri {
     let flip = |op: Op, a: &str, b: &str| {
         Relation { op, left: a.to_string(), right: b.to_string() }.key()
     };
+    // Two literals cannot both be it: if the path assumed `state == 0`, then
+    // `state == 1` is settled, and it is settled false. This is what an enum
+    // in a guard needs, because every state is one equality.
+    if op == Op::Eq {
+        if let Term::Uint256(_) = right {
+            for (k, v) in &p.assumed {
+                if !*v {
+                    continue;
+                }
+                let Some(rest) = k.strip_prefix(&format!("{l} == ")) else { continue };
+                if rest != r && parse_decimal(rest).is_ok() {
+                    return Tri::False;
+                }
+            }
+        }
+    }
     match op {
         Op::Le => {
             if let Some(v) = p.assumed.get(&flip(Op::Lt, &r, &l)) {
@@ -230,6 +296,179 @@ fn holds(op: Op, left: &Term, right: &Term, p: &PathSummary) -> Tri {
     Tri::Unknown
 }
 
+/// The order facts a path carries, as edges `left <= right`, with `strict`
+/// marking `<`. A fact taken to be false is the reverse edge: `not (a <= b)`
+/// is `b < a`.
+fn order_edges(p: &PathSummary) -> Vec<(String, String, bool)> {
+    let mut out = vec![];
+    for (k, v) in &p.assumed {
+        let (a, op, b) = if let Some((a, b)) = k.split_once(" <= ") {
+            (a, Op::Le, b)
+        } else if let Some((a, b)) = k.split_once(" < ") {
+            (a, Op::Lt, b)
+        } else {
+            continue;
+        };
+        out.push(match (op, v) {
+            (Op::Le, true) => (a.to_string(), b.to_string(), false),
+            (Op::Le, false) => (b.to_string(), a.to_string(), true),
+            (Op::Lt, true) => (a.to_string(), b.to_string(), true),
+            (Op::Lt, false) => (b.to_string(), a.to_string(), false),
+            _ => continue,
+        });
+    }
+    out
+}
+
+/// What the regions say, as order facts: an argument in `[1, 2^160)` is a
+/// term with `1` below it. Interval arithmetic cannot decide
+/// `sub(amount, 1) <= amount` and so the walk forks on it, and one side of
+/// that fork is a path where the argument is both at least one and less than
+/// one. Only the regions and the relations together rule it out.
+fn interval_edges(p: &PathSummary) -> Vec<(String, String, bool)> {
+    let mut out = vec![];
+    let mut bound = |term: String, set: &IntervalSet| {
+        if let Some((lo, hi)) = set.bounds() {
+            if lo > crate::interval::U256::ZERO {
+                out.push((lo.to_string(), term.clone(), false));
+            }
+            if hi < crate::interval::max_u256() {
+                out.push((term, hi.to_string(), false));
+            }
+        }
+    };
+    for (name, set) in p.parameters.iter().zip(p.arguments.iter()) {
+        bound(name.clone(), set);
+    }
+    for (label, set) in &p.storage {
+        bound(format!("storage({label})"), set);
+    }
+    out
+}
+
+/// The same for a condition the caller asserts, when it is a comparison this
+/// can read as an order fact.
+fn order_edges_of(c: &Condition, p: &PathSummary) -> Vec<(String, String, bool)> {
+    use Condition::*;
+    let two = |l: &Term, r: &Term, strict: bool, swap: bool| {
+        let (Some(a), Some(b)) = (render(l, p), render(r, p)) else { return vec![] };
+        vec![if swap { (b, a, strict) } else { (a, b, strict) }]
+    };
+    match c {
+        Ule { left, right } => two(left, right, false, false),
+        Ult { left, right } => two(left, right, true, false),
+        Uge { left, right } => two(left, right, false, true),
+        Ugt { left, right } => two(left, right, true, true),
+        And { args } => args.iter().flat_map(|a| order_edges_of(a, p)).collect(),
+        _ => vec![],
+    }
+}
+
+/// `a, b` of a two-argument call's rendered arguments, at the top level.
+fn split_top(inner: &str) -> Option<(String, String)> {
+    let mut depth = 0i32;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                return Some((inner[..i].trim().to_string(), inner[i + 1..].trim().to_string()))
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Is this set of order facts contradictory?
+///
+/// `amount <= balances[caller]`, `balances[caller] <= contract_balance` and
+/// `contract_balance < amount` cannot all hold. Deriving that is the whole of
+/// what a supplied invariant does for a path: the path is one the walk
+/// produced and the contract cannot be on.
+fn contradictory(edges: &[(String, String, bool)]) -> bool {
+    // `a - b` is at most `a` when `b <= a`, which is when it does not
+    // underflow. The walk knows `b <= a` from the check solc puts there, and
+    // without this the difference is an unrelated term: `balances -= amount
+    // - 1` produced a path where `amount <= balances` and `amount - 1 >
+    // balances` both held.
+    let mut edges = edges.to_vec();
+    for _ in 0..2 {
+        let known: std::collections::BTreeSet<(String, String)> =
+            edges.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect();
+        let mut extra = vec![];
+        for term in edges
+            .iter()
+            .flat_map(|(a, b, _)| [a.clone(), b.clone()])
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let Some(inner) = term.strip_prefix("sub(").and_then(|r| r.strip_suffix(")")) else {
+                continue;
+            };
+            let Some((a, b)) = split_top(inner) else { continue };
+            if known.contains(&(b.clone(), a.clone())) && !known.contains(&(term.clone(), a.clone()))
+            {
+                extra.push((term.clone(), a, false));
+            }
+        }
+        if extra.is_empty() {
+            break;
+        }
+        edges.extend(extra);
+    }
+
+    // Floyd-Warshall over the terms, carrying whether some edge on the path
+    // was strict. A term reachable from itself through a strict edge is a
+    // value strictly less than itself.
+    // Literals order among themselves, which is how a region's bound meets a
+    // relation's: `2^160 <= amount` and `amount < 1` contradict only once
+    // `1 < 2^160` is on the graph.
+    let mut edges = edges;
+    let lits: Vec<(String, crate::interval::U256)> = edges
+        .iter()
+        .flat_map(|(a, b, _)| [a.clone(), b.clone()])
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|t| parse_decimal(&t).ok().map(|v| (t, v)))
+        .collect();
+    for (ta, va) in &lits {
+        for (tb, vb) in &lits {
+            if va < vb {
+                edges.push((ta.clone(), tb.clone(), true));
+            }
+        }
+    }
+    let mut nodes: Vec<&str> = edges
+        .iter()
+        .flat_map(|(a, b, _)| [a.as_str(), b.as_str()])
+        .collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    if nodes.len() > 96 {
+        return false;
+    }
+    let idx = |x: &str| nodes.binary_search(&x).ok();
+    let n = nodes.len();
+    // `reach[i][j]`: None if no path, Some(strict) otherwise.
+    let mut reach = vec![vec![None::<bool>; n]; n];
+    for (a, b, strict) in &edges {
+        let (Some(i), Some(j)) = (idx(a.as_str()), idx(b.as_str())) else { continue };
+        let cur = reach[i][j];
+        reach[i][j] = Some(cur.unwrap_or(false) || *strict);
+    }
+    for k in 0..n {
+        for i in 0..n {
+            let Some(ik) = reach[i][k] else { continue };
+            for j in 0..n {
+                let Some(kj) = reach[k][j] else { continue };
+                let s = ik || kj;
+                reach[i][j] = Some(reach[i][j].unwrap_or(false) || s);
+            }
+        }
+    }
+    (0..n).any(|i| reach[i][i] == Some(true))
+}
+
 fn evaluate(c: &Condition, p: &PathSummary) -> Tri {
     use Condition::*;
     match c {
@@ -246,12 +485,63 @@ fn evaluate(c: &Condition, p: &PathSummary) -> Tri {
 }
 
 /// Answer one property against the paths of one abstraction.
+///
+/// A property with several rules holds when all of them do, is undecided when
+/// any is undecided and none fails, and fails as soon as one does.
 pub fn check(prop: &CallProperty, paths: &[PathSummary]) -> Answer {
+    check_with(prop, &[], paths)
+}
+
+/// The same, with invariants the contract is claimed to satisfy. A path that
+/// contradicts one is not a path the contract can be on.
+pub fn check_with(
+    prop: &CallProperty,
+    invariants: &[Invariant],
+    paths: &[PathSummary],
+) -> Answer {
+    let mut considered = 0;
+    let mut worst: Option<Answer> = None;
+    for r in &prop.rules {
+        let a = check_rule(&prop.id, r, invariants, paths);
+        considered += a.paths_considered;
+        let rank = |v: Verdict| match v {
+            Verdict::Fails => 2,
+            Verdict::Undecided => 1,
+            Verdict::Holds => 0,
+        };
+        if worst.as_ref().is_none_or(|w| rank(a.verdict) > rank(w.verdict)) {
+            worst = Some(a);
+        }
+    }
+    match worst {
+        Some(mut a) => {
+            a.paths_considered = considered;
+            a.assuming = invariants.iter().map(|i| i.id.clone()).collect();
+            a
+        }
+        None => Answer {
+            id: prop.id.clone(),
+            assuming: vec![],
+            entrypoint: String::new(),
+            verdict: Verdict::Undecided,
+            because: "the property has no rules".into(),
+            paths_considered: 0,
+        },
+    }
+}
+
+fn check_rule(
+    id: &str,
+    prop: &Rule,
+    invariants: &[Invariant],
+    paths: &[PathSummary],
+) -> Answer {
     let mine: Vec<&PathSummary> =
         paths.iter().filter(|p| p.entrypoint == prop.entrypoint).collect();
     if mine.is_empty() {
         return Answer {
-            id: prop.id.clone(),
+            id: id.to_string(),
+            assuming: vec![],
             entrypoint: prop.entrypoint.clone(),
             verdict: Verdict::Undecided,
             because: format!("the model has no path through {}", prop.entrypoint),
@@ -264,6 +554,19 @@ pub fn check(prop: &CallProperty, paths: &[PathSummary]) -> Answer {
     // may not be guessed.
     let possible: Vec<&&PathSummary> = mine
         .iter()
+        .filter(|p| {
+            // An invariant rules a path out either by being false on it, or
+            // by contradicting what it assumed.
+            if invariants.iter().any(|i| evaluate(&i.holds, p) == Tri::False) {
+                return false;
+            }
+            let mut edges = order_edges(p);
+            edges.extend(interval_edges(p));
+            for i in invariants {
+                edges.extend(order_edges_of(&i.holds, p));
+            }
+            !contradictory(&edges)
+        })
         .filter(|p| match &prop.given {
             None => true,
             Some(c) => evaluate(c, p) != Tri::False,
@@ -278,12 +581,14 @@ pub fn check(prop: &CallProperty, paths: &[PathSummary]) -> Answer {
     };
     let because = match (&verdict, counterexample) {
         (Verdict::Holds, _) => format!(
-            "every one of the {} path(s) a matching request can be on {}",
+            "{}: every one of the {} path(s) a matching request can be on {}",
+            prop.entrypoint,
             possible.len(),
             if want_revert { "reverts" } else { "returns" }
         ),
         (Verdict::Fails, Some(p)) => format!(
-            "a request on a path that {} matches: arguments {}, assuming {}",
+            "{}: a request on a path that {} matches: arguments {}, assuming {}",
+            prop.entrypoint,
             if p.reverts { "reverts" } else { "returns" },
             p.arguments.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "),
             if p.assumed.is_empty() {
@@ -296,10 +601,11 @@ pub fn check(prop: &CallProperty, paths: &[PathSummary]) -> Answer {
                     .join(" and ")
             }
         ),
-        _ => "no path of this entrypoint can carry a matching request".to_string(),
+        _ => format!("no path of {} can carry a matching request", prop.entrypoint),
     };
     Answer {
-        id: prop.id.clone(),
+        id: id.to_string(),
+        assuming: vec![],
         entrypoint: prop.entrypoint.clone(),
         verdict,
         because,
@@ -335,6 +641,7 @@ mod tests {
         CallProperty {
             id: "withdraw-revert".into(),
             from: String::new(),
+            rules: vec![Rule {
             entrypoint: "withdraw(uint256)".into(),
             given: Some(Condition::Or {
                 args: vec![
@@ -352,6 +659,7 @@ mod tests {
                 ],
             }),
             outcome: Outcome::Reverts,
+            }],
         }
     }
 
@@ -395,6 +703,7 @@ mod tests {
         let not_revert = CallProperty {
             id: "withdraw-not-revert".into(),
             from: String::new(),
+            rules: vec![Rule {
             entrypoint: "withdraw(uint256)".into(),
             given: Some(Condition::Ule {
                 left: Term::Argument(0),
@@ -404,6 +713,7 @@ mod tests {
                 },
             }),
             outcome: Outcome::DoesNotRevert,
+            }],
         };
         let paths = vec![
             path(false, IntervalSet::ge(u(1)), &[(LE_BAL, true)]),
@@ -414,6 +724,62 @@ mod tests {
         assert_eq!(a.verdict, Verdict::Fails, "{}", a.because);
     }
 
+    /// The walk forks on `sub(amount, 1) <= amount`, because interval
+    /// arithmetic cannot decide it, and one side of that fork is a path where
+    /// the argument is at least one and less than one at the same time. The
+    /// regions and the relations together rule it out; neither does alone.
+    #[test]
+    fn a_path_that_contradicts_itself_is_not_a_path() {
+        let p = PathSummary {
+            entrypoint: "withdraw(uint256)".into(),
+            parameters: vec!["amt".into()],
+            arguments: vec![IntervalSet::ge(u(1))],
+            storage: BTreeMap::new(),
+            assumed: [("1 <= amt".to_string(), false)].into_iter().collect(),
+            reverts: true,
+        };
+        let mut edges = order_edges(&p);
+        edges.extend(interval_edges(&p));
+        assert!(contradictory(&edges));
+        // and without the regions it is a path like any other
+        assert!(!contradictory(&order_edges(&p)));
+    }
+
+    /// An invariant the contract satisfies rules out a path by contradicting
+    /// what it assumed, which needs the order facts closed under transitivity:
+    /// `amt <= bal` and `bal <= total` cannot sit with `total < amt`.
+    #[test]
+    fn an_invariant_rules_out_a_path_only_through_transitivity() {
+        let p = PathSummary {
+            entrypoint: "withdraw(uint256)".into(),
+            parameters: vec!["amt".into()],
+            arguments: vec![IntervalSet::full()],
+            storage: BTreeMap::new(),
+            assumed: [
+                ("amt <= cell(balances, caller())".to_string(), true),
+                ("amt <= storage(total)".to_string(), false),
+            ]
+            .into_iter()
+            .collect(),
+            reverts: true,
+        };
+        let inv = Invariant {
+            id: "cbal-ge-bal".into(),
+            from: String::new(),
+            holds: Condition::Ule {
+                left: Term::Cell {
+                    var: "balances".into(),
+                    key: Box::new(Term::Env("caller".into())),
+                },
+                right: Term::Storage("total".into()),
+            },
+        };
+        let mut edges = order_edges(&p);
+        assert!(!contradictory(&edges), "the path stands on its own");
+        edges.extend(order_edges_of(&inv.holds, &p));
+        assert!(contradictory(&edges), "with the invariant it does not");
+    }
+
     /// A property naming something no path mentions is not answered "holds"
     /// by default. Nothing is ruled out, so every path counts, and a
     /// disagreement among them is a failure rather than a pass.
@@ -422,12 +788,14 @@ mod tests {
         let p = CallProperty {
             id: "x".into(),
             from: String::new(),
+            rules: vec![Rule {
             entrypoint: "withdraw(uint256)".into(),
             given: Some(Condition::Ugt {
                 left: Term::Env("number".into()),
                 right: Term::Storage("deadline".into()),
             }),
             outcome: Outcome::Reverts,
+            }],
         };
         let paths = vec![path(false, IntervalSet::full(), &[])];
         let a = check(&p, &paths);

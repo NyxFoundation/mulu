@@ -1655,7 +1655,10 @@ impl<'a> Walk<'a> {
                 Some((slot, label.clone()))
             })
             .collect();
-        let layout = move |s: U256| slots.get(&s).cloned();
+        let layout = crate::relation::Names {
+            slots,
+            immutables: self.b.ir.immutables.clone(),
+        };
         let mut frames: Vec<Frame> = vec![Frame {
             func: e.func.clone(),
             block: 0,
@@ -1974,17 +1977,37 @@ impl<'a> Walk<'a> {
                     if reverts {
                         return Ok(Trace { steps, ending: Ending::Revert, assumed: reverted_at.unwrap_or(facts), reverts: true });
                     }
-                    // It computes; whatever it defines stays unknown, which
-                    // is what the arms above would have left had it not been
-                    // able to revert.
-                    if let mulu_yul::ir::Op::Let { targets, .. }
-                    | mulu_yul::ir::Op::Assign { targets, .. } = &ins.op
-                    {
-                        for t in targets {
+                    // It computes. Its *value* stays unknown, which is what
+                    // the arms above would have left had it not been able to
+                    // revert; its *term* is known either way, and dropping it
+                    // was what turned `state == States.IDLE` into a bare
+                    // local nothing could be said about.
+                    match &ins.op {
+                        mulu_yul::ir::Op::Let { targets, value: Some(v) }
+                        | mulu_yul::ir::Op::Assign { targets, value: v }
+                            if targets.len() == 1 =>
+                        {
+                            let t = canon(v, &terms);
                             let fr = frames.last_mut().unwrap();
-                            fr.env.remove(t);
-                            fr.terms.remove(t);
+                            fr.env.remove(&targets[0]);
+                            match t {
+                                Some(t) => {
+                                    fr.terms.insert(targets[0].clone(), t);
+                                }
+                                None => {
+                                    fr.terms.remove(&targets[0]);
+                                }
+                            }
                         }
+                        mulu_yul::ir::Op::Let { targets, .. }
+                        | mulu_yul::ir::Op::Assign { targets, .. } => {
+                            for t in targets {
+                                let fr = frames.last_mut().unwrap();
+                                fr.env.remove(t);
+                                fr.terms.remove(t);
+                            }
+                        }
+                        _ => {}
                     }
                     continue;
                 }
@@ -2097,23 +2120,38 @@ impl<'a> Walk<'a> {
                             .function(&done.func)
                             .map(|g| g.returns.clone())
                             .unwrap_or_default();
-                        let caller = &mut frames.last_mut().unwrap().env;
+                        let fr = frames.last_mut().unwrap();
                         for (target, ret) in done.returns_to.iter().zip(rets.iter()) {
                             match done.env.get(ret) {
                                 Some(set) => {
-                                    caller.insert(target.clone(), set.clone());
+                                    fr.env.insert(target.clone(), set.clone());
                                 }
                                 // Unknown is not zero. Leaving a stale
                                 // binding would be worse than none.
                                 None => {
-                                    caller.remove(target);
+                                    fr.env.remove(target);
+                                }
+                            }
+                            // The term comes back whether or not the value
+                            // does: `checked_add(a, b)` returns a value the
+                            // regions may not pin down, and `add(a, b)` is
+                            // still what it is. Without this a guard on the
+                            // result read as a bare local nothing could be
+                            // said about.
+                            match done.terms.get(ret) {
+                                Some(t) => {
+                                    fr.terms.insert(target.clone(), t.clone());
+                                }
+                                None => {
+                                    fr.terms.remove(target);
                                 }
                             }
                         }
                         // More targets than the callee returns is a shape
                         // this cannot describe; leave the rest unknown.
                         for target in done.returns_to.iter().skip(rets.len()) {
-                            caller.remove(target);
+                            fr.env.remove(target);
+                            fr.terms.remove(target);
                         }
                     }
                 }

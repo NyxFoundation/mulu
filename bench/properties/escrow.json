@@ -1,0 +1,379 @@
+{
+  "schema_version": 1,
+  "use_case": "escrow",
+  "source": "contracts/escrow/certora/*.spec",
+  "note": "The benchmark ships one encoding per tool: `certora/` for Certora, `solcmc/` for solc's model checker. This is mulu's. Each property is the same rule as the file it names, written in the terms mulu's paths are written in.",
+  "call_properties": [
+    {
+      "id": "auth-in-agree",
+      "from": "certora/auth-in-agree.spec",
+      "rules": [
+        {
+          "entrypoint": "approve_payment()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "ne",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "buyer"
+                    }
+                  },
+                  {
+                    "op": "ne",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "seller"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "assert": "reverts"
+        },
+        {
+          "entrypoint": "refund()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "ne",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "buyer"
+                    }
+                  },
+                  {
+                    "op": "ne",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "seller"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "assert": "reverts"
+        },
+        {
+          "entrypoint": "open_dispute()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "ne",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "buyer"
+                    }
+                  },
+                  {
+                    "op": "ne",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "seller"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "assert": "reverts"
+        },
+        {
+          "entrypoint": "arbitrate(address)",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "ne",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "buyer"
+                    }
+                  },
+                  {
+                    "op": "ne",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "seller"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "assert": "reverts"
+        },
+        {
+          "entrypoint": "redeem()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "ne",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "buyer"
+                    }
+                  },
+                  {
+                    "op": "ne",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "seller"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "auth-in-dispute",
+      "from": "certora/auth-in-dispute.spec",
+      "rules": [
+        {
+          "entrypoint": "approve_payment()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "1"
+                }
+              },
+              {
+                "op": "ne",
+                "left": {
+                  "env": "caller"
+                },
+                "right": {
+                  "immutable": "arbiter"
+                }
+              }
+            ]
+          },
+          "assert": "reverts"
+        },
+        {
+          "entrypoint": "refund()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "1"
+                }
+              },
+              {
+                "op": "ne",
+                "left": {
+                  "env": "caller"
+                },
+                "right": {
+                  "immutable": "arbiter"
+                }
+              }
+            ]
+          },
+          "assert": "reverts"
+        },
+        {
+          "entrypoint": "open_dispute()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "1"
+                }
+              },
+              {
+                "op": "ne",
+                "left": {
+                  "env": "caller"
+                },
+                "right": {
+                  "immutable": "arbiter"
+                }
+              }
+            ]
+          },
+          "assert": "reverts"
+        },
+        {
+          "entrypoint": "arbitrate(address)",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "1"
+                }
+              },
+              {
+                "op": "ne",
+                "left": {
+                  "env": "caller"
+                },
+                "right": {
+                  "immutable": "arbiter"
+                }
+              }
+            ]
+          },
+          "assert": "reverts"
+        },
+        {
+          "entrypoint": "redeem()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "1"
+                }
+              },
+              {
+                "op": "ne",
+                "left": {
+                  "env": "caller"
+                },
+                "right": {
+                  "immutable": "arbiter"
+                }
+              }
+            ]
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "dispute-onlyif-agree",
+      "from": "certora/dispute-onlyif-agree.spec",
+      "rules": [
+        {
+          "entrypoint": "open_dispute()",
+          "given": {
+            "op": "ne",
+            "left": {
+              "storage": "state"
+            },
+            "right": {
+              "uint256": "0"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    }
+  ]
+}
