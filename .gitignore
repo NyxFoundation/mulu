@@ -1,4 +1,6 @@
 /target
 /lean/.lake
+/semantics/.lake
+/semantics/lake-manifest.json
 /analysis*/
 *.log

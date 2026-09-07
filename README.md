@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/NyxFoundation/mulu/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/NyxFoundation/mulu/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Lean 4" src="https://img.shields.io/badge/Lean-4.25.0-4B0082.svg">
+  <img alt="Lean 4" src="https://img.shields.io/badge/Lean-4.22.0-4B0082.svg">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-stable-orange.svg">
   <img alt="mathlib free" src="https://img.shields.io/badge/mathlib-not%20required-lightgrey.svg">
 </p>
@@ -44,7 +44,7 @@ the code cannot refuse, and can always complete.
 
 ## Install
 
-Lean 4 v4.25.0 (no mathlib, no network) and a stable Rust toolchain. `solc` is
+Lean 4 v4.22.0 (no mathlib, no network) and a stable Rust toolchain. `solc` is
 needed only for the Solidity front end.
 
 ```sh
@@ -215,20 +215,48 @@ branch is matched by that check's fail event.
 ```
 correspondence
   findings are reported at: abstract-model
-  8 obligation(s), 8 open
-    semantics:yul-not-formalised             reaches yul-semantics
+  9 obligation(s), 9 open
+  6 to prove here:
+    semantics:contract-not-instantiated      reaches yul-semantics
     simulation:initial-covered               reaches yul-semantics
     simulation:step-covered                  reaches yul-semantics
     check:fail-step-matched:A                reaches yul-semantics
     check:fail-step-matched:B                reaches yul-semantics
     plant:policy-corresponds                 reaches yul-semantics
-    compilation:yul-corresponds-to-source    reaches solidity-source
-    compilation:optimised-bytecode           reaches evm-bytecode
+  3 assumption(s) on work this project did not do:
+    semantics:evmyul-matches-the-evm         (evmyul) reaches yul-semantics
+    compilation:yul-corresponds-to-source    (solc)   reaches solidity-source
+    compilation:optimised-bytecode           (solc)   reaches evm-bytecode
 ```
 
-**None of them is discharged**, because there is no formal semantics of solc's
-Yul to discharge them against. So every finding stays at `abstract-model`, and
-the reason is enumerated rather than described.
+**None of them is discharged**, so every finding stays at `abstract-model` and
+the reason is enumerated rather than described. The two groups are not the
+same kind of thing. The first six are statements about mulu's own abstraction
+and the proofs are ours to write. The last three are properties of artifacts
+this project did not write: that solc lowers Solidity faithfully, that its
+optimizer preserves behaviour, and that the adopted Yul semantics agrees with
+the EVM. No amount of work here closes those.
+
+### The Yul semantics
+
+`semantics/` instantiates `Mulu.Semantics.Concrete` at
+[EvmYul](https://github.com/NethermindEth/EVMYulLean), Nethermind's executable
+model of Yul and the EVM in Lean, pinned through the fork Paradigm's
+[Solidus](https://www.paradigm.xyz/writing/solidus) uses for its verified
+backend. Writing a Yul semantics from scratch would be the wrong work when one
+exists in the same proof assistant.
+
+Adopting it did not discharge anything. It split one obligation into two
+smaller and more honest ones: this contract is not yet expressed in that
+semantics, and that semantics is not proved to agree with the EVM. The second
+is now visible in the ledger under its own name rather than hiding inside "no
+semantics exists".
+
+It is a **separate Lake package, opt-in, built by `make semantics`**. EvmYul
+requires mathlib, so its dependency closure is several gigabytes and needs the
+network. `mulu analyze` and `mulu verify` import none of it, and `make check`
+still builds from Lean core alone, because the point of the kernel re-check is
+that a reader can reproduce it without trusting a supply chain.
 
 The rule is executable, not documentary. `verify` recomputes each finding's
 scope from the ledger and refuses a report that claims more; it also refuses a
@@ -480,6 +508,7 @@ mulu/
 │   ├── mulu-abstraction/ uint256 intervals, guard predicates, spec DSL, model builder
 │   ├── mulu-replay/    concrete calls on an in-process EVM (revm)
 │   └── mulu-cli/       `mulu` — worker driver, Check.lean generator, report, exit codes
+├── semantics/          opt-in: `Mulu.Semantics.Concrete` at EvmYul (needs mathlib)
 ├── lean/
 │   ├── Mulu/Core/      FinitePlant, Reachability (lfp), Envelope (gfp), Correctness
 │   ├── Mulu/Analysis/  Redundancy, Certificate (checkCertificate + soundness)

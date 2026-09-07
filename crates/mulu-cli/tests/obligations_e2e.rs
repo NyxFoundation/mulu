@@ -56,10 +56,14 @@ fn every_finding_stays_at_the_model_and_says_why() {
     assert!(obs.iter().all(|o| o["discharged_by"].is_null()), "the tool discharges nothing");
     assert_eq!(ledger["scope"], "abstract-model");
 
-    // the root obligation names what is actually missing
-    let root_ob = obs.iter().find(|o| o["id"] == "semantics:yul-not-formalised").unwrap();
+    // the root obligation names what is actually missing. It used to be "no
+    // semantics exists"; one does now (semantics/, on EvmYul), so what is
+    // missing is this contract expressed in it.
+    let root_ob =
+        obs.iter().find(|o| o["id"] == "semantics:contract-not-instantiated").unwrap();
     assert_eq!(root_ob["reaches"], "yul-semantics");
-    assert!(root_ob["statement"].as_str().unwrap().contains("formal semantics"));
+    assert_eq!(root_ob["lean"], "MuluSemantics.concrete");
+    assert!(root_ob["statement"].as_str().unwrap().contains("this contract"));
 
     // the two simulation conditions are named after the Lean fields that
     // would consume them
@@ -215,7 +219,8 @@ fn an_envelope_claim_must_name_the_plant_obligation() {
         if d["id"] == "envelope" {
             // drop the obligation that says the plant corresponds at all
             d["obligations"] = serde_json::json!([
-                "semantics:yul-not-formalised",
+                "semantics:contract-not-instantiated",
+                "semantics:evmyul-matches-the-evm",
                 "simulation:initial-covered",
                 "simulation:step-covered"
             ]);
@@ -412,11 +417,19 @@ fn an_assumption_on_solc_is_not_an_item_on_our_list() {
         let need = o["would_need"].as_str().unwrap();
         assert!(need.contains("None exists"), "{need}");
     }
-    // the root names the artifact that exists, without claiming it is in use
-    let root = obs.iter().find(|o| o["id"] == "semantics:yul-not-formalised").unwrap();
+    // Adopting a semantics moved an assumption rather than removing one, and
+    // the ledger has to show where it went: the semantics agreeing with the
+    // EVM is now its own item, and it is not ours.
+    let adopted = obs.iter().find(|o| o["id"] == "semantics:evmyul-matches-the-evm").unwrap();
+    assert_eq!(adopted["bearer"], "evmyul");
+    assert_eq!(adopted["reaches"], "yul-semantics");
+    assert!(adopted["would_need"].as_str().unwrap().contains("None exists"));
+    assert!(adopted["discharged_by"].is_null(), "having a semantics is not proving it right");
+
+    // and what remains ours is naming this contract in it
+    let root = obs.iter().find(|o| o["id"] == "semantics:contract-not-instantiated").unwrap();
     assert_eq!(root["bearer"], "mulu");
-    assert!(root["would_need"].as_str().unwrap().contains("EVMYulLean"));
-    assert!(root["discharged_by"].is_null(), "naming it is not using it");
+    assert!(root["discharged_by"].is_null());
 
     // every claim still sits at the model, because everything is still open
     let report = json(&out.join("report.json"));

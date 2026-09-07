@@ -275,9 +275,12 @@ fn print_obligations(l: &crate::obligations::Ledger) {
         }
     }
     if !theirs.is_empty() {
-        println!("  {} assumption(s) on a compiler this project did not write:", theirs.len());
+        // Named by who bears them. One is a compiler nobody has proved
+        // correct, another is a semantics nobody has proved matches the EVM;
+        // calling both "a compiler" would be wrong about the second.
+        println!("  {} assumption(s) on work this project did not do:", theirs.len());
         for o in &theirs {
-            println!("    {:<40} reaches {}", o.id, o.reaches);
+            println!("    {:<40} {:<8} reaches {}", o.id, format!("({})", o.bearer), o.reaches);
         }
     }
     if open.is_empty() {

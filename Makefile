@@ -4,7 +4,7 @@
 LEAN_DIR := $(CURDIR)/lean
 export MULU_LEAN_DIR := $(LEAN_DIR)
 
-.PHONY: build lean rust test check fixtures ir analyze regen-fixtures clean
+.PHONY: build lean rust test check fixtures ir analyze regen-fixtures semantics clean
 
 build: lean rust
 
@@ -55,6 +55,14 @@ fixtures: build
 	  echo "== $$f"; ./target/release/mulu analyze-model $$f --out $$out; code=$$?; \
 	  ./target/release/mulu verify $$out || exit 1; \
 	done
+
+# Opt in. `semantics/` depends on EvmYul, which depends on mathlib: several
+# gigabytes and a network fetch. `check` must stay buildable from Lean core
+# alone, because the point of the kernel re-check is that a reader can
+# reproduce it without trusting a supply chain. Nothing in `analyze` or
+# `verify` imports this.
+semantics:
+	cd semantics && lake build
 
 check: test fixtures analyze
 

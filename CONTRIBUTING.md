@@ -2,7 +2,7 @@
 
 ## Building
 
-Lean 4 v4.25.0 (no mathlib, no network needed) and a stable Rust toolchain.
+Lean 4 v4.22.0 (no mathlib, no network needed) and a stable Rust toolchain.
 `solc` is needed only for the Solidity front end and its tests, which skip
 without it.
 

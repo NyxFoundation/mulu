@@ -196,27 +196,46 @@ pub fn ledger(
 
     // The root. Everything above needs a semantics to be stated against, and
     // there is none, so nothing above can be discharged either.
+    // The root used to be "there is no semantics". There is one now:
+    // `semantics/` instantiates `Mulu.Semantics.Concrete` at Nethermind's
+    // EvmYul, the model Paradigm's Solidus pins. Adopting it did not make a
+    // claim true, it split one obligation into two smaller and more honest
+    // ones: this contract is not yet expressed in that semantics, and that
+    // semantics is not proved to agree with the EVM.
     let mut root = ob(
-        "semantics:yul-not-formalised",
+        "semantics:contract-not-instantiated",
         "yul-semantics",
-        "A formal semantics of the Yul solc emits, in Lean, against which the conditions \
-         below can be stated. Without it `Concrete` has no instance and the simulation \
-         theorem has nothing to apply to.",
-        Some("Mulu.Semantics.Concrete"),
+        "The Yul of this contract, expressed in the adopted semantics, with the state the \
+         analysis starts from. `MuluSemantics.concrete` takes both and produces the `Concrete` \
+         the simulation theorem applies to; nothing yet produces them from the ProgramIR, so \
+         there is no concrete system at the artifact analysed here.",
+        Some("MuluSemantics.concrete"),
         vec![format!("the analysed artifact is {}", ir.derived_from)],
     );
-    // Ours to close, and not ours to write. An executable Yul semantics in
-    // Lean already exists; adopting one moves the residual assumption from
-    // "there is no semantics" to "that semantics is faithful to the EVM",
-    // which its own conformance suite is evidence for and not a proof.
     root.would_need = Some(
-        "an executable Yul semantics in Lean instantiating `Mulu.Semantics.Concrete`; \
-         NethermindEth/EVMYulLean (Apache-2.0) is one, and paradigmxyz/EVMYulLean is the fork \
-         Solidus pins. Adopting one leaves the assumption that it matches the EVM, which its \
-         conformance suite tests rather than proves."
+        "mulu emitting this contract as `EvmYul.Yul.Ast.Stmt` and a starting `Yul.State`, so \
+         that `MuluSemantics.concrete` names this artifact rather than an arbitrary program."
             .into(),
     );
     out.push(root);
+    let mut adopted = ob(
+        "semantics:evmyul-matches-the-evm",
+        "yul-semantics",
+        "The adopted semantics is the semantics of Yul. EvmYul is executable and is run \
+         against the Ethereum test suite, which is evidence and not a proof: a divergence \
+         between it and a real client would make every claim above it wrong in the same way.",
+        Some("EvmYul.Yul.exec"),
+        vec!["the correspondence is stated against EvmYul".into()],
+    );
+    // Not ours. Adopting a semantics moves an assumption; it does not remove
+    // one, and the ledger has to show where the assumption went.
+    adopted.bearer = "evmyul".into();
+    adopted.would_need = Some(
+        "a proof that EvmYul agrees with the EVM. None exists for any EVM semantics. Its \
+         conformance runs against ethereum/tests are the evidence there is."
+            .into(),
+    );
+    out.push(adopted);
 
     // The two conditions of the simulation.
     let mut initial_raised = vec![];
@@ -465,7 +484,8 @@ mod tests {
 /// layer all of these reach.
 pub fn depends_on(kind: &str, check_id: Option<&str>) -> Vec<String> {
     let mut v = vec![
-        "semantics:yul-not-formalised".to_string(),
+        "semantics:contract-not-instantiated".to_string(),
+        "semantics:evmyul-matches-the-evm".to_string(),
         "simulation:initial-covered".to_string(),
         "simulation:step-covered".to_string(),
     ];
