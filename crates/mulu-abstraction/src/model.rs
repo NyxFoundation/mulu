@@ -690,6 +690,32 @@ struct Trace {
     ending: Ending,
 }
 
+/// Why a walk did not produce a trace.
+enum TraceStop {
+    /// A choice the regions do not settle, reached with nothing left to take
+    /// from the caller's list: how many ways it goes, and what it was. What
+    /// it turns on is a value the model does not have, such as a word read
+    /// from a mapping cell. The caller re-runs the walk once per way, so the
+    /// contract keeps every path instead of being refused, and records `what`
+    /// so a reader knows the model is coarse there rather than exact.
+    Undecided { ways: usize, what: String },
+    /// Something the model does not represent. The walk cannot continue down
+    /// either side, so the contract is refused.
+    Refused(String),
+}
+
+impl From<String> for TraceStop {
+    fn from(s: String) -> Self {
+        TraceStop::Refused(s)
+    }
+}
+
+impl From<&str> for TraceStop {
+    fn from(s: &str) -> Self {
+        TraceStop::Refused(s.to_string())
+    }
+}
+
 impl<'a> Walk<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1233,6 +1259,13 @@ impl<'a> Walk<'a> {
         // of it: a model built from part of the product would be a search
         // that did not finish, reported as one that found nothing.
         const MAX_WALKS: usize = 4096;
+        // A path may fork this many times, and one (entrypoint, arguments,
+        // storage) triple may take this many paths in all. Both are there
+        // because the fork count is exponential in the first: a function
+        // guarded by eight mapping reads has 256 paths, and past that the
+        // model costs more than it says.
+        const MAX_SPLITS: usize = 12;
+        const MAX_FORKS: usize = 512;
         let planned: usize = entries
             .iter()
             .map(|e| {
@@ -1273,14 +1306,56 @@ impl<'a> Walk<'a> {
                     })
                     .collect();
                 for a in product(&per_param) {
-                    // One walk feeds both models, so their states line up and
-                    // the pairing in `sites` means what it says.
-                    match self.trace(e, &a, s) {
-                        Ok(t) => {
-                            self.emit_impl(e, &a, s, &t);
-                            self.emit_plant(e, &a, s, &t);
+                    // A guard the regions do not decide is not a dead end: it
+                    // is a fork, and the walk is run again down each side. The
+                    // decisions are a list the walk consumes in the order it
+                    // meets them, so a path with n such guards is n+1 runs of
+                    // the walk rather than one walk carrying a solver.
+                    //
+                    // Depth-first with an explicit stack, so a contract that
+                    // forks more than the budget allows is refused with the
+                    // paths it did take already emitted.
+                    let mut stack: Vec<Vec<usize>> = vec![Vec::new()];
+                    let mut forks = 0usize;
+                    while let Some(sp) = stack.pop() {
+                        // One walk feeds both models, so their states line up
+                        // and the pairing in `sites` means what it says.
+                        match self.trace(e, &a, s, &sp) {
+                            Ok(t) => {
+                                self.emit_impl(e, &a, s, &t);
+                                self.emit_plant(e, &a, s, &t);
+                            }
+                            Err(TraceStop::Refused(why)) => {
+                                self.b.refuse(format!("{}: {why}", e.signature));
+                                break;
+                            }
+                            Err(TraceStop::Undecided { ways, what }) => {
+                                forks += 1;
+                                self.b.note(format!(
+                                    "split-on-an-unknown-value: {what} is not decided by the \
+                                     regions, so the model takes every way it goes. Every path \
+                                     the program has is in the model and some that it may not \
+                                     have; a check that fails only on such a path is reported \
+                                     as one that can fail, never as one that cannot"
+                                ));
+                                if sp.len() >= MAX_SPLITS || forks > MAX_FORKS {
+                                    self.b.refuse(format!(
+                                        "{}: more of this function turns on values the model \
+                                         does not have than the limit allows ({MAX_SPLITS} \
+                                         undecided guards on one path, {MAX_FORKS} paths); \
+                                         the model is not built rather than built from part \
+                                         of it",
+                                        e.signature
+                                    ));
+                                    break;
+                                }
+                                for side in 0..ways {
+                                    let mut next = sp.clone();
+                                    next.push(side);
+                                    stack.push(next);
+                                }
+                            }
                         }
-                        Err(why) => self.b.refuse(format!("{}: {why}", e.signature)),
                     }
                 }
             }
@@ -1300,7 +1375,6 @@ impl<'a> Walk<'a> {
         for n in &initial_names {
             self.states.insert(n.clone());
         }
-        let initial = initial_names.first().cloned().unwrap_or_else(|| "idle_".to_string());
 
         // Names the plant shares with the implementation, taken before any
         // field of `self` is moved out below.
@@ -1443,7 +1517,12 @@ impl<'a> Walk<'a> {
         e: &Entry,
         args: &[usize],
         entry_storage: &StorageRegion,
-    ) -> Result<Trace, String> {
+        splits: &[usize],
+    ) -> Result<Trace, TraceStop> {
+        // Choices the caller already made at the forks, in the order this
+        // walk meets them. Running out means the walk found one more than the
+        // caller knew about, which is what `Undecided` says.
+        let mut splits = splits.iter().copied();
         const MAX_DEPTH: usize = 32;
         const MAX_STEPS: usize = 10_000;
 
@@ -1515,17 +1594,19 @@ impl<'a> Walk<'a> {
                     // partition. Where it has nothing to say, the condition
                     // is evaluated directly: both sides are values here even
                     // when neither is a set over one variable.
-                    let passes = guards
+                    let passes = match guards
                         .get(&c.id)
                         .and_then(|p| p.decide(&env))
                         .or_else(|| self.decide_cond(&c.condition, &env, &storage, &memory))
-                        .ok_or_else(|| {
-                            format!(
-                                "check {} is not decided by the argument regions {}",
-                                c.id,
-                                show(&env)
-                            )
-                        })?;
+                    {
+                        Some(v) => v,
+                        None => {
+                            splits.next().ok_or_else(|| TraceStop::Undecided {
+                                ways: 2,
+                                what: format!("check {} in {func}", c.id),
+                            })? == 1
+                        }
+                    };
                     steps.push(Step::Check {
                         id: c.id.clone(),
                         text: c.condition_text.clone(),
@@ -1537,14 +1618,38 @@ impl<'a> Walk<'a> {
                 }
 
                 if let Some(w) = ins.storage_write.clone() {
-                    let (slot_idx, slot_label) = self.slot_of(&w.slot_text)?;
-                    let values = crate::value::value_set(&w.value, &env)
-                        .map_err(|why| {
-                            format!("the value written to {slot_label} is {}: {why}", w.value_text)
-                        })?;
-                    let to = self.region_of(slot_idx, &values).ok_or_else(|| {
-                        format!("the value written to {slot_label} straddles a specification boundary")
-                    })?;
+                    // A write whose slot is not a declared variable is a
+                    // mapping or array cell, which the model does not track.
+                    // It moves nothing in the state, under the assumption
+                    // recorded once for the contract: a keccak-derived slot
+                    // does not collide with a small declared one.
+                    let Ok((slot_idx, slot_label)) = self.slot_of(&w.slot_text) else {
+                        self.b.note(
+                            "cells-do-not-alias: a write to a computed slot is a mapping or \
+                             array cell and moves no declared variable. keccak256 not \
+                             colliding with a small constant slot is an assumption, the same \
+                             one solc's own storage layout rests on",
+                        );
+                        continue;
+                    };
+                    // What is written may not be a value the walk knows: it
+                    // can come from a mapping cell, or from a call the model
+                    // does not follow. Then the slot could end in any of its
+                    // regions, and the walk takes each in turn rather than
+                    // refusing. Same for a value that straddles a boundary.
+                    let to = match crate::value::value_set(&w.value, &env)
+                        .ok()
+                        .and_then(|values| self.region_of(slot_idx, &values))
+                    {
+                        Some(to) => to,
+                        None => {
+                            let ways = self.per_slot[slot_idx].1.len();
+                            splits.next().ok_or_else(|| TraceStop::Undecided {
+                                ways,
+                                what: format!("the value written to {slot_label}"),
+                            })?
+                        }
+                    };
                     storage[slot_idx] = to;
                     steps.push(Step::Store { slot: slot_idx, label: slot_label, to });
                     continue;
@@ -1651,7 +1756,7 @@ impl<'a> Walk<'a> {
                             || self.b.ir.checks.iter().any(|c| c.function == callee);
                         if matters {
                             if depth >= MAX_DEPTH {
-                                return Err(format!("call depth limit reached at {callee}"));
+                                return Err(format!("call depth limit reached at {callee}").into());
                             }
                             let inner = bind_arguments(g, &args, &env)?;
                             frames.push(Frame {
@@ -1674,7 +1779,7 @@ impl<'a> Walk<'a> {
                             || self.b.ir.checks.iter().any(|c| c.function == callee);
                         if matters {
                             if depth >= MAX_DEPTH {
-                                return Err(format!("call depth limit reached at {callee}"));
+                                return Err(format!("call depth limit reached at {callee}").into());
                             }
                             let inner = bind_arguments(g, &args, &env)?;
                             frames.push(Frame {
@@ -1696,7 +1801,7 @@ impl<'a> Walk<'a> {
                          ({}{}); P1a cannot skip it",
                         if ins.effects.writes_storage { "writes storage" } else { "" },
                         if ins.effects.can_revert { " can revert" } else { "" },
-                    ));
+                    ).into());
                 }
                 continue;
             }
@@ -1718,17 +1823,19 @@ impl<'a> Walk<'a> {
                     // parameterise it out of the plant.
                     if let Some(c) = self.branch_check(&f, block) {
                         let guards = self.guards_of(&f, &e.widest());
-                        let passes = guards
+                        let passes = match guards
                             .get(&c.id)
                             .and_then(|p| p.decide(&env))
                             .or_else(|| self.decide_cond(&c.condition, &env, &storage, &memory))
-                            .ok_or_else(|| {
-                                format!(
-                                    "check {} is not decided by the argument regions {}",
-                                    c.id,
-                                    show(&env)
-                                )
-                            })?;
+                        {
+                            Some(v) => v,
+                            None => {
+                                splits.next().ok_or_else(|| TraceStop::Undecided {
+                                    ways: 2,
+                                    what: format!("check {} in {func}", c.id),
+                                })? == 1
+                            }
+                        };
                         steps.push(Step::Check {
                             id: c.id.clone(),
                             text: c.condition_text.clone(),
@@ -1741,7 +1848,7 @@ impl<'a> Walk<'a> {
                                 mulu_yul::ir::CheckEdge::Block { id: pass },
                                 mulu_yul::ir::CheckEdge::Block { .. },
                             ) => *pass,
-                            _ => return Err(format!("check {} has no block edges", c.id)),
+                            _ => return Err(format!("check {} has no block edges", c.id).into()),
                         };
                         let fr = frames.last_mut().unwrap();
                         if !fr.visited.insert((target, 0)) {
@@ -1751,11 +1858,21 @@ impl<'a> Walk<'a> {
                         fr.index = 0;
                         continue;
                     }
-                    let taken = crate::predicate::translate_in(cond, &f.parameters, &e.widest())
+                    // A branch on a mapping cell is the same situation as a
+                    // guard on one, and takes the same two-sided treatment.
+                    let taken = match crate::predicate::translate_in(cond, &f.parameters, &e.widest())
                         .ok()
                         .and_then(|p| p.decide(&env))
                         .or_else(|| self.decide_cond(cond, &env, &storage, &memory))
-                        .ok_or("a branch is not decided by the argument regions")?;
+                    {
+                        Some(v) => v,
+                        None => {
+                            splits.next().ok_or_else(|| TraceStop::Undecided {
+                                ways: 2,
+                                what: format!("a branch in {func}"),
+                            })? == 1
+                        }
+                    };
                     let target = if taken { *then_block } else { *else_block };
                     let fr = frames.last_mut().unwrap();
                     if !fr.visited.insert((target, 0)) {
@@ -1809,10 +1926,51 @@ impl<'a> Walk<'a> {
                 // left out the dispatcher's own shape and any hand-written
                 // `switch` in a body.
                 Terminator::Switch { value, cases, default } => {
-                    let set = self.eval(value, &env, &storage, &memory).map_err(|why| {
-                        format!("a switch value is outside the P1a fragment: {why}")
-                    })?;
+                    // A switch on a value the walk does not know goes every
+                    // way the switch has: one per case, plus one for the
+                    // default. `returndatasize` after an external call is the
+                    // one that matters, and refusing it lost the whole
+                    // contract for a value nothing later reads.
+                    let set = match self.eval(value, &env, &storage, &memory) {
+                        Ok(v) => Some(v),
+                        Err(_) => None,
+                    };
                     let mut target = None;
+                    let Some(set) = set else {
+                        let ways = cases.len() + 1;
+                        let pick = splits.next().ok_or_else(|| TraceStop::Undecided {
+                            ways,
+                            what: format!("a switch in {func}"),
+                        })?;
+                        let chosen = match cases.get(pick) {
+                            Some((_, b)) => Some(*b),
+                            None => *default,
+                        };
+                        match chosen {
+                            Some(t) => {
+                                let fr = frames.last_mut().unwrap();
+                                if !fr.visited.insert((t, 0)) {
+                                    return Err(TraceStop::Refused(
+                                        "the abstract execution revisits a block; P1a does not \
+                                         model loops"
+                                            .into(),
+                                    ));
+                                }
+                                fr.block = t;
+                                fr.index = 0;
+                                continue;
+                            }
+                            // Nothing matched and there is no default: the
+                            // switch does nothing and the function ends.
+                            None => {
+                                frames.pop();
+                                if frames.is_empty() {
+                                    return Ok(Trace { steps, ending: Ending::Return });
+                                }
+                                continue;
+                            }
+                        }
+                    };
                     for (lit, block) in cases {
                         let v = crate::interval::parse_decimal(lit)
                             .map_err(|e| format!("a switch case label is not a literal: {e}"))?;
@@ -1825,7 +1983,7 @@ impl<'a> Walk<'a> {
                             return Err(format!(
                                 "a switch value {set} straddles the case {v}, so which branch \
                                  runs is not determined"
-                            ));
+                            ).into());
                         }
                     }
                     let target = match (target, default) {
@@ -1853,7 +2011,7 @@ impl<'a> Walk<'a> {
                     fr.block = target;
                     fr.index = 0;
                 }
-                Terminator::Unsupported { reason } => return Err(reason.clone()),
+                Terminator::Unsupported { reason } => return Err(reason.clone().into()),
             }
         }
     }

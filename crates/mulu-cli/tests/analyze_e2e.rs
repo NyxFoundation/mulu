@@ -180,23 +180,104 @@ fn a_guard_in_an_imported_modifier_is_attributed_to_it() {
 }
 
 #[test]
+fn a_guard_the_regions_do_not_decide_splits_the_walk_and_says_so() {
+    if !ready() {
+        return;
+    }
+    // `balances[msg.sender]` is a mapping cell, and no partition of the
+    // argument space decides `amount <= cell`: the guard is about the
+    // relation between the two, and the model has one of them. Refusing threw
+    // away the contract. The walk now goes both ways, which keeps every path
+    // the program has and adds some it may not, so a check reached only on a
+    // split path is reported as one that *can* fail, never as one that
+    // cannot. The report has to say the model is coarse there.
+    let dir = std::env::temp_dir().join(format!("mulu-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("C.sol"),
+        r#"pragma solidity ^0.8.0;
+contract C {
+    mapping(address => uint256) balances;
+    uint256 public total;
+    function withdraw(uint256 amount) external {
+        require(amount > 0);
+        require(amount <= balances[msg.sender]);
+        balances[msg.sender] -= amount;
+        total -= amount;
+    }
+}"#,
+    )
+    .unwrap();
+    let out = dir.join("out");
+    let code = mulu()
+        .args(["analyze", dir.join("C.sol").to_str().unwrap()])
+        .args(["--contract", "C", "--out", out.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .code()
+        .unwrap();
+    assert_eq!(code, 0, "a split is a coarser model, not an incomplete one");
+
+    let a = json(&out.join("abstraction.json"));
+    assert!(
+        a["unsupported"].as_array().unwrap().is_empty(),
+        "nothing should be unmodelled: {:?}",
+        a["unsupported"]
+    );
+    let assumptions: Vec<String> = a["assumptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        assumptions.iter().any(|x| x.starts_with("split-on-an-unknown-value:")),
+        "the coarseness has to be on the record: {assumptions:?}"
+    );
+    assert!(
+        assumptions.iter().any(|x| x.starts_with("cells-do-not-alias:")),
+        "writing a mapping cell rests on keccak not colliding: {assumptions:?}"
+    );
+
+    // Both sides are in the model: the guard can fail, and the walk reaches
+    // past it. A model where it only ever passed would be the silent hole.
+    let model = json(&out.join("model.json"));
+    let events: Vec<String> = model["transitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["event"].as_str().unwrap().to_string())
+        .collect();
+    assert!(events.iter().any(|e| e == "B_fail"), "{events:?}");
+    assert!(events.iter().any(|e| e == "B_pass"), "{events:?}");
+    assert!(events.iter().any(|e| e.starts_with("store_")), "{events:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_argument_the_abstraction_cannot_follow_is_refused_not_dropped() {
     if !ready() {
         return;
     }
-    // The modifier receives a computed value, so the argument regions no
-    // longer describe what it tests. Before the walk followed calls at all
-    // this produced a model in which the function did nothing.
+    // `delegatecall` runs another contract's code with this contract's
+    // storage, so no assumption about the callee recovers what it does here.
+    // The entrypoint is refused and named, and the whole chain says so: the
+    // process exit code, the report, the SARIF invocation, the ledger.
     let dir = std::env::temp_dir().join(format!("mulu-refuse-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("C.sol"),
         r#"pragma solidity ^0.8.0;
-abstract contract B { modifier capped(uint256 y) { require(y <= 100, "cap"); _; } }
-contract C is B {
+contract C {
     uint256 public v;
-    function f(uint256 x) external capped(x + 1) { v = x; }
+    function f(uint256 x) external {
+        require(x <= 100, "cap");
+        (bool ok, ) = address(this).delegatecall(abi.encodeWithSignature("g(uint256)", x));
+        require(ok);
+        v = x;
+    }
 }"#,
     )
     .unwrap();

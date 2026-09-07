@@ -75,17 +75,16 @@ invariants at the end of a successful transaction. Scoring waits on that.
 
 What the histogram says to implement, in the order the corpus asks for it:
 
+27 of the 47 now reach a model, and 25 of those hold a guard mulu would
+report on. What stops the other 20:
+
 | cases | what stops it |
 | --- | --- |
-| 22 | a guard against a value read from storage, which no argument region decides |
 | 8 | an argument that is not a numeric word: `string`, `bytes32` |
-| 4 | an instruction whose effects the model cannot represent |
-
-The first row was the second row until the constructor was fixed, and it is
-now the whole of the remaining mass. `require(amount <= balances[msg.sender])`
-compares an argument against a mapping cell that no partition of the argument
-space decides, because the two are independent and the relation between them
-is what the guard is about.
+| 5 | an instruction whose effects the model cannot represent |
+| 5 | more forks on one path than the limit allows |
+| 1 | a loop |
+| 1 | a switch value that straddles a case |
 
 ## What the corpus said, 2026-09-07
 
@@ -106,7 +105,8 @@ is what the guard is about.
 | | 28.2% | a branch over a parameter refines the partition |
 | | **28.3%** | a call made for its value is followed when finding what is reachable |
 | | 28.4% | `call` is modelled, under a stated no-reentrancy assumption |
-| latest | 31.9% | a constructor write the model cannot follow widens the initial state |
+| | 31.9% | a constructor write the model cannot follow widens the initial state |
+| latest | 49.9% | a choice the regions do not settle forks the walk instead of refusing |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every
