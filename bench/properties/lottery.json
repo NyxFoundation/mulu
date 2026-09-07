@@ -29,6 +29,55 @@
           "assert": "reverts"
         }
       ]
+    },
+    {
+      "id": "any-user-can-enter",
+      "from": "certora/any-user-can-enter.spec",
+      "rules": [
+        {
+          "entrypoint": "enter()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "env": "callvalue"
+                },
+                "right": {
+                  "uint256": "10000000000000000"
+                }
+              },
+              {
+                "op": "ule",
+                "left": {
+                  "storage": "start"
+                },
+                "right": {
+                  "env": "number"
+                }
+              },
+              {
+                "op": "ule",
+                "left": {
+                  "env": "number"
+                },
+                "right": {
+                  "add": {
+                    "left": {
+                      "storage": "start"
+                    },
+                    "right": {
+                      "storage": "duration"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
     }
   ]
 }

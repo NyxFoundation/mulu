@@ -88,9 +88,9 @@ Each property names the file it was written from.
 
 | | |
 | --- | --- |
-| (property, version) pairs asked | 62 |
-| correct | 59 |
-| wrong | 3 |
+| (property, version) pairs asked | 66 |
+| correct | 62 |
+| wrong | 4 |
 | no answer | 0 |
 
 Every pair mulu and the key agree on the facts about is answered correctly.
@@ -115,6 +115,13 @@ minute:
 
 `contracts/vault/README.md` and `contracts/vault/ground-truth.csv` also
 disagree with each other on `wd-fin-before` and `fin-canc-twice`.
+
+The fourth is mulu's. `lottery/any-user-can-enter` asks whether `enter`
+succeeds, and `enter` ends in `players.push(msg.sender)`. Establishing that
+the push cannot fail means relating the array's length after the write to its
+length before it, and the walk deliberately treats those as two values: a
+term read before a write to its slot is not the same term as one read after.
+Nothing here does the arithmetic that would join them back up.
 
 ### What the encoding rests on
 
@@ -162,7 +169,7 @@ nothing here decides.
 | | 31.9% | a constructor write the model cannot follow widens the initial state |
 | | 49.9% | a choice the regions do not settle forks the walk instead of refusing |
 | | 66.7% | a type is a slot's universe, a narrow write is a write, a panic forks |
-| latest | 77.3% | a loop's effect is over-approximated rather than unrolled or refused |
+| latest | 77.2% | a loop's effect is over-approximated rather than unrolled or refused |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every

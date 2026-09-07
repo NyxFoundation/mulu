@@ -2,7 +2,7 @@
   "schema_version": 1,
   "use_case": "crowdfund",
   "source": "contracts/crowdfund/certora/*.spec",
-  "note": "The benchmark ships one encoding per tool: `certora/` for Certora, `solcmc/` for solc's model checker. This is mulu's. Each property is the same rule as the file it names, written in the terms mulu's paths are written in.",
+  "note": "The benchmark ships one encoding per tool: `certora/` for Certora, `solcmc/` for solc's model checker. This is mulu's. Each property is the same rule as the file it names, written in the terms mulu's paths are written in. The rules that say `e.msg.value <= balanceOf(e.msg.sender)` are not written here: the environment profile already admits only calls the sender can pay for, so the precondition is one the model makes rather than one a property states.",
   "call_properties": [
     {
       "id": "no-donate-after-deadline",
@@ -39,6 +39,154 @@
             }
           },
           "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "donate-not-revert-overflow",
+      "from": "certora/donate-not-revert-overflow.spec",
+      "rules": [
+        {
+          "entrypoint": "donate()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ule",
+                "left": {
+                  "env": "number"
+                },
+                "right": {
+                  "immutable": "end_donate"
+                }
+              },
+              {
+                "op": "ule",
+                "left": {
+                  "cell": {
+                    "var": "donors",
+                    "key": {
+                      "env": "caller"
+                    }
+                  }
+                },
+                "right": {
+                  "add": {
+                    "left": {
+                      "cell": {
+                        "var": "donors",
+                        "key": {
+                          "env": "caller"
+                        }
+                      }
+                    },
+                    "right": {
+                      "env": "callvalue"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "wd-not-revert",
+      "from": "certora/wd-not-revert.spec",
+      "rules": [
+        {
+          "entrypoint": "withdraw()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "uge",
+                "left": {
+                  "env": "balance"
+                },
+                "right": {
+                  "immutable": "goal"
+                }
+              },
+              {
+                "op": "ugt",
+                "left": {
+                  "env": "number"
+                },
+                "right": {
+                  "immutable": "end_donate"
+                }
+              },
+              {
+                "op": "eq",
+                "left": {
+                  "env": "callvalue"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "reclaim-not-revert",
+      "from": "certora/reclaim-not-revert.spec",
+      "rules": [
+        {
+          "entrypoint": "reclaim()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ult",
+                "left": {
+                  "env": "balance"
+                },
+                "right": {
+                  "immutable": "goal"
+                }
+              },
+              {
+                "op": "ugt",
+                "left": {
+                  "env": "number"
+                },
+                "right": {
+                  "immutable": "end_donate"
+                }
+              },
+              {
+                "op": "ugt",
+                "left": {
+                  "cell": {
+                    "var": "donors",
+                    "key": {
+                      "env": "caller"
+                    }
+                  }
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "eq",
+                "left": {
+                  "env": "callvalue"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
         }
       ]
     }

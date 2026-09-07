@@ -1797,9 +1797,20 @@ impl<'a> Walk<'a> {
                 Some((slot, label.clone()))
             })
             .collect();
-        let layout = crate::relation::Names {
-            slots,
-            immutables: self.b.ir.immutables.clone(),
+        let immutables = self.b.ir.immutables.clone();
+        // How many times each slot has been written on this path, and how
+        // many writes the model could not place. A term read after a write
+        // is a different term from the same read before it, and a
+        // specification talks about the state the call started in.
+        let mut versions: BTreeMap<String, u32> = BTreeMap::new();
+        let mut cell_version: u32 = 0;
+        let names = |versions: &BTreeMap<String, u32>, cell_version: u32| {
+            crate::relation::Names {
+                slots: slots.clone(),
+                immutables: immutables.clone(),
+                versions: versions.clone(),
+                cell_version,
+            }
         };
         let mut frames: Vec<Frame> = vec![Frame {
             func: e.func.clone(),
@@ -1871,7 +1882,7 @@ impl<'a> Walk<'a> {
                         None => decide_or_split(
                             &c.condition,
                             &terms,
-                            &layout,
+                            &names(&versions, cell_version),
                             &mut facts,
                             &mut splits,
                             || format!("check {} in {func}", c.id),
@@ -1903,6 +1914,10 @@ impl<'a> Walk<'a> {
                              colliding with a small constant slot is an assumption, the same \
                              one solc's own storage layout rests on",
                         );
+                        // It moved *some* cell, and the model does not know
+                        // which, so every fact about a cell is now about the
+                        // state before this write.
+                        cell_version += 1;
                         continue;
                     };
                     // What is written may not be a value the walk knows: it
@@ -1933,6 +1948,7 @@ impl<'a> Walk<'a> {
                         }
                     };
                     storage[slot_idx] = to;
+                    *versions.entry(slot_label.clone()).or_default() += 1;
                     steps.push(Step::Store { slot: slot_idx, label: slot_label, to });
                     continue;
                 }
@@ -2000,8 +2016,14 @@ impl<'a> Walk<'a> {
                         // Its term is known whether or not its value is, and
                         // the term is what says two locals hold the same
                         // thing.
+                        // Stamped with the storage versions as they are *now*:
+                        // a local defined from a slot read before a write to
+                        // that slot holds the value from before it, and must
+                        // not read as the value from after.
+                        let stamped = canon(v, &terms)
+                            .map(|t| crate::relation::normalise(&t, &names(&versions, cell_version)));
                         let fr = frames.last_mut().unwrap();
-                        match canon(v, &terms) {
+                        match stamped {
                             Some(t) => {
                                 fr.terms.insert(targets[0].clone(), t);
                             }
@@ -2129,7 +2151,7 @@ impl<'a> Walk<'a> {
                             src: None,
                         },
                         &terms,
-                        &layout,
+                        &names(&versions, cell_version),
                         &mut facts,
                         &mut splits,
                         || format!("a panic inside an instruction in {func}"),
@@ -2148,7 +2170,8 @@ impl<'a> Walk<'a> {
                         | mulu_yul::ir::Op::Assign { targets, value: v }
                             if targets.len() == 1 =>
                         {
-                            let t = canon(v, &terms);
+                            let t = canon(v, &terms)
+                                .map(|t| crate::relation::normalise(&t, &names(&versions, cell_version)));
                             let fr = frames.last_mut().unwrap();
                             fr.env.remove(&targets[0]);
                             match t {
@@ -2218,6 +2241,7 @@ impl<'a> Walk<'a> {
                             };
                             let label = self.per_slot[i].0.clone();
                             storage[i] = to;
+                            *versions.entry(label.clone()).or_default() += 1;
                             steps.push(Step::Store { slot: i, label, to });
                         }
                         // What it defines, forgotten.
@@ -2236,7 +2260,7 @@ impl<'a> Walk<'a> {
                                     src: None,
                                 },
                                 &terms,
-                                &layout,
+                                &names(&versions, cell_version),
                                 &mut facts,
                                 &mut splits,
                                 || format!("whether the loop in {func} reverts"),
@@ -2281,7 +2305,7 @@ impl<'a> Walk<'a> {
                             None => decide_or_split(
                                 &c.condition,
                                 &terms,
-                                &layout,
+                                &names(&versions, cell_version),
                                 &mut facts,
                                 &mut splits,
                                 || format!("check {} in {func}", c.id),
@@ -2320,7 +2344,7 @@ impl<'a> Walk<'a> {
                         .or_else(|| self.decide_cond(cond, &env, &storage, &memory))
                     {
                         Some(v) => v,
-                        None => decide_or_split(cond, &terms, &layout, &mut facts, &mut splits, || {
+                        None => decide_or_split(cond, &terms, &names(&versions, cell_version), &mut facts, &mut splits, || {
                             format!("a branch in {func}")
                         })?,
                     };

@@ -30,6 +30,10 @@ pub trait Layout {
     fn immutable(&self, _id: &str) -> Option<String> {
         None
     }
+    /// How many writes the model could not place have happened so far.
+    fn cell_generation(&self) -> u32 {
+        0
+    }
 }
 
 impl<F: Fn(crate::interval::U256) -> Option<String>> Layout for F {
@@ -38,18 +42,44 @@ impl<F: Fn(crate::interval::U256) -> Option<String>> Layout for F {
     }
 }
 
-/// A slot table and an immutable table together.
+/// A slot table, an immutable table, and how many times each slot has been
+/// written on the path so far.
+///
+/// The version is what keeps a term honest about *when* it was read.
+/// `storage(x)` before a write and after it are two values, and rendering
+/// both the same let a fact recorded before the write be used after it. A
+/// specification talks about the state the call started in, which is
+/// version 0, so that one keeps the plain name.
 pub struct Names {
     pub slots: BTreeMap<crate::interval::U256, String>,
     pub immutables: BTreeMap<String, String>,
+    /// Declared slot label to how many times it has been written.
+    pub versions: BTreeMap<String, u32>,
+    /// How many times a slot the model does not track has been written. Any
+    /// of them could have been a cell of any mapping, so one counter covers
+    /// them all.
+    pub cell_version: u32,
+}
+
+impl Names {
+    fn stamp(&self, label: &str) -> String {
+        match self.versions.get(label).copied().unwrap_or(0) {
+            0 => label.to_string(),
+            n => format!("{label}@{n}"),
+        }
+    }
 }
 
 impl Layout for Names {
     fn label_at(&self, slot: crate::interval::U256) -> Option<String> {
-        self.slots.get(&slot).cloned()
+        self.slots.get(&slot).map(|l| self.stamp(l))
     }
     fn immutable(&self, id: &str) -> Option<String> {
+        // An immutable is written once, at deployment, and never again.
         self.immutables.get(id).cloned()
+    }
+    fn cell_generation(&self) -> u32 {
+        self.cell_version
     }
 }
 
@@ -177,6 +207,10 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
                 .map(|l| call("storage", vec![Expr::Ident { name: l, src: None }])),
             Expr::Call { name: m, args: ma, .. } if m == "mapping" && ma.len() == 2 => {
                 slot_of(&ma[0]).and_then(|s| layout.label_at(s)).map(|l| {
+                    let l = match layout.cell_generation() {
+                        0 => l,
+                        n => format!("{l}@{n}"),
+                    };
                     call("cell", vec![Expr::Ident { name: l, src: None }, ma[1].clone()])
                 })
             }
