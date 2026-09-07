@@ -32,6 +32,10 @@ pub struct Diagnostic {
     /// open the claim stays at `abstract-model`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub obligations: Vec<String>,
+    /// Those of them settled by decision rather than by proof. A scope
+    /// reached over one of these is not a proved scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumed: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +64,9 @@ pub fn print_human(diags: &[Diagnostic], out_dir: &std::path::Path) {
             println!("         {line}");
         }
         let mut meta = format!("claim: {}  status: {}  scope: {}", d.claim, d.status, d.scope);
+        if !d.assumed.is_empty() {
+            meta.push_str(&format!("  assuming: {}", d.assumed.join(", ")));
+        }
         if !d.depends_on.is_empty() {
             meta.push_str(&format!("  depends on: {}", d.depends_on.join(", ")));
         }

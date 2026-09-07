@@ -50,18 +50,40 @@ pub struct Obligation {
     /// Naming it is not a claim that it has been used, or that it is correct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub would_need: Option<String>,
-    /// `None` while open. Nothing sets this yet.
+    /// `None` while open. Nothing sets this yet, and `verify` refuses a
+    /// ledger that claims otherwise: the tool proves none of these.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discharged_by: Option<String>,
+    /// Taken as true by decision rather than shown. An assumption settles an
+    /// obligation for the purpose of reporting a scope, and it is never a
+    /// proof: the string says whose decision it was, and every finding that
+    /// stands on one carries it. See [`ASSUME_COMPILERS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumed_by: Option<String>,
 }
+
+/// The project's decision about the compilers it did not write. Recorded as a
+/// string on every obligation it settles, so a reader of the artifact alone
+/// sees it, and checked by `verify` so a ledger cannot invent an assumption
+/// of its own.
+pub const ASSUME_COMPILERS: &str =
+    "assumed: solc compiles Solidity as its documentation says. A project decision, not a \
+     proof; no proof of solc exists.";
 
 fn mulu_bearer() -> String {
     "mulu".into()
 }
 
 impl Obligation {
+    /// Neither shown nor assumed, so it still blocks.
     pub fn open(&self) -> bool {
-        self.discharged_by.is_none()
+        self.discharged_by.is_none() && self.assumed_by.is_none()
+    }
+
+    /// Settled by decision rather than by proof. A claim that rests on one of
+    /// these is not a proved claim, and says so.
+    pub fn assumed(&self) -> bool {
+        self.discharged_by.is_none() && self.assumed_by.is_some()
     }
 
     /// Open, and ours to close. The rest are open because someone else has
@@ -129,6 +151,11 @@ impl Ledger {
         self.obligations.iter().filter(|o| o.open()).collect()
     }
 
+    /// Settled by decision. Every finding that reaches past them carries them.
+    pub fn assumed(&self) -> Vec<&Obligation> {
+        self.obligations.iter().filter(|o| o.assumed()).collect()
+    }
+
     pub fn find(&self, id: &str) -> Option<&Obligation> {
         self.obligations.iter().find(|o| o.id == id)
     }
@@ -175,6 +202,7 @@ fn ob(
         discharged_by: None,
         bearer: mulu_bearer(),
         would_need: None,
+        assumed_by: None,
     }
 }
 
@@ -183,6 +211,10 @@ fn ob(
 fn on_solc(mut o: Obligation, would_need: &str) -> Obligation {
     o.bearer = "solc".into();
     o.would_need = Some(would_need.to_string());
+    // The project's decision. It cannot be made for an obligation of our own
+    // (`verify` refuses that), because assuming your own work is done is not
+    // an assumption, it is a mistake.
+    o.assumed_by = Some(ASSUME_COMPILERS.to_string());
     o
 }
 

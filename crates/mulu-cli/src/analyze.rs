@@ -298,9 +298,22 @@ fn print_obligations(l: &crate::obligations::Ledger) {
         // Named by who bears them. One is a compiler nobody has proved
         // correct, another is a semantics nobody has proved matches the EVM;
         // calling both "a compiler" would be wrong about the second.
-        println!("  {} assumption(s) on work this project did not do:", theirs.len());
+        println!("  {} still open and not ours:", theirs.len());
         for o in &theirs {
             println!("    {:<40} {:<8} reaches {}", o.id, format!("({})", o.bearer), o.reaches);
+        }
+    }
+    // Settled by decision. Printed every run, because an assumption nobody
+    // sees is worse than an obligation nobody has met: the second is at least
+    // still counted.
+    let assumed = l.assumed();
+    if !assumed.is_empty() {
+        println!("  {} assumed, not proved:", assumed.len());
+        for o in &assumed {
+            println!("    {:<40} {:<8} reaches {}", o.id, format!("({})", o.bearer), o.reaches);
+        }
+        if let Some(o) = assumed.first() {
+            println!("    {}", o.assumed_by.as_deref().unwrap_or(""));
         }
     }
     if open.is_empty() {

@@ -215,7 +215,7 @@ branch is matched by that check's fail event.
 ```
 correspondence
   findings are reported at: abstract-model
-  9 obligation(s), 9 open
+  9 obligation(s), 7 open
   6 to prove here:
     semantics:rendering-preserves-the-program  reaches yul-semantics
     simulation:initial-covered               reaches yul-semantics
@@ -223,19 +223,30 @@ correspondence
     check:fail-step-matched:A                reaches yul-semantics
     check:fail-step-matched:B                reaches yul-semantics
     plant:policy-corresponds                 reaches yul-semantics
-  3 assumption(s) on work this project did not do:
+  1 still open and not ours:
     semantics:evmyul-matches-the-evm         (evmyul) reaches yul-semantics
+  2 assumed, not proved:
     compilation:yul-corresponds-to-source    (solc)   reaches solidity-source
     compilation:optimised-bytecode           (solc)   reaches evm-bytecode
 ```
 
-**None of them is discharged**, so every finding stays at `abstract-model` and
-the reason is enumerated rather than described. The two groups are not the
-same kind of thing. The first six are statements about mulu's own abstraction
-and the proofs are ours to write. The last three are properties of artifacts
-this project did not write: that solc lowers Solidity faithfully, that its
-optimizer preserves behaviour, and that the adopted Yul semantics agrees with
-the EVM. No amount of work here closes those.
+**None of them is discharged.** Six are statements about mulu's own
+abstraction and the proofs are ours to write. The rest are properties of
+artifacts this project did not write.
+
+Two of those are settled by decision rather than by proof: this project takes
+solc as compiling Solidity as its documentation says. An assumption is not a
+discharge and is never allowed to become invisible. It is recorded on the
+obligation, printed on every run, and carried on every finding it lets past,
+and `verify` enforces three rules about it. Only the decision this project
+recorded counts, so a ledger cannot write a sentence of its own. Nothing
+whose bearer is mulu can be assumed, because assuming the proofs we owe are
+done is not a decision about anything. And nothing carrying a measured
+counterexample can be assumed, because a measurement is not a thing a
+decision settles.
+
+Assuming solc changes no scope today. Everything still stops at
+`abstract-model`, because the Yul layer below it is still open.
 
 ### The Yul semantics
 

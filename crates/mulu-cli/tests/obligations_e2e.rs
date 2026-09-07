@@ -439,3 +439,93 @@ fn an_assumption_on_solc_is_not_an_item_on_our_list() {
     assert_eq!(mulu().args(["verify", out.to_str().unwrap()]).status().unwrap().code(), Some(0));
     let _ = std::fs::remove_dir_all(&out);
 }
+
+#[test]
+fn assuming_a_compiler_correct_is_recorded_not_erased() {
+    if !ready() {
+        return;
+    }
+    // The project decided to take solc as correct. That settles the two
+    // obligations nobody could ever discharge, and it is not a proof, so it
+    // has to stay visible: in the ledger as `assumed_by`, and on every
+    // finding that is carried past it.
+    let out = analysed("assumed");
+    let obs = json(&out.join("obligations.json"))["obligations"].as_array().unwrap().clone();
+
+    let assumed: Vec<&str> = obs
+        .iter()
+        .filter(|o| o["assumed_by"].is_string())
+        .map(|o| o["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        assumed,
+        vec!["compilation:yul-corresponds-to-source", "compilation:optimised-bytecode"]
+    );
+    for o in obs.iter().filter(|o| o["assumed_by"].is_string()) {
+        assert_eq!(o["bearer"], "solc", "only work this project did not do can be assumed");
+        assert!(o["discharged_by"].is_null(), "assumed is not discharged");
+        assert!(o["assumed_by"].as_str().unwrap().contains("not a proof"));
+    }
+    // and nothing of ours was quietly settled along with them
+    assert!(obs
+        .iter()
+        .filter(|o| o["bearer"] == "mulu")
+        .all(|o| o["assumed_by"].is_null() && o["discharged_by"].is_null()));
+
+    assert_eq!(mulu().args(["verify", out.to_str().unwrap()]).status().unwrap().code(), Some(0));
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn an_obligation_of_ours_cannot_be_assumed_away() {
+    if !ready() {
+        return;
+    }
+    // Assuming a third party's compiler is a decision. Assuming the proofs we
+    // owe are done is not a decision about anything.
+    let out = analysed("assume-ours");
+    let path = out.join("obligations.json");
+    let mut l = json(&path);
+    for o in l["obligations"].as_array_mut().unwrap() {
+        if o["id"] == "simulation:step-covered" {
+            o["assumed_by"] = serde_json::json!(
+                "assumed: solc compiles Solidity as its documentation says. A project decision, \
+                 not a proof; no proof of solc exists."
+            );
+        }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&l).unwrap()).unwrap();
+
+    let o = mulu().args(["verify", out.to_str().unwrap()]).output().unwrap();
+    assert_eq!(o.status.code(), Some(4));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("ours to prove and cannot be assumed"), "{err}");
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn a_ledger_cannot_invent_an_assumption_of_its_own() {
+    if !ready() {
+        return;
+    }
+    // The decision is the project's, recorded once. A ledger that writes its
+    // own sentence would be settling an obligation by asserting it.
+    let out = analysed("assume-invented");
+    let path = out.join("obligations.json");
+    let mut l = json(&path);
+    for o in l["obligations"].as_array_mut().unwrap() {
+        if o["id"] == "semantics:evmyul-matches-the-evm" {
+            o["assumed_by"] = serde_json::json!("assumed: it is probably fine");
+        }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&l).unwrap()).unwrap();
+
+    let o = mulu().args(["verify", out.to_str().unwrap()]).output().unwrap();
+    assert_eq!(o.status.code(), Some(4));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("not the decision this project recorded"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}

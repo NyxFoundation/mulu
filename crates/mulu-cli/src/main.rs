@@ -502,6 +502,15 @@ pub fn analyze_model_at(
         let deps = owned.depends_on(d.kind, d.check_id.as_deref());
         let refs: Vec<&str> = deps.iter().map(|s| s.as_str()).collect();
         d.scope = owned.promoted_scope(&refs);
+        // An assumption this claim was carried past is part of the claim. A
+        // scope reached over one is not a proved scope, and the finding says
+        // which decision it stands on rather than leaving it in the ledger
+        // for a reader who may only see the finding.
+        for id in &deps {
+            if owned.find(id).is_some_and(|o| o.assumed()) {
+                d.assumed.push(id.clone());
+            }
+        }
         d.obligations = deps;
     }
     fs::write(out.join("obligations.json"), serde_json::to_string_pretty(&owned)?)?;
@@ -645,6 +654,7 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             detail: None,
             reproduction: None,
             obligations: vec![],
+            assumed: vec![],
         });
         return Ok(());
     }
@@ -671,6 +681,7 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             detail: None,
             reproduction: None,
             obligations: vec![],
+            assumed: vec![],
         });
         return Ok(());
     }
@@ -694,6 +705,7 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             detail: Some(json!({"path": steps})),
             reproduction: None,
             obligations: vec![],
+            assumed: vec![],
         });
     } else {
         let checked = a["checked"].as_bool() == Some(true);
@@ -722,6 +734,7 @@ fn handle_safety(ctx: &mut Ctx, n: &Normalized, a: &Value) -> Result<()> {
             detail: None,
             reproduction: None,
             obligations: vec![],
+            assumed: vec![],
         });
     }
     Ok(())
@@ -756,6 +769,7 @@ fn handle_redundancy(ctx: &mut Ctx, fp: &FiniteProduct, n: &Normalized, a: &Valu
                 detail: None,
                 reproduction: None,
                 obligations: vec![],
+                assumed: vec![],
             });
         }
         return Ok(fails);
@@ -816,6 +830,7 @@ fn handle_redundancy(ctx: &mut Ctx, fp: &FiniteProduct, n: &Normalized, a: &Valu
             detail: None,
             reproduction: None,
             obligations: vec![],
+            assumed: vec![],
         });
     }
     Ok(fails)
@@ -863,6 +878,7 @@ fn handle_envelope(ctx: &mut Ctx, n: &Normalized, model: &str, a: &Value, on: &s
                 detail: Some(json!({"objective": a["objective"], "winning": winning_names, "disabled": disabled, "pruning_rounds": a["pruning_rounds"]})),
                 reproduction: None,
                 obligations: vec![],
+                assumed: vec![],
             });
             Ok(Some(w))
         }
@@ -885,6 +901,7 @@ fn handle_envelope(ctx: &mut Ctx, n: &Normalized, model: &str, a: &Value, on: &s
                 detail: None,
                 reproduction: None,
                 obligations: vec![],
+                assumed: vec![],
             });
             Ok(None)
         }
@@ -920,6 +937,7 @@ fn overrestriction(ctx: &mut Ctx, fp: &FiniteProduct, impl_n: &Normalized, plant
             detail: None,
             reproduction: None,
             obligations: vec![],
+            assumed: vec![],
         });
         return;
     }
@@ -964,6 +982,7 @@ fn overrestriction(ctx: &mut Ctx, fp: &FiniteProduct, impl_n: &Normalized, plant
                     detail: Some(json!({"impl_state": pair.impl_state, "plant_state": pair.plant_state, "site": site.id, "continue_event": site.continue_event})),
                     reproduction: None,
                     obligations: vec![],
+                    assumed: vec![],
                 });
             }
         }
@@ -1084,15 +1103,47 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
             ));
         }
 
-        // The tool discharges nothing, so a discharge in the ledger is a claim
-        // no one checked. Refuse it rather than let it raise a scope.
-        for o in l.obligations.iter().filter(|o| !o.open()) {
-            failures.push(format!(
-                "obligation {} claims to be discharged by {:?}, and nothing here can check \
-                 that; P1-04 discharges none",
-                o.id,
-                o.discharged_by.as_deref().unwrap_or("?")
-            ));
+        // The tool proves none of these, so a *discharge* in the ledger is a
+        // claim no one checked. An *assumption* is a different thing and is
+        // allowed, under three rules that are the whole reason it is safe to
+        // allow at all.
+        for o in &l.obligations {
+            if let Some(by) = &o.discharged_by {
+                failures.push(format!(
+                    "obligation {} claims to be discharged by {by:?}, and nothing here can check \
+                     that; P1-04 discharges none",
+                    o.id
+                ));
+                continue;
+            }
+            let Some(by) = &o.assumed_by else { continue };
+            // 1. Only the project's own decision, so a ledger cannot invent
+            //    an assumption by writing a sentence of its own.
+            if by != obligations::ASSUME_COMPILERS {
+                failures.push(format!(
+                    "obligation {} is assumed by {by:?}, which is not the decision this project \
+                     recorded",
+                    o.id
+                ));
+            }
+            // 2. Never our own work. Assuming the proofs we owe are done is
+            //    not an assumption about a third party, it is a mistake about
+            //    ourselves.
+            if o.bearer == "mulu" {
+                failures.push(format!(
+                    "obligation {} is ours to prove and cannot be assumed",
+                    o.id
+                ));
+            }
+            // 3. Never something measured to be false. `raised_by` carries
+            //    what the analysis actually found, and a counterexample there
+            //    is not something a decision can settle.
+            if o.raised_by.iter().any(|r| r.contains("cannot be read") || r.contains("does not mean")) {
+                failures.push(format!(
+                    "obligation {} carries a measured counterexample and cannot be assumed",
+                    o.id
+                ));
+            }
         }
         let mut checked = 0usize;
         for d in report["diagnostics"].as_array().cloned().unwrap_or_default() {
