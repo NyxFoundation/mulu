@@ -275,6 +275,25 @@ A contract that needed no rewrite carries no such assumption. `make
 semantics-check` renders every example and checks Lean accepts it, because a
 rendering only mulu can read would prove nothing about anything.
 
+`mulu semantics-diff` goes further: it runs the rendered contract in EvmYul's
+interpreter and the same calls on revm, and compares the storage. Both start
+from the storage the deployment left, so a constructor this does not model is
+not mistaken for a step disagreement.
+
+```
+call                         EvmYul                 revm
+setLimit(50)                 ok {0=50}              ok {0=50}
+setLimit(101)                revert {0=50}          revert {0=50}
+forceSet(1001)               ok {0=1001}            ok {0=1001}
+```
+
+All five examples agree, across reverts, modifiers, `uint8` truncation and
+overload dispatch (`make semantics-diff`). **This is evidence and not a
+proof**, and the obligation stays open either way. What it catches is a
+divergence, which is a defect in one of three places: the rendering is a
+different program, EvmYul and revm disagree about the EVM, or the analysis is
+reading the wrong artifact.
+
 The rule is executable, not documentary. `verify` recomputes each finding's
 scope from the ledger and refuses a report that claims more; it also refuses a
 ledger that claims a discharge, since the tool discharges nothing and cannot

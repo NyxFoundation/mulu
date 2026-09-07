@@ -59,6 +59,8 @@ jobs:
           chmod +x /usr/local/bin/solc
       - name: Every example elaborates in the semantics it is rendered for
         run: cargo build --release && make semantics-check
+      - name: Every example agrees with revm when run in the semantics
+        run: make semantics-diff
       - name: Axiom audit
         run: |
           cd semantics

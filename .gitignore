@@ -1,6 +1,7 @@
 /target
 /lean/.lake
 /semantics/.lake
+/semantics/MuluDiff/Generated.lean
 /semantics/lake-manifest.json
 /analysis*/
 *.log

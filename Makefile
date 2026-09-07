@@ -4,7 +4,7 @@
 LEAN_DIR := $(CURDIR)/lean
 export MULU_LEAN_DIR := $(LEAN_DIR)
 
-.PHONY: build lean rust test check fixtures ir analyze regen-fixtures semantics semantics-check clean
+.PHONY: build lean rust test check fixtures ir analyze regen-fixtures semantics semantics-check semantics-diff clean
 
 build: lean rust
 
@@ -75,6 +75,21 @@ semantics-check: semantics
 	  (cd semantics && lake env lean /tmp/mulu-yul-lean/$$n.lean); \
 	  echo "$$n elaborates"; \
 	done
+
+# Run every example in the Lean semantics and on revm, and compare. Agreement
+# is evidence, never a proof: the obligation stays open either way. What this
+# catches is a rendering that is a different program.
+semantics-diff: semantics
+	./target/release/mulu semantics-diff examples/limits/Limits.sol --contract Limits \
+	  --call 'setLimit(uint256)=50' --call 'setLimit(uint256)=101' --call 'forceSet(uint256)=1001'
+	./target/release/mulu semantics-diff examples/access/Vault.sol --contract Vault \
+	  --call 'setLimit(uint256)=50' --call 'setLimit(uint256)=101' --call 'forceSet(uint256)=2000'
+	./target/release/mulu semantics-diff examples/typed/Meter.sol --contract Meter \
+	  --call 'record(uint8)=50' --call 'record(uint8)=200' --call 'force(uint256)=5000'
+	./target/release/mulu semantics-diff examples/overload/Over.sol --contract Over \
+	  --call 'set(uint256)=500' --call 'set(uint8)=200' --call 'set(uint8)=50'
+	./target/release/mulu semantics-diff examples/guards/Gate.sol --contract Gate \
+	  --call 'setLimit(uint256)=50' --call 'setLimit(uint256)=2000' --call 'forceSet(uint256)=9999'
 
 check: test fixtures analyze
 

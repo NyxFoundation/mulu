@@ -11,6 +11,7 @@ mod reproduce;
 mod lean;
 mod report;
 mod sarif;
+mod semantics;
 mod worker;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -130,6 +131,24 @@ enum Cmd {
         #[arg(long, default_value = DEFAULT_EVM_VERSION)]
         evm_version: String,
     },
+    /// Run the rendered contract in Lean and on an EVM, and compare (opt-in: needs `semantics/`)
+    SemanticsDiff {
+        /// Solidity source files to compile
+        #[arg(required = true)]
+        sources: Vec<PathBuf>,
+        #[arg(long)]
+        contract: Option<String>,
+        /// A call, as `setLimit(uint256)=101`. Repeatable, applied in order
+        #[arg(long = "call", required = true)]
+        calls: Vec<String>,
+        #[arg(long)]
+        solc: Option<PathBuf>,
+        #[arg(long, default_value = DEFAULT_EVM_VERSION)]
+        evm_version: String,
+        /// The `semantics/` package to build the runner in
+        #[arg(long, default_value = "semantics")]
+        semantics_dir: PathBuf,
+    },
     /// Analyse a finite-product model (schema v1) and write an analysis directory
     AnalyzeModel {
         model: PathBuf,
@@ -211,6 +230,16 @@ fn run() -> Result<i32> {
             )?;
             copy_sarif(&out2, sarif.as_deref())?;
             Ok(code)
+        }
+        Cmd::SemanticsDiff { sources, contract, calls, solc, evm_version, semantics_dir } => {
+            semantics::run(&semantics::DiffArgs {
+                sources,
+                contract,
+                calls,
+                solc,
+                evm_version,
+                semantics_dir,
+            })
         }
         Cmd::YulLean { sources, contract, out, solc, evm_version } => {
             build::yul_lean(&build::IrArgs { sources, contract, out, solc, evm_version })

@@ -34,3 +34,12 @@ require evmyul from git
 @[default_target]
 lean_lib «MuluSemantics» where
   globs := #[.andSubmodules `MuluSemantics]
+
+/-- Built on demand by `mulu semantics-diff`, which writes `MuluDiff/Generated.lean`
+first. Neither is a default target: without that file there is nothing to run,
+and `make check` must not need this package at all. -/
+lean_lib «MuluDiff» where
+  globs := #[.andSubmodules `MuluDiff]
+
+lean_exe «mulu-diff» where
+  root := `MuluDiff.Main
