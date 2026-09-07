@@ -41,11 +41,22 @@ struct Args {
     /// Stop after this many cases, for a quick look
     #[arg(long)]
     limit: Option<usize>,
+    /// Which corpus `corpus` is. `semantic-tests` reads solc's `// ----`
+    /// footers; `verification-benchmark` reads
+    /// `contracts/<use case>/versions/` and the shared `lib/`.
+    #[arg(long, value_enum, default_value = "semantic-tests")]
+    corpus_kind: CorpusKind,
     /// Exit non-zero below this many modelled cases. What CI asserts: the
     /// floor catches a coverage regression, and the run finishing at all
     /// catches a return of the blowup that made a ten-line contract hang.
     #[arg(long)]
     min_modelled: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum CorpusKind {
+    SemanticTests,
+    VerificationBenchmark,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,7 +136,7 @@ fn measure(case: &corpus::Case, solc: Option<PathBuf>) -> Outcome {
         return o;
     }
     let mut written = vec![];
-    for (name, body) in &case.sources {
+    for (i, (name, body)) in case.sources.iter().enumerate() {
         let path = dir.join(name);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -135,7 +146,14 @@ fn measure(case: &corpus::Case, solc: Option<PathBuf>) -> Outcome {
             let _ = std::fs::remove_dir_all(&dir);
             return o;
         }
-        written.push(path);
+        // A semantic test's `==== Source:` parts are all part of the test.
+        // The verification benchmark's extra sources are the shared library
+        // its imports name, and compiling those as top-level contracts would
+        // let `driver_select` pick one of them instead of the contract under
+        // measurement.
+        if i == 0 || case.kind == corpus::Kind::SemanticTests {
+            written.push(path);
+        }
     }
 
     let lowered = compile_and_lower(&written, solc);
@@ -231,7 +249,10 @@ fn compile_and_lower(
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let mut cases = corpus::load(&args.corpus)?;
+    let mut cases = match args.corpus_kind {
+        CorpusKind::SemanticTests => corpus::load(&args.corpus)?,
+        CorpusKind::VerificationBenchmark => corpus::load_verification_benchmark(&args.corpus)?,
+    };
     if let Some(n) = args.limit {
         cases.truncate(n);
     }

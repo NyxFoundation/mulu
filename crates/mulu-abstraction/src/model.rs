@@ -273,6 +273,18 @@ impl<'a> Builder<'a> {
                 ));
                 continue;
             }
+            // An external call is modelled as "returns 0 or 1, and nothing is
+            // known about memory afterwards". What that leaves out is the
+            // callee calling back in: a reentrant call runs the contract's
+            // own entrypoints again and can move storage under the caller.
+            // The model does not represent that, so it says so.
+            if f.effects.external_call {
+                self.note(format!(
+                    "no-reentrancy: {} makes an external call, and the model assumes the \
+                     callee does not call back into this contract",
+                    e.signature
+                ));
+            }
             // The argument's domain comes from its ABI type, not from the
             // machine word. A uint8 argument has 256 values; treating it as a
             // full word invents regions no type-correct call can reach.
@@ -1036,6 +1048,12 @@ impl<'a> Walk<'a> {
                     .cloned()
                     .ok_or_else(|| format!("nothing is known about memory at {k}"));
             }
+            // `call` and `staticcall` push 1 on success and 0 on failure.
+            // Two values, both reachable: the callee is not modelled, so
+            // neither outcome can be ruled out.
+            if (name == "call" && args.len() == 7) || (name == "staticcall" && args.len() == 6) {
+                return Ok(IntervalSet::point(U256::ZERO).union(&IntervalSet::point(U256::from(1))));
+            }
             if name == "sload" && args.len() == 1 {
                 let Some(v) = self.address(&args[0], env, storage, memory, depth) else {
                     return Err("`sload` of a computed slot is outside the P1a fragment".into());
@@ -1466,6 +1484,14 @@ impl<'a> Walk<'a> {
                 // and every guard on an allocation reads it. A store to a
                 // computed address could land anywhere, so it clears what is
                 // known rather than being ignored.
+                // An external call may write anywhere in the output region,
+                // whose address the model does not track, so afterwards it
+                // knows nothing about memory. The result itself is bound by
+                // the arms below, from `eval`.
+                if ins.effects.external_call {
+                    memory.clear();
+                }
+
                 if let mulu_yul::ir::Op::Effect { call: mulu_yul::Expr::Call { name, args, .. } } =
                     &ins.op
                 {

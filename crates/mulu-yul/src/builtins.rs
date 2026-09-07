@@ -24,7 +24,9 @@ pub enum Builtin {
     Revert,
     Stop,
     Invalid,
-    /// Hands control to another contract: out of scope for P1a.
+    /// Hands control to another contract. P1a models the result (0 or 1)
+    /// and clears what it knows about memory, under the stated assumption
+    /// that the callee does not reenter.
     ExternalCall,
     /// Known builtin whose effect P1a does not model.
     Unsupported,
@@ -60,11 +62,18 @@ pub fn classify(name: &str) -> Option<Builtin> {
         "stop" => Stop,
         "invalid" => Invalid,
 
-        "call" | "callcode" | "delegatecall" | "staticcall" | "create" | "create2"
-        | "selfdestruct" => ExternalCall,
+        "call" | "staticcall" => ExternalCall,
 
-        // `gas` makes gas observable, which the P1 semantics does not model.
-        "gas" | "pc" | "pop" | "verbatim" => Unsupported,
+        // These change who is running or what the code is, which no
+        // assumption about the callee's behaviour recovers.
+        "callcode" | "delegatecall" | "create" | "create2" | "selfdestruct" => Unsupported,
+
+        // Gas is not a function of the arguments, which is what the purity
+        // lattice already records. `gas()` reaches a guard only through a
+        // call's gas parameter, where its value never decides anything.
+        "gas" => ReadsEnvironment,
+
+        "pc" | "pop" | "verbatim" => Unsupported,
 
         _ => return None,
     })
@@ -120,8 +129,10 @@ impl Effects {
             Return => self.can_return = true,
             Revert | Invalid => self.can_revert = true,
             Stop => self.can_return = true,
-            ExternalCall | Unsupported => {
-                self.external_call |= b == ExternalCall;
+            // Modelled, but only under the no-reentrancy assumption the
+            // model records against the entrypoint that reaches it.
+            ExternalCall => self.external_call = true,
+            Unsupported => {
                 if !self.unsupported.iter().any(|u| u == name) {
                     self.unsupported.push(name.to_string());
                 }
@@ -129,9 +140,10 @@ impl Effects {
         }
     }
 
-    /// Nothing outside the P1a subset.
+    /// Nothing outside the P1a subset. An external call is inside it, under
+    /// the assumption recorded where the entrypoint is admitted.
     pub fn supported(&self) -> bool {
-        self.unsupported.is_empty() && !self.external_call
+        self.unsupported.is_empty()
     }
 }
 
@@ -171,12 +183,39 @@ mod tests {
 
     #[test]
     fn p1a_excludes_the_constructs_docs_09_lists() {
-        for name in ["call", "delegatecall", "staticcall", "create", "create2", "gas"] {
+        for name in ["delegatecall", "callcode", "create", "create2", "selfdestruct", "verbatim"] {
             let b = classify(name).unwrap_or_else(|| panic!("{name} unclassified"));
             let mut e = Effects::default();
             e.add_builtin(name, b);
             assert!(!e.supported(), "{name} must be out of the P1a subset");
         }
+    }
+
+    /// `call` and `staticcall` are inside the subset, but only because the
+    /// model records what it is assuming: the result is 0 or 1, memory is
+    /// forgotten, and the callee does not reenter. The flag is what the
+    /// abstraction reads to write that assumption down, so losing it would
+    /// turn a stated assumption into a silent one.
+    #[test]
+    fn an_external_call_is_modelled_but_flagged() {
+        for name in ["call", "staticcall"] {
+            let b = classify(name).unwrap_or_else(|| panic!("{name} unclassified"));
+            let mut e = Effects::default();
+            e.add_builtin(name, b);
+            assert!(e.supported(), "{name} is modelled under an assumption");
+            assert!(e.external_call, "{name} must set the flag the assumption hangs on");
+        }
+    }
+
+    /// Gas is not a function of the arguments, and that is all the model
+    /// needs to know: a guard reading it is impure and never becomes a
+    /// predicate over arguments.
+    #[test]
+    fn gas_is_an_environment_read() {
+        let mut e = Effects::default();
+        e.add_builtin("gas", classify("gas").unwrap());
+        assert!(e.supported());
+        assert_eq!(Purity::of(&e), Purity::ReadsEnvironment);
     }
 
     #[test]

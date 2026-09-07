@@ -46,6 +46,41 @@ a solc newer than the pinned one, or a test with no calls. Counting those
 against mulu would damn it for something it was never asked to do; counting
 them for it would flatter.
 
+## `contracts-verification-benchmark` — is mulu right?
+
+The other corpus has an answer key. `fsainas/contracts-verification-benchmark`
+holds 47 contracts across 17 use cases (bank, vault, escrow, htlc, lottery,
+crowdfund, tinyamm and so on). `v1` conforms to the use case's specification
+and the later versions carry a seeded defect. Beside them, `ground-truth.csv`
+records for each of 365 (property, version) pairs whether the property holds,
+and `contracts/scores.csv` records what Certora and solc's own model checker
+scored on it.
+
+```sh
+./bench/fetch.sh
+cargo run --release -p mulu-bench -- --corpus-kind verification-benchmark \
+  bench/corpus/contracts-verification-benchmark --out bench/verification.json
+```
+
+This is the corpus to drive to 100%, because it is the one where 100% means
+something: a wrong answer is visible. `semanticTests` cannot be driven to 100%
+by anyone, because it is a catalogue of language features and most of them are
+outside any abstraction mulu will have.
+
+**mulu does not yet score on it**, and the harness does not pretend to. What
+it measures today is how far each contract gets — compiled, lowered, modelled
+— because the properties are revert conditions over an entrypoint's arguments
+and the storage it reads, and mulu's specification language holds only state
+invariants at the end of a successful transaction. Scoring waits on that.
+
+What the histogram says to implement, in the order the corpus asks for it:
+
+| cases | what stops it |
+| --- | --- |
+| 20 | a constructor writing something other than a constant, such as `owner = msg.sender` |
+| 11 | a guard against a value read from a mapping, which no argument region decides |
+| 8 | an argument that is not a numeric word: `string`, `bytes32` |
+
 ## What the corpus said, 2026-09-07
 
 | run | modelled / in scope | what changed |
@@ -64,6 +99,7 @@ them for it would flatter.
 | | 28.1% | **an exponential removed**: `and` evaluated each side twice |
 | | 28.2% | a branch over a parameter refines the partition |
 | | **28.3%** | a call made for its value is followed when finding what is reachable |
+| latest | 28.4% | `call` is modelled, under a stated no-reentrancy assumption |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every

@@ -87,8 +87,22 @@ pub struct Expectation {
     pub reverts: bool,
 }
 
+/// Which corpus a case came from. The two ask different questions, and the
+/// rules for "out of scope" differ with the question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Kind {
+    /// solc's `semanticTests`: how much Solidity can mulu read?
+    SemanticTests,
+    /// `contracts-verification-benchmark`: contracts with a published answer
+    /// key. There is no call footer here; the expectations live in a
+    /// `ground-truth.csv` beside the sources.
+    VerificationBenchmark,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Case {
+    pub kind: Kind,
     pub path: PathBuf,
     /// Path relative to the corpus root, which is what a report names.
     pub name: String,
@@ -121,7 +135,10 @@ impl Case {
                 }
             }
         }
-        if self.expectations.is_empty() {
+        // A semantic test with no calls pins nothing, so measuring against
+        // it says nothing. The verification benchmark has no call footers at
+        // all: what it pins is in `ground-truth.csv`.
+        if self.kind == Kind::SemanticTests && self.expectations.is_empty() {
             return Some("no calls to make");
         }
         None
@@ -193,7 +210,75 @@ pub fn load(root: &Path) -> anyhow::Result<Vec<Case>> {
             .to_string_lossy()
             .to_string();
         let sources = split_sources(&source);
-        cases.push(Case { path, name, source, expectations, directives, sources });
+        cases.push(Case {
+            kind: Kind::SemanticTests,
+            path,
+            name,
+            source,
+            expectations,
+            directives,
+            sources,
+        });
+    }
+    Ok(cases)
+}
+
+/// `contracts-verification-benchmark`: `contracts/<use case>/versions/*.sol`,
+/// one file per version, with `v1` conforming to the specification and the
+/// rest carrying a seeded defect. `ground-truth.csv` beside them says, for
+/// each (property, version), whether the property holds.
+///
+/// The versions import from a shared `lib/` two directories up, so every
+/// case carries those sources with it under the path the import names.
+pub fn load_verification_benchmark(root: &Path) -> anyhow::Result<Vec<Case>> {
+    let lib_dir = root.join("lib");
+    let mut lib: Vec<(String, String)> = vec![];
+    if lib_dir.is_dir() {
+        let mut names: Vec<PathBuf> = std::fs::read_dir(&lib_dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "sol"))
+            .collect();
+        names.sort();
+        for p in names {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            lib.push((format!("lib/{name}"), std::fs::read_to_string(&p)?));
+        }
+    }
+
+    let contracts = root.join("contracts");
+    let mut use_cases: Vec<PathBuf> = match std::fs::read_dir(&contracts) {
+        Ok(d) => d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_dir()).collect(),
+        Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", contracts.display())),
+    };
+    use_cases.sort();
+
+    let mut cases = vec![];
+    for uc in use_cases {
+        let versions = uc.join("versions");
+        if !versions.is_dir() {
+            continue;
+        }
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&versions)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "sol"))
+            .collect();
+        files.sort();
+        let use_case = uc.file_name().unwrap_or_default().to_string_lossy().to_string();
+        for path in files {
+            let source = std::fs::read_to_string(&path)?;
+            let file = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let mut sources = vec![(file.clone(), source.clone())];
+            sources.extend(lib.iter().cloned());
+            cases.push(Case {
+                kind: Kind::VerificationBenchmark,
+                name: format!("{use_case}/{file}"),
+                path,
+                source,
+                expectations: vec![],
+                directives: vec![],
+                sources,
+            });
+        }
     }
     Ok(cases)
 }
