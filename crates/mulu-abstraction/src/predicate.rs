@@ -93,14 +93,12 @@ impl Predicate {
     /// Decide the predicate on a region of the variable's domain.
     /// `None` means the region straddles the boundary, which cannot happen
     /// once the region partition has been refined by this predicate.
-    pub fn decide(&self, var: &str, region: &IntervalSet) -> Option<bool> {
+    pub fn decide(&self, env: &crate::value::Env) -> Option<bool> {
         match self {
             Predicate::True => Some(true),
             Predicate::False => Some(false),
             Predicate::Over { var: v, set } => {
-                if v != var {
-                    return None;
-                }
+                let Some(region) = env.get(v) else { return None };
                 if region.subset_of(set) {
                     Some(true)
                 } else if region.disjoint_from(set) {
@@ -372,12 +370,12 @@ mod tests {
     #[test]
     fn deciding_a_predicate_on_a_region() {
         let a = tr("iszero(gt(x, 100))", &["x"]).unwrap();
-        assert_eq!(a.decide("x", &IntervalSet::le(u(100))), Some(true));
-        assert_eq!(a.decide("x", &IntervalSet::range(u(101), u(1000))), Some(false));
+        assert_eq!(a.decide(&crate::value::env_of("x", &IntervalSet::le(u(100)))), Some(true));
+        assert_eq!(a.decide(&crate::value::env_of("x", &IntervalSet::range(u(101), u(1000)))), Some(false));
         // straddling the boundary is undecided, never a guess
-        assert_eq!(a.decide("x", &IntervalSet::le(u(200))), None);
+        assert_eq!(a.decide(&crate::value::env_of("x", &IntervalSet::le(u(200)))), None);
         // a predicate over another variable says nothing about this one
-        assert_eq!(a.decide("y", &IntervalSet::le(u(100))), None);
+        assert_eq!(a.decide(&crate::value::env_of("y", &IntervalSet::le(u(100)))), None);
     }
 
     #[test]

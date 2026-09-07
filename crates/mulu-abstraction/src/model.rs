@@ -82,14 +82,40 @@ struct Entry {
     solidity_name: String,
     signature: String,
     func: String,
-    param: Option<String>,
-    /// The ABI type of the single argument, if there is one.
-    param_type: Option<String>,
-    /// The values that argument can take. docs/11 §5 admits type-correct
-    /// calls only, so this is the domain the abstraction may reason over.
-    domain: IntervalSet,
+    /// Every parameter, in order. This was one `Option<String>`: a function
+    /// of two arguments had nothing for the abstraction to be a function of.
+    params: Vec<Param>,
     /// The 4-byte selector, which is unique where a name need not be.
     selector: String,
+}
+
+#[derive(Debug, Clone)]
+struct Param {
+    /// The Yul variable the body reads it through.
+    name: String,
+    /// The ABI type, which fixes the domain.
+    ty: String,
+    /// The values it can take. docs/11 §5 admits type-correct calls only, so
+    /// this is the domain the abstraction may reason over.
+    domain: IntervalSet,
+}
+
+impl Entry {
+    /// The values every argument can take at once, which is what a guard is
+    /// decided against before any region is chosen.
+    fn domains(&self) -> crate::value::Env {
+        self.params.iter().map(|p| (p.name.clone(), p.domain.clone())).collect()
+    }
+
+    /// The widest single domain, for the places that still summarise the
+    /// call by one set (predicate translation over the body's parameters).
+    fn widest(&self) -> IntervalSet {
+        self.params
+            .iter()
+            .map(|p| p.domain.clone())
+            .reduce(|a, b| if a.subset_of(&b) { b } else { a })
+            .unwrap_or_else(IntervalSet::full)
+    }
 }
 
 /// The ABI parameter types of a signature: `setLimit(uint256)` -> `[uint256]`.
@@ -230,14 +256,6 @@ impl<'a> Builder<'a> {
                 ));
                 continue;
             };
-            if f.parameters.len() > 1 {
-                self.refuse(format!(
-                    "entrypoint {} takes {} parameters; P1a models at most one uint256 argument",
-                    e.signature,
-                    f.parameters.len()
-                ));
-                continue;
-            }
             if !f.effects.supported() {
                 self.refuse(format!(
                     "entrypoint {} reaches {:?}, which P1a does not model",
@@ -258,17 +276,23 @@ impl<'a> Builder<'a> {
                 ));
                 continue;
             }
-            let param_type = abi_params.first().cloned();
-            let domain = match &param_type {
-                Some(t) => match crate::types::domain_of(t) {
-                    Ok(d) => d,
+            let mut params = Vec::new();
+            let mut bad = false;
+            for (ty, name) in abi_params.iter().zip(f.parameters.iter()) {
+                match crate::types::domain_of(ty) {
+                    Ok(domain) => {
+                        params.push(Param { name: name.clone(), ty: ty.clone(), domain })
+                    }
                     Err(why) => {
                         self.refuse(format!("entrypoint {}: {why}", e.signature));
-                        continue;
+                        bad = true;
+                        break;
                     }
-                },
-                None => IntervalSet::full(),
-            };
+                }
+            }
+            if bad {
+                continue;
+            }
             out.push(Entry {
                 solidity_name: f
                     .solidity_name
@@ -276,9 +300,7 @@ impl<'a> Builder<'a> {
                     .unwrap_or_else(|| f.id.clone()),
                 signature: e.signature.clone(),
                 func: f.id.clone(),
-                param: f.parameters.first().cloned(),
-                param_type,
-                domain,
+                params,
                 selector: e.selector.clone(),
             });
         }
@@ -397,7 +419,7 @@ impl<'a> Builder<'a> {
             for fname in self.reachable(&e.func) {
                 let Some(f) = self.ir.function(&fname) else { continue };
                 let f = f.clone();
-                let g = self.guards(&f, &e.domain);
+                let g = self.guards(&f, &e.widest());
                 for (id, p) in &g {
                     let set = p.set();
                     if !set.is_full() && !set.is_empty() && !arg_sets.iter().any(|(n, _)| n == id) {
@@ -447,22 +469,20 @@ impl<'a> Builder<'a> {
         // region is wholly inside or wholly outside the values a given
         // entrypoint can receive.
         for e in &entries {
-            if e.domain.is_full() {
-                continue;
-            }
-            let id = format!("type:{}", e.signature);
-            if !arg_sets.iter().any(|(n, _)| *n == id) {
-                arg_preds.push(PredicateInfo {
-                    id: id.clone(),
-                    source: format!("the ABI type of {}", e.signature),
-                    text: format!(
-                        "the argument of {} is {}",
-                        e.signature,
-                        e.param_type.clone().unwrap_or_default()
-                    ),
-                    set: e.domain.clone(),
-                });
-                arg_sets.push((id, e.domain.clone()));
+            for p in &e.params {
+                if p.domain.is_full() {
+                    continue;
+                }
+                let id = format!("type:{}", p.ty);
+                if !arg_sets.iter().any(|(n, _)| *n == id) {
+                    arg_preds.push(PredicateInfo {
+                        id: id.clone(),
+                        source: format!("the ABI type {} of an argument of {}", p.ty, e.signature),
+                        text: format!("the argument is {}", p.ty),
+                        set: p.domain.clone(),
+                    });
+                    arg_sets.push((id, p.domain.clone()));
+                }
             }
         }
         let (arg_regions, infeasible) = Self::partition(&arg_sets);
@@ -736,21 +756,26 @@ impl<'a> Walk<'a> {
         let entries = std::mem::take(&mut self.entries);
         for e in &entries {
             for s in &storage_regions {
-                let regions: Vec<Option<usize>> = match e.param {
-                    // Only the regions this entrypoint's type can receive.
-                    Some(_) => (0..self.arg_regions.len())
-                        .filter(|i| self.arg_regions[*i].subset_of(&e.domain))
-                        .map(Some)
-                        .collect(),
-                    None => vec![None],
-                };
-                for a in regions {
+                // One choice of region per parameter, so the walk covers
+                // the product. A parameter admits only the regions its type
+                // can receive, which is what keeps the product from being
+                // the whole partition raised to the arity.
+                let per_param: Vec<Vec<usize>> = e
+                    .params
+                    .iter()
+                    .map(|p| {
+                        (0..self.arg_regions.len())
+                            .filter(|i| self.arg_regions[*i].subset_of(&p.domain))
+                            .collect()
+                    })
+                    .collect();
+                for a in product(&per_param) {
                     // One walk feeds both models, so their states line up and
                     // the pairing in `sites` means what it says.
-                    match self.trace(e, a, s) {
+                    match self.trace(e, &a, s) {
                         Ok(t) => {
-                            self.emit_impl(e, a, s, &t);
-                            self.emit_plant(e, a, s, &t);
+                            self.emit_impl(e, &a, s, &t);
+                            self.emit_plant(e, &a, s, &t);
                         }
                         Err(why) => self.b.refuse(format!("{}: {why}", e.signature)),
                     }
@@ -853,7 +878,7 @@ impl<'a> Walk<'a> {
                     model_name: e.solidity_name.clone(),
                     signature: e.signature.clone(),
                     selector: e.selector.clone(),
-                    param_type: e.param_type.clone(),
+                    param_type: e.params.first().map(|p| p.ty.clone()),
                 })
                 .collect(),
             entrypoints_modelled: entries.iter().map(|e| e.signature.clone()).collect(),
@@ -905,14 +930,12 @@ impl<'a> Walk<'a> {
     fn trace(
         &mut self,
         e: &Entry,
-        arg: Option<usize>,
+        args: &[usize],
         entry_storage: &StorageRegion,
     ) -> Result<Trace, String> {
         const MAX_DEPTH: usize = 32;
         const MAX_STEPS: usize = 10_000;
 
-        let arg_set = arg.map(|a| self.arg_regions[a].clone());
-        let region = arg_set.clone().unwrap_or_else(IntervalSet::full);
         let mut storage = entry_storage.clone();
         let mut steps: Vec<Step> = Vec::new();
         let mut seen_checks: Vec<String> = Vec::new();
@@ -920,7 +943,12 @@ impl<'a> Walk<'a> {
             func: e.func.clone(),
             block: 0,
             index: 0,
-            arg_var: e.param.clone(),
+            env: e
+                .params
+                .iter()
+                .zip(args.iter())
+                .map(|(p, a)| (p.name.clone(), self.arg_regions[*a].clone()))
+                .collect(),
             visited: BTreeSet::new(),
         }];
         let mut n = 0usize;
@@ -931,9 +959,9 @@ impl<'a> Walk<'a> {
                 return Err("the abstract execution did not terminate within the step limit".into());
             }
             let depth = frames.len();
-            let (func, block, index, arg_var) = {
+            let (func, block, index, env) = {
                 let fr = frames.last().expect("a frame");
-                (fr.func.clone(), fr.block, fr.index, fr.arg_var.clone())
+                (fr.func.clone(), fr.block, fr.index, fr.env.clone())
             };
             let f = self.b.ir.function(&func).ok_or("no such function")?.clone();
             let blk = f.block(block).clone();
@@ -943,13 +971,12 @@ impl<'a> Walk<'a> {
                 let ins = &blk.instructions[index];
 
                 if let Some(c) = self.check_at(&f, block, index, ins) {
-                    let guards = self.guards_of(&f, &e.domain);
+                    let guards = self.guards_of(&f, &e.widest());
                     let Some(p) = guards.get(&c.id) else {
                         return Err(format!("check {} could not be turned into a predicate", c.id));
                     };
-                    let var = arg_var.clone().unwrap_or_default();
-                    let passes = p.decide(&var, &region).ok_or_else(|| {
-                        format!("check {} is not decided by the argument region {region}", c.id)
+                    let passes = p.decide(&env).ok_or_else(|| {
+                        format!("check {} is not decided by the argument regions {}", c.id, show(&env))
                     })?;
                     steps.push(Step::Check {
                         id: c.id.clone(),
@@ -963,7 +990,7 @@ impl<'a> Walk<'a> {
 
                 if let Some(w) = ins.storage_write.clone() {
                     let (slot_idx, slot_label) = self.slot_of(&w.slot_text)?;
-                    let values = crate::value::value_set(&w.value, arg_var.as_deref(), &region)
+                    let values = crate::value::value_set(&w.value, &env)
                         .map_err(|why| {
                             format!("the value written to {slot_label} is {}: {why}", w.value_text)
                         })?;
@@ -984,12 +1011,12 @@ impl<'a> Walk<'a> {
                             if depth >= MAX_DEPTH {
                                 return Err(format!("call depth limit reached at {callee}"));
                             }
-                            let inner_var = bind_argument(g, &args, arg_var.as_deref())?;
+                            let inner = bind_arguments(g, &args, &env)?;
                             frames.push(Frame {
                                 func: callee,
                                 block: 0,
                                 index: 0,
-                                arg_var: inner_var,
+                                env: inner,
                                 visited: BTreeSet::new(),
                             });
                             continue;
@@ -1024,18 +1051,18 @@ impl<'a> Walk<'a> {
                     // no redundancy verdict, and no control site to
                     // parameterise it out of the plant.
                     if let Some(c) = self.branch_check(&f, block) {
-                        let guards = self.guards_of(&f, &e.domain);
+                        let guards = self.guards_of(&f, &e.widest());
                         let Some(p) = guards.get(&c.id) else {
                             return Err(format!(
                                 "check {} could not be turned into a predicate",
                                 c.id
                             ));
                         };
-                        let var = arg_var.clone().unwrap_or_default();
-                        let passes = p.decide(&var, &region).ok_or_else(|| {
+                        let passes = p.decide(&env).ok_or_else(|| {
                             format!(
-                                "check {} is not decided by the argument region {region}",
-                                c.id
+                                "check {} is not decided by the argument regions {}",
+                                c.id,
+                                show(&env)
                             )
                         })?;
                         steps.push(Step::Check {
@@ -1060,14 +1087,13 @@ impl<'a> Walk<'a> {
                         fr.index = 0;
                         continue;
                     }
-                    let p = crate::predicate::translate_in(cond, &f.parameters, &e.domain)
+                    let p = crate::predicate::translate_in(cond, &f.parameters, &e.widest())
                         .map_err(|w| {
                         format!("a branch condition is outside the P1a fragment: {w}")
                     })?;
-                    let var = arg_var.clone().unwrap_or_default();
                     let taken = p
-                        .decide(&var, &region)
-                        .ok_or("a branch is not decided by the argument region")?;
+                        .decide(&env)
+                        .ok_or("a branch is not decided by the argument regions")?;
                     let target = if taken { *then_block } else { *else_block };
                     let fr = frames.last_mut().unwrap();
                     if !fr.visited.insert((target, 0)) {
@@ -1101,7 +1127,7 @@ impl<'a> Walk<'a> {
     fn emit_impl(
         &mut self,
         e: &Entry,
-        arg: Option<usize>,
+        arg: &[usize],
         entry_storage: &StorageRegion,
         t: &Trace,
     ) {
@@ -1181,7 +1207,7 @@ impl<'a> Walk<'a> {
     fn emit_plant(
         &mut self,
         e: &Entry,
-        arg: Option<usize>,
+        arg: &[usize],
         entry_storage: &StorageRegion,
         t: &Trace,
     ) {
@@ -1273,29 +1299,39 @@ impl<'a> Walk<'a> {
         self.plant_finish(&rev, entry_storage, false);
     }
 
-    fn suffix(&self, _e: &Entry, arg: Option<usize>, s: &StorageRegion) -> String {
-        match arg {
-            Some(a) => format!("{}_{}", self.arg_name(a), self.storage_name(s)),
-            None => self.storage_name(s),
+    /// The part of a state's name that says which call it is: one region
+    /// name per argument, then the storage region. With no arguments it is
+    /// just the storage, as before.
+    fn suffix(&self, _e: &Entry, arg: &[usize], s: &StorageRegion) -> String {
+        if arg.is_empty() {
+            return self.storage_name(s);
         }
+        let a: Vec<String> = arg.iter().map(|i| self.arg_name(*i)).collect();
+        format!("{}_{}", a.join("."), self.storage_name(s))
     }
 
-    fn call_event(&mut self, e: &Entry, arg: Option<usize>) -> String {
+    fn call_event(&mut self, e: &Entry, arg: &[usize]) -> String {
         // `#` cannot occur in a Solidity identifier, so the entrypoint and the
         // region it is called with stay separable. Joining them with `_` let a
         // function actually named `f_X0` share an event with `f` called on
         // region X0, and one event with two targets is not a model the
         // supervisory-control core accepts.
-        let id = match arg {
-            Some(a) => format!("call_{}#{}", e.solidity_name, self.arg_name(a)),
-            None => format!("call_{}", e.solidity_name),
+        let id = if arg.is_empty() {
+            format!("call_{}", e.solidity_name)
+        } else {
+            let a: Vec<String> = arg.iter().map(|i| self.arg_name(*i)).collect();
+            format!("call_{}#{}", e.solidity_name, a.join("."))
         };
-        let desc = match arg {
-            Some(a) => format!(
-                "CallRequest({}, argument in {})",
-                e.signature, self.arg_regions[a]
-            ),
-            None => format!("CallRequest({})", e.signature),
+        let desc = if arg.is_empty() {
+            format!("CallRequest({})", e.signature)
+        } else {
+            let parts: Vec<String> = e
+                .params
+                .iter()
+                .zip(arg.iter())
+                .map(|(p, i)| format!("{} in {}", p.name, self.arg_regions[*i]))
+                .collect();
+            format!("CallRequest({}, {})", e.signature, parts.join(", "))
         };
         self.event(&id, &desc)
     }
@@ -1520,7 +1556,8 @@ struct Frame {
     block: usize,
     index: usize,
     /// The name denoting the abstract argument inside this activation.
-    arg_var: Option<String>,
+    /// What this frame knows: parameter name to the values it can take.
+    env: crate::value::Env,
     visited: BTreeSet<(usize, usize)>,
 }
 
@@ -1539,35 +1576,57 @@ fn statement_call(ins: &mulu_yul::ir::Instruction) -> Option<(String, Vec<mulu_y
 /// P1a carries a single uint256 argument, so a call may pass it along
 /// unchanged or pass none of it. Anything else, such as a computed value,
 /// would need the argument partition to be re-derived and is refused.
-fn bind_argument(
+/// What the callee knows, from what the caller knows.
+///
+/// Each argument expression is evaluated in the caller's environment and
+/// bound to the callee's parameter of the same position. This replaced a rule
+/// that could bind exactly one parameter, to exactly the entrypoint argument,
+/// passed by name and nothing else. A call like `capped(x + 1)` had no way to
+/// be described; now it is described whenever `value_set` can evaluate it.
+///
+/// A parameter whose argument does not evaluate is simply not bound. The walk
+/// then refuses any guard that needs it, by name, rather than here.
+fn bind_arguments(
     callee: &Function,
     args: &[mulu_yul::Expr],
-    caller_arg: Option<&str>,
-) -> Result<Option<String>, String> {
-    let mut bound = None;
+    caller: &crate::value::Env,
+) -> Result<crate::value::Env, String> {
+    let mut env = crate::value::Env::new();
     for (i, a) in args.iter().enumerate() {
         let Some(param) = callee.parameters.get(i) else { break };
-        match (&a, caller_arg) {
-            (mulu_yul::Expr::Ident { name, .. }, Some(outer)) if name == outer => {
-                if bound.is_some() {
-                    return Err(format!(
-                        "{} receives the argument in two parameters; P1a models one",
-                        callee.id
-                    ));
-                }
-                bound = Some(param.clone());
-            }
-            (mulu_yul::Expr::Literal { .. }, _) => {}
-            (mulu_yul::Expr::Ident { .. }, _) | (mulu_yul::Expr::Call { .. }, _) => {
-                return Err(format!(
-                    "{} is called with {}, which P1a cannot relate to the entrypoint argument",
-                    callee.id,
-                    a.render()
-                ))
-            }
+        if let Ok(set) = crate::value::value_set(a, caller) {
+            env.insert(param.clone(), set);
         }
     }
-    Ok(bound)
+    Ok(env)
+}
+
+/// Every way of picking one item from each list, in a stable order. With no
+/// lists there is one choice: the empty one, which is a call with no
+/// arguments.
+fn product(per: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let mut out = vec![vec![]];
+    for choices in per {
+        let mut next = Vec::new();
+        for prefix in &out {
+            for c in choices {
+                let mut v = prefix.clone();
+                v.push(*c);
+                next.push(v);
+            }
+        }
+        out = next;
+    }
+    out
+}
+
+/// Environments in a message, so a refusal names what was known.
+fn show(env: &crate::value::Env) -> String {
+    if env.is_empty() {
+        return "{}".into();
+    }
+    let v: Vec<String> = env.iter().map(|(k, s)| format!("{k} in {s}")).collect();
+    format!("{{{}}}", v.join(", "))
 }
 
 fn instruction_calls(ins: &mulu_yul::ir::Instruction, name: Option<&str>) -> bool {
@@ -1594,9 +1653,14 @@ mod tests {
             solidity_name: name.into(),
             signature: sig.into(),
             func: format!("fun_{name}"),
-            param: Some("x".into()),
-            param_type: signature_params(sig).first().cloned(),
-            domain: IntervalSet::full(),
+            params: signature_params(sig)
+                .iter()
+                .map(|t| Param {
+                    name: "x".into(),
+                    ty: t.clone(),
+                    domain: IntervalSet::full(),
+                })
+                .collect(),
             selector: selector.into(),
         }
     }

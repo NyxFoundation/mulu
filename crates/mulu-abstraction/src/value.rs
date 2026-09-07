@@ -13,19 +13,31 @@ use crate::interval::{IntervalSet, U256};
 use mulu_yul::Expr;
 
 /// The set of values `e` can produce when `var` ranges over `region`.
-pub fn value_set(e: &Expr, var: Option<&str>, region: &IntervalSet) -> Result<IntervalSet, String> {
+/// What the walk knows about the variables in scope: each name maps to the
+/// values it can take in the region being walked.
+///
+/// This replaced a single `(name, region)` pair. One entrypoint argument was
+/// the only thing the abstraction could name, so a function of two arguments
+/// had nothing to be a function of, and an internal call could pass the
+/// argument to exactly one parameter. An environment is the same idea with
+/// the arity taken out of it.
+pub type Env = std::collections::BTreeMap<String, IntervalSet>;
+
+/// One binding, for a caller that has only one thing to say.
+pub fn env_of(name: &str, set: &IntervalSet) -> Env {
+    Env::from([(name.to_string(), set.clone())])
+}
+
+pub fn value_set(e: &Expr, env: &Env) -> Result<IntervalSet, String> {
     match e {
         Expr::Literal { text, .. } => {
             let v = crate::interval::parse_decimal(text)?;
             Ok(IntervalSet::point(v))
         }
-        Expr::Ident { name, .. } => {
-            if Some(name.as_str()) == var {
-                Ok(region.clone())
-            } else {
-                Err(format!("`{name}` is not the argument, so its value is unknown here"))
-            }
-        }
+        Expr::Ident { name, .. } => match env.get(name) {
+            Some(set) => Ok(set.clone()),
+            None => Err(format!("`{name}` is not a value the walk knows here")),
+        },
         Expr::Call { name, args, .. } => match (name.as_str(), args.len()) {
             // A mask that covers everything the inner expression can produce
             // leaves it alone. Solidity's narrowing cleanups are this shape.
@@ -38,7 +50,7 @@ pub fn value_set(e: &Expr, var: Option<&str>, region: &IntervalSet) -> Result<In
                         return Err("`and` of two non-literals is outside the P1a fragment".into())
                     }
                 };
-                let set = value_set(inner, var, region)?;
+                let set = value_set(inner, env)?;
                 let covered = full_mask_set(mask).ok_or_else(|| {
                     format!("the mask 0x{mask:x} is not a low-bit mask; P1a does not model it")
                 })?;
@@ -51,8 +63,8 @@ pub fn value_set(e: &Expr, var: Option<&str>, region: &IntervalSet) -> Result<In
                     ))
                 }
             }
-            ("or", 2) if mask_of(&args[0]) == Some(U256::ZERO) => value_set(&args[1], var, region),
-            ("or", 2) if mask_of(&args[1]) == Some(U256::ZERO) => value_set(&args[0], var, region),
+            ("or", 2) if mask_of(&args[0]) == Some(U256::ZERO) => value_set(&args[1], env),
+            ("or", 2) if mask_of(&args[1]) == Some(U256::ZERO) => value_set(&args[0], env),
             (other, _) => Err(format!(
                 "`{other}` in a stored value is outside the P1a fragment"
             )),
@@ -98,40 +110,40 @@ mod tests {
     fn the_argument_passes_through_a_cleanup_for_its_own_type() {
         // `reading = x` with x : uint8 lowers to and(x, 0xff)
         let dom = crate::types::domain_of("uint8").unwrap();
-        let got = value_set(&e("and(var_x, 0xff)"), Some("var_x"), &dom).unwrap();
+        let got = value_set(&e("and(var_x, 0xff)"), &env_of("var_x", &dom)).unwrap();
         assert_eq!(got, dom);
         // a narrower region survives too
         let narrow = IntervalSet::le(u(100));
-        assert_eq!(value_set(&e("and(var_x, 0xff)"), Some("var_x"), &narrow).unwrap(), narrow);
+        assert_eq!(value_set(&e("and(var_x, 0xff)"), &env_of("var_x", &narrow)).unwrap(), narrow);
     }
 
     #[test]
     fn a_mask_that_really_truncates_is_refused() {
         // a uint256 argument through a uint8 mask is not the argument
         let full = IntervalSet::full();
-        let err = value_set(&e("and(var_x, 0xff)"), Some("var_x"), &full).unwrap_err();
+        let err = value_set(&e("and(var_x, 0xff)"), &env_of("var_x", &full)).unwrap_err();
         assert!(err.contains("truncates"), "{err}");
     }
 
     #[test]
     fn literals_and_the_bare_argument() {
         let r = IntervalSet::range(u(10), u(20));
-        assert_eq!(value_set(&e("var_x"), Some("var_x"), &r).unwrap(), r);
-        assert_eq!(value_set(&e("0x2a"), Some("var_x"), &r).unwrap(), IntervalSet::point(u(42)));
-        assert_eq!(value_set(&e("42"), None, &r).unwrap(), IntervalSet::point(u(42)));
-        assert!(value_set(&e("other"), Some("var_x"), &r).is_err());
+        assert_eq!(value_set(&e("var_x"), &env_of("var_x", &r)).unwrap(), r);
+        assert_eq!(value_set(&e("0x2a"), &env_of("var_x", &r)).unwrap(), IntervalSet::point(u(42)));
+        assert_eq!(value_set(&e("42"), &Env::new()).unwrap(), IntervalSet::point(u(42)));
+        assert!(value_set(&e("other"), &env_of("var_x", &r)).is_err());
     }
 
     #[test]
     fn only_low_bit_masks_count_as_cleanups() {
         let dom = IntervalSet::le(u(255));
         // 0xf0 is not 2^n - 1
-        let err = value_set(&e("and(var_x, 0xf0)"), Some("var_x"), &dom).unwrap_err();
+        let err = value_set(&e("and(var_x, 0xf0)"), &env_of("var_x", &dom)).unwrap_err();
         assert!(err.contains("not a low-bit mask"), "{err}");
         // the full word mask covers everything
         let full = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
         assert_eq!(
-            value_set(&e(&format!("and(var_x, {full})")), Some("var_x"), &IntervalSet::full()).unwrap(),
+            value_set(&e(&format!("and(var_x, {full})")), &env_of("var_x", &IntervalSet::full())).unwrap(),
             IntervalSet::full()
         );
     }
@@ -140,7 +152,7 @@ mod tests {
     fn an_address_cleanup_is_the_identity_on_addresses() {
         let dom = crate::types::domain_of("address").unwrap();
         let mask = "0xffffffffffffffffffffffffffffffffffffffff";
-        let got = value_set(&e(&format!("and(var_a, {mask})")), Some("var_a"), &dom).unwrap();
+        let got = value_set(&e(&format!("and(var_a, {mask})")), &env_of("var_a", &dom)).unwrap();
         assert_eq!(got, dom);
     }
 
@@ -148,7 +160,7 @@ mod tests {
     fn arithmetic_is_not_evaluated_it_is_refused() {
         let r = IntervalSet::le(u(100));
         for expr in ["add(var_x, 1)", "mul(var_x, 2)", "sload(0)", "shr(1, var_x)"] {
-            assert!(value_set(&e(expr), Some("var_x"), &r).is_err(), "{expr}");
+            assert!(value_set(&e(expr), &env_of("var_x", &r)).is_err(), "{expr}");
         }
     }
 }

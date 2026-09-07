@@ -77,9 +77,12 @@ fn the_narrow_entrypoint_cannot_break_a_bound_it_has_no_room_for() {
         !to_bad.iter().any(|s| s.starts_with("record")),
         "record reached bad: {to_bad:?}"
     );
-    // and the interval arithmetic recorded why
+    // and the interval arithmetic recorded why. The predicate is keyed by
+    // the type rather than by the entrypoint: two entrypoints taking a
+    // `uint8` constrain the partition the same way, and keying by signature
+    // made two identical predicates out of that.
     assert!(
-        a.report.discharged.iter().any(|d| d.contains("type:record(uint8)")),
+        a.report.discharged.iter().any(|d| d.contains("type:uint8")),
         "{:?}",
         a.report.discharged
     );
