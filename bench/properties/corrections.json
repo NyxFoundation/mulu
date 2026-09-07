@@ -27,7 +27,7 @@
       "shipped": true,
       "corrected": false,
       "test": "test_ztb7_deposit_reverts_on_overflow",
-      "why": "`deposit` is byte-identical in v1 through v7 and the key says the property fails in v1 through v6, where the reason given is overflow. It overflows in v7 too."
+      "why": "`deposit` is byte-identical in v1, v2, v3 and v7 (the body hashes to the same value in all four), and the key says the property fails in v1, v2 and v3 and holds in v7. The same function cannot both revert and never revert, so this row is not a matter of encoding or of judgement: the key contradicts itself, and no tool can score all seven versions of this property against it."
     }
   ]
 }

@@ -69,9 +69,16 @@ depend on that half either way.
 
 `ground-truth.csv` says `0` for v1 through v6 and `1` for v7. The property is
 "a `deposit(amount)` call never reverts", and the footnote for v1 gives the
-reason as *reverts if overflow*. `deposit` is byte-identical in all seven
-versions: v7's diff against v1 adds `created_block`, a constructor, and one
-`require` in `withdraw`. It overflows in v7 too.
+reason as *reverts if overflow*.
+
+`deposit` is **byte-identical in v1, v2, v3 and v7**: the four bodies hash to
+the same value, and v7's diff against v1 adds `created_block`, a constructor
+and one `require` in `withdraw`, none of which `deposit` touches. So this row
+is not a matter of encoding or of judgement. The same function cannot both
+revert and never revert, and no tool can score all seven versions of this
+property against the key as it stands.
+
+For completeness, it does overflow in v7:
 
 ```solidity
 ZeroTokenBank b = new ZeroTokenBank();
