@@ -39,7 +39,10 @@ them for it would flatter.
 | | 24.5% | an environment, so a function may take several arguments |
 | | 34.5% | a `let` binds what it defines, and `sload` resolves |
 | | 34.7% | a guard may be over a local, and over two of them |
-| | **35.0%** | a switch, interval arithmetic, a condition evaluated |
+| | 35.0% | a switch, interval arithmetic, a condition evaluated |
+| | **25.0%** | **a soundness regression found and reverted** |
+| | 25.5% | a call that defines a value is entered, not skipped |
+| | **25.6%** | memory word 64, and a slot passed as a parameter |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every
@@ -52,6 +55,16 @@ Nothing bound them, so every local was unknown, and a guard over a local was
 "not the argument" even where the local *was* the argument one line later. It
 is not a feature anyone would have put on a roadmap; the corpus found it.
 
+**Then ten points came back off, on purpose.** Binding a definition and moving
+on skipped the safety net for an instruction that can revert, so a `let` whose
+value reverts was passed over and the revert path was dropped from the model.
+That is the exact hole the net exists to stop, and it was worth ten points of
+score. Only definitions that compute are bound now. Some of those points came
+back the right way: a call that defines a value is entered like one made as a
+statement, so its checks are seen and its results are bound on the way out.
+A number that goes down because the tool got more correct is the number to
+publish.
+
 Why the rest stop, ranked:
 
 | count | reason | whose |
@@ -63,10 +76,11 @@ Why the rest stop, ranked:
 | 31 | reaches `call` or `staticcall` | out of the P1a subset |
 | 12 | the ABI lists one parameter and the body takes two | a decoder that returns two |
 
-An array **read** models now: the bounds check is decided by comparing the
-index region against the length read from storage, and the module elaborates
-in the semantics. What is still missing is the array as a *storage fact*: a
-length that changes when something is pushed, and a write to an element whose
-slot is computed. That is what the top two rows are, and it is the next thing
-to decide about, because it adds a kind of fact rather than generalising one
-that is there.
+An array **read** with a constant index models, and the module elaborates in
+the semantics. An array read or write with a *symbolic* index does not, and
+this is a structural limit rather than a missing case: the guard is
+`index < length`, both sides are regions, and independent interval regions
+over two variables cannot decide a relation between them. Deciding it needs
+the partition to be over the pair, which is a different abstraction from the
+one that is there. That, and the array as a storage fact whose length changes,
+are what the top rows are.

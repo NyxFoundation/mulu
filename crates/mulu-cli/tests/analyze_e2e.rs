@@ -214,12 +214,11 @@ contract C is B {
     let unsupported = a["unsupported"].as_array().unwrap();
     assert!(!unsupported.is_empty());
     let joined = unsupported.iter().map(|u| u.as_str().unwrap()).collect::<Vec<_>>().join("\n");
-    // The safety net that matters: the walk stops rather than skipping.
-    // *Which* net catches it has moved twice as the abstraction learned to
-    // follow more, so the assertion is on the property rather than on the
-    // sentence: the guard the modifier applies is named, and the unit is not
-    // complete. Silently modelling `f` as a no-op is what must not happen.
-    assert!(joined.contains('A'), "the refusal must name the guard: {joined}");
+    // The property, not the sentence. Which net catches this has moved
+    // three times as the abstraction learned to follow more, and each move
+    // was an improvement; what must not change is that the entrypoint is
+    // refused and named, rather than modelled as a no-op.
+    assert!(joined.contains("f(uint256)"), "the refusal must name the entrypoint: {joined}");
     // and the model that was written out does not claim f is a no-op
     let model = json(&out.join("model.json"));
     let checks = model["checks"].as_array().unwrap();

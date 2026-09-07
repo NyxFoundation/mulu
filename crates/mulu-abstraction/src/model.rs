@@ -506,6 +506,11 @@ impl<'a> Builder<'a> {
              not by a solver, so no trusted-solver assumption is carried",
         );
         self.note(
+            "free-memory-pointer-at-0x80: the walk begins inside the entrypoint, so it starts \
+             where solc's dispatcher leaves memory word 64. Only constant addresses are tracked, \
+             and a store to a computed one drops all of them",
+        );
+        self.note(
             "typed-domains: each argument ranges over the values its ABI type admits and each \
              slot over the values its declared type admits, matching the profile's type-correct \
              calls rather than the whole machine word",
@@ -710,9 +715,13 @@ impl<'a> Walk<'a> {
         cond: &mulu_yul::Expr,
         env: &crate::value::Env,
         storage: &StorageRegion,
+        memory: &BTreeMap<U256, IntervalSet>,
     ) -> Option<bool> {
         let order = |a: &mulu_yul::Expr, b: &mulu_yul::Expr, strict: bool| -> Option<bool> {
-            let (l, r) = (self.eval(a, env, storage).ok()?, self.eval(b, env, storage).ok()?);
+            let (l, r) = (
+                self.eval(a, env, storage, memory).ok()?,
+                self.eval(b, env, storage, memory).ok()?,
+            );
             let ((llo, lhi), (rlo, rhi)) = (l.bounds()?, r.bounds()?);
             if if strict { lhi < rlo } else { lhi <= rlo } {
                 Some(true)
@@ -724,7 +733,7 @@ impl<'a> Walk<'a> {
         };
         let mulu_yul::Expr::Call { name, args, .. } = cond else {
             // A bare value is the condition: non-zero is true.
-            let set = self.eval(cond, env, storage).ok()?;
+            let set = self.eval(cond, env, storage, memory).ok()?;
             let zero = IntervalSet::point(U256::ZERO);
             return if set.disjoint_from(&zero) {
                 Some(true)
@@ -737,11 +746,11 @@ impl<'a> Walk<'a> {
         match (name.as_str(), args.len()) {
             ("lt", 2) => order(&args[0], &args[1], true),
             ("gt", 2) => order(&args[1], &args[0], true),
-            ("iszero", 1) => self.decide_cond(&args[0], env, storage).map(|b| !b),
+            ("iszero", 1) => self.decide_cond(&args[0], env, storage, memory).map(|b| !b),
             ("eq", 2) => {
                 let (l, r) = (
-                    self.eval(&args[0], env, storage).ok()?,
-                    self.eval(&args[1], env, storage).ok()?,
+                    self.eval(&args[0], env, storage, memory).ok()?,
+                    self.eval(&args[1], env, storage, memory).ok()?,
                 );
                 if l.disjoint_from(&r) {
                     Some(false)
@@ -753,16 +762,16 @@ impl<'a> Walk<'a> {
                 }
             }
             ("and", 2) => match (
-                self.decide_cond(&args[0], env, storage),
-                self.decide_cond(&args[1], env, storage),
+                self.decide_cond(&args[0], env, storage, memory),
+                self.decide_cond(&args[1], env, storage, memory),
             ) {
                 (Some(false), _) | (_, Some(false)) => Some(false),
                 (Some(true), Some(true)) => Some(true),
                 _ => None,
             },
             ("or", 2) => match (
-                self.decide_cond(&args[0], env, storage),
-                self.decide_cond(&args[1], env, storage),
+                self.decide_cond(&args[0], env, storage, memory),
+                self.decide_cond(&args[1], env, storage, memory),
             ) {
                 (Some(true), _) | (_, Some(true)) => Some(true),
                 (Some(false), Some(false)) => Some(false),
@@ -770,6 +779,29 @@ impl<'a> Walk<'a> {
             },
             _ => None,
         }
+    }
+
+    /// The single value an address expression denotes, if it denotes one.
+    ///
+    /// A slot is usually a literal, but solc passes it as a parameter to its
+    /// generated helpers: `array_length_T(array)` is `sload(array)` where
+    /// `array` is bound to the slot. Folding alone cannot see that; the
+    /// environment can.
+    fn address(
+        &self,
+        e: &mulu_yul::Expr,
+        env: &crate::value::Env,
+        storage: &StorageRegion,
+        memory: &BTreeMap<U256, IntervalSet>,
+    ) -> Option<U256> {
+        let folded = mulu_yul::fold::fold_fixpoint(e);
+        if let Some(v) = crate::value::constant(&folded) {
+            return Some(v);
+        }
+        // A set with one value in it is that value.
+        let set = self.eval(e, env, storage, memory).ok()?;
+        let (lo, hi) = set.bounds()?;
+        (lo == hi).then_some(lo)
     }
 
     /// `value_set`, plus the one thing it cannot know on its own: what a
@@ -780,11 +812,20 @@ impl<'a> Walk<'a> {
         e: &mulu_yul::Expr,
         env: &crate::value::Env,
         storage: &StorageRegion,
+        memory: &BTreeMap<U256, IntervalSet>,
     ) -> Result<IntervalSet, String> {
         if let mulu_yul::Expr::Call { name, args, .. } = e {
+            if name == "mload" && args.len() == 1 {
+                let Some(k) = self.address(&args[0], env, storage, memory) else {
+                    return Err("`mload` of a computed address is outside the P1a fragment".into());
+                };
+                return memory
+                    .get(&k)
+                    .cloned()
+                    .ok_or_else(|| format!("nothing is known about memory at {k}"));
+            }
             if name == "sload" && args.len() == 1 {
-                let slot = mulu_yul::fold::fold_fixpoint(&args[0]);
-                let Some(v) = crate::value::constant(&slot) else {
+                let Some(v) = self.address(&args[0], env, storage, memory) else {
                     return Err("`sload` of a computed slot is outside the P1a fragment".into());
                 };
                 let Ok(i) = usize::try_from(v) else {
@@ -1048,6 +1089,20 @@ impl<'a> Walk<'a> {
         const MAX_STEPS: usize = 10_000;
 
         let mut storage = entry_storage.clone();
+        // Memory at constant addresses. solc's allocator lives at word 64:
+        // the dispatcher writes `mstore(64, 0x80)`, every allocation reads it
+        // and writes it back, and the guard on the result is what stopped the
+        // walk in every contract with a memory array or struct. Only constant
+        // addresses are tracked, and a write to a computed one clears the map,
+        // because it could have landed anywhere.
+        let mut memory: BTreeMap<U256, IntervalSet> = BTreeMap::new();
+        // The walk starts inside the entrypoint, not at the dispatcher that
+        // called it, so the free pointer the dispatcher sets is not otherwise
+        // in scope. Every solc-generated dispatcher begins `mstore(64, 0x80)`,
+        // and the allocator's guard is on a value derived from it, so the
+        // walk starts where the dispatcher leaves it. Recorded as an
+        // assumption rather than assumed quietly.
+        memory.insert(U256::from(64u8), IntervalSet::point(U256::from(0x80u8)));
         let mut steps: Vec<Step> = Vec::new();
         let mut seen_checks: Vec<String> = Vec::new();
         let mut frames: Vec<Frame> = vec![Frame {
@@ -1060,6 +1115,7 @@ impl<'a> Walk<'a> {
                 .zip(args.iter())
                 .map(|(p, a)| (p.name.clone(), self.arg_regions[*a].clone()))
                 .collect(),
+            returns_to: vec![],
             visited: BTreeSet::new(),
         }];
         let mut n = 0usize;
@@ -1090,7 +1146,7 @@ impl<'a> Walk<'a> {
                     let passes = guards
                         .get(&c.id)
                         .and_then(|p| p.decide(&env))
-                        .or_else(|| self.decide_cond(&c.condition, &env, &storage))
+                        .or_else(|| self.decide_cond(&c.condition, &env, &storage, &memory))
                         .ok_or_else(|| {
                             format!(
                                 "check {} is not decided by the argument regions {}",
@@ -1128,12 +1184,46 @@ impl<'a> Walk<'a> {
                 // argument, one `let` later. This is where a bounds check
                 // stops being unreachable: `let arrayLength := sload(slot)`
                 // then `if iszero(lt(index, arrayLength))`.
+                //
+                // The safety net comes first. A definition whose value can
+                // revert or write storage is not a definition the walk may
+                // pass over: binding the target and moving on would drop a
+                // revert path the program has, which is exactly the silent
+                // hole the net below exists to stop. Binding is for the
+                // instructions that only compute.
+                let only_computes = !ins.effects.writes_storage && !ins.effects.can_revert;
+
+                // `mstore` at a constant address is the one memory fact worth
+                // keeping, because the allocator's free pointer lives at 64
+                // and every guard on an allocation reads it. A store to a
+                // computed address could land anywhere, so it clears what is
+                // known rather than being ignored.
+                if let mulu_yul::ir::Op::Effect { call: mulu_yul::Expr::Call { name, args, .. } } =
+                    &ins.op
+                {
+                    if name == "mstore" && args.len() == 2 {
+                        let at = mulu_yul::fold::fold_fixpoint(&args[0]);
+                        match crate::value::constant(&at) {
+                            Some(k) => match self.eval(&args[1], &env, &storage, &memory) {
+                                Ok(v) => {
+                                    memory.insert(k, v);
+                                }
+                                Err(_) => {
+                                    memory.remove(&k);
+                                }
+                            },
+                            None => memory.clear(),
+                        }
+                        continue;
+                    }
+                }
+
                 match &ins.op {
                     mulu_yul::ir::Op::Let { targets, value: Some(v) }
                     | mulu_yul::ir::Op::Assign { targets, value: v }
-                        if targets.len() == 1 =>
+                        if only_computes && targets.len() == 1 =>
                     {
-                        if let Ok(set) = self.eval(v, &env, &storage) {
+                        if let Ok(set) = self.eval(v, &env, &storage, &memory) {
                             frames.last_mut().unwrap().env.insert(targets[0].clone(), set);
                         } else {
                             // Not knowing a local is not an error. A guard
@@ -1142,7 +1232,7 @@ impl<'a> Walk<'a> {
                         }
                         continue;
                     }
-                    mulu_yul::ir::Op::Let { targets, value: None } => {
+                    mulu_yul::ir::Op::Let { targets, value: None } if only_computes => {
                         // `let a, b` is zero until assigned.
                         for t in targets {
                             frames
@@ -1154,7 +1244,9 @@ impl<'a> Walk<'a> {
                         continue;
                     }
                     mulu_yul::ir::Op::Let { targets, .. }
-                    | mulu_yul::ir::Op::Assign { targets, .. } => {
+                    | mulu_yul::ir::Op::Assign { targets, .. }
+                        if only_computes =>
+                    {
                         // Several targets from one call: nothing here can say
                         // which value went where, so they stay unknown.
                         for t in targets {
@@ -1162,7 +1254,37 @@ impl<'a> Walk<'a> {
                         }
                         continue;
                     }
-                    mulu_yul::ir::Op::Effect { .. } => {}
+                    // Anything with an effect falls through to the storage
+                    // write, the call and the net below, as it did before.
+                    _ => {}
+                }
+
+                // A definition whose value is a call that reverts, writes
+                // storage or holds a check has to be entered, not skipped and
+                // not refused. Skipping drops the revert path; refusing loses
+                // every array index access, whose bounds check lives inside
+                // exactly such a call. The results are bound on the way out.
+                if let Some((targets, callee, args)) = defining_call(ins) {
+                    if let Some(g) = self.b.ir.function(&callee) {
+                        let matters = g.effects.writes_storage
+                            || g.effects.can_revert
+                            || self.b.ir.checks.iter().any(|c| c.function == callee);
+                        if matters {
+                            if depth >= MAX_DEPTH {
+                                return Err(format!("call depth limit reached at {callee}"));
+                            }
+                            let inner = bind_arguments(g, &args, &env)?;
+                            frames.push(Frame {
+                                func: callee,
+                                block: 0,
+                                index: 0,
+                                env: inner,
+                                returns_to: targets,
+                                visited: BTreeSet::new(),
+                            });
+                            continue;
+                        }
+                    }
                 }
 
                 if let Some((callee, args)) = statement_call(ins) {
@@ -1180,6 +1302,7 @@ impl<'a> Walk<'a> {
                                 block: 0,
                                 index: 0,
                                 env: inner,
+                                returns_to: vec![],
                                 visited: BTreeSet::new(),
                             });
                             continue;
@@ -1218,7 +1341,7 @@ impl<'a> Walk<'a> {
                         let passes = guards
                             .get(&c.id)
                             .and_then(|p| p.decide(&env))
-                            .or_else(|| self.decide_cond(&c.condition, &env, &storage))
+                            .or_else(|| self.decide_cond(&c.condition, &env, &storage, &memory))
                             .ok_or_else(|| {
                                 format!(
                                     "check {} is not decided by the argument regions {}",
@@ -1251,7 +1374,7 @@ impl<'a> Walk<'a> {
                     let taken = crate::predicate::translate_in(cond, &f.parameters, &e.widest())
                         .ok()
                         .and_then(|p| p.decide(&env))
-                        .or_else(|| self.decide_cond(cond, &env, &storage))
+                        .or_else(|| self.decide_cond(cond, &env, &storage, &memory))
                         .ok_or("a branch is not decided by the argument regions")?;
                     let target = if taken { *then_block } else { *else_block };
                     let fr = frames.last_mut().unwrap();
@@ -1268,9 +1391,37 @@ impl<'a> Walk<'a> {
                     return Ok(Trace { steps, ending: Ending::Return })
                 }
                 Terminator::Leave => {
-                    frames.pop();
+                    // Bind what the call produced, by the callee's own return
+                    // names, before the frame that knew them goes away.
+                    let done = frames.pop().expect("a frame");
                     if frames.is_empty() {
                         return Ok(Trace { steps, ending: Ending::Return });
+                    }
+                    if !done.returns_to.is_empty() {
+                        let rets = self
+                            .b
+                            .ir
+                            .function(&done.func)
+                            .map(|g| g.returns.clone())
+                            .unwrap_or_default();
+                        let caller = &mut frames.last_mut().unwrap().env;
+                        for (target, ret) in done.returns_to.iter().zip(rets.iter()) {
+                            match done.env.get(ret) {
+                                Some(set) => {
+                                    caller.insert(target.clone(), set.clone());
+                                }
+                                // Unknown is not zero. Leaving a stale
+                                // binding would be worse than none.
+                                None => {
+                                    caller.remove(target);
+                                }
+                            }
+                        }
+                        // More targets than the callee returns is a shape
+                        // this cannot describe; leave the rest unknown.
+                        for target in done.returns_to.iter().skip(rets.len()) {
+                            caller.remove(target);
+                        }
                     }
                 }
                 // A switch is a chain of equality tests on one value, which
@@ -1278,7 +1429,7 @@ impl<'a> Walk<'a> {
                 // left out the dispatcher's own shape and any hand-written
                 // `switch` in a body.
                 Terminator::Switch { value, cases, default } => {
-                    let set = self.eval(value, &env, &storage).map_err(|why| {
+                    let set = self.eval(value, &env, &storage, &memory).map_err(|why| {
                         format!("a switch value is outside the P1a fragment: {why}")
                     })?;
                     let mut target = None;
@@ -1760,10 +1911,31 @@ struct Frame {
     func: String,
     block: usize,
     index: usize,
-    /// The name denoting the abstract argument inside this activation.
     /// What this frame knows: parameter name to the values it can take.
     env: crate::value::Env,
+    /// The caller's names for this call's results. Empty for a call made as
+    /// a statement, which has none.
+    returns_to: Vec<String>,
     visited: BTreeSet<(usize, usize)>,
+}
+
+/// A definition whose value is one call, with its arguments: `let x := f(a)`
+/// or `x, y := f(a)`. The call is what the walk has to enter, and the targets
+/// are where its results go.
+fn defining_call(
+    ins: &mulu_yul::ir::Instruction,
+) -> Option<(Vec<String>, String, Vec<mulu_yul::Expr>)> {
+    let (targets, value) = match &ins.op {
+        mulu_yul::ir::Op::Let { targets, value: Some(v) } => (targets, v),
+        mulu_yul::ir::Op::Assign { targets, value } => (targets, value),
+        _ => return None,
+    };
+    match value {
+        mulu_yul::Expr::Call { name, args, .. } => {
+            Some((targets.clone(), name.clone(), args.clone()))
+        }
+        _ => None,
+    }
 }
 
 /// A call written as a statement, with its arguments.
