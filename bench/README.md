@@ -75,10 +75,9 @@ invariants at the end of a successful transaction. Scoring waits on that.
 
 What the histogram says to implement, in the order the corpus asks for it:
 
-42 of the 47 reach a model, and 40 of those hold a guard mulu would report
-on. What is left is five contracts that run out of a budget: two of time, two
-of steps, one of forks. Not one of them is a construct outside the fragment
-any more.
+44 of the 47 reach a model, and 42 of those hold a guard mulu would report
+on. What is left is three contracts that run out of a budget: two of time,
+one of forks. Not one of them is a construct outside the fragment any more.
 
 ### The score, 2026-09-08 (later the same day)
 
@@ -163,7 +162,8 @@ nothing here decides.
 | | 49.9% | a choice the regions do not settle forks the walk instead of refusing |
 | | 66.7% | a type is a slot's universe, a narrow write is a write, a panic forks |
 | | 77.2% | a loop's effect is over-approximated rather than unrolled or refused |
-| latest | 77.0% | a term is versioned, and a store says what it left behind |
+| | 77.0% | a term is versioned, and a store says what it left behind |
+| latest | 77.1% | a minute to walk a contract, rather than twenty seconds |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every

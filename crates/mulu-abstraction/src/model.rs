@@ -763,6 +763,11 @@ struct Walk<'a> {
     /// bounds all of them at once, and it is the only bound that holds for a
     /// cost nobody has thought of yet. Running out refuses the contract; it
     /// never returns a model built from the part that fit.
+    ///
+    /// A minute, because the walk enumerates paths and a contract that
+    /// branches on a dozen values the model does not have has thousands of
+    /// them. Twenty seconds refused two contracts of the verification
+    /// benchmark for no reason but the clock.
     deadline: std::time::Instant,
     states: BTreeSet<String>,
     marked: BTreeSet<String>,
@@ -878,10 +883,10 @@ impl<'a> Walk<'a> {
             storage_preds,
             per_slot,
             pure_helpers,
-            budget: 4_000_000,
+            budget: 20_000_000,
             transition_keys: BTreeSet::new(),
             plant_transition_keys: BTreeSet::new(),
-            deadline: std::time::Instant::now() + std::time::Duration::from_secs(20),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
             states: BTreeSet::new(),
             marked: BTreeSet::new(),
             events: BTreeMap::new(),
