@@ -46,6 +46,10 @@ struct Args {
     /// `contracts/<use case>/versions/` and the shared `lib/`.
     #[arg(long, value_enum, default_value = "semantic-tests")]
     corpus_kind: CorpusKind,
+    /// A directory of mulu property files, one per use case, scored against
+    /// the corpus's own `ground-truth.csv`.
+    #[arg(long)]
+    properties: Option<PathBuf>,
     /// Exit non-zero below this many modelled cases. What CI asserts: the
     /// floor catches a coverage regression, and the run finishing at all
     /// catches a return of the blowup that made a ten-line contract hang.
@@ -77,6 +81,126 @@ struct Outcome {
     model_checks: usize,
     states: usize,
     transitions: usize,
+    /// One entry per property answered on this contract.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    answers: Vec<Scored>,
+}
+
+/// A property, what mulu said, and what the answer key says.
+#[derive(Debug, Clone, Serialize)]
+struct Scored {
+    property: String,
+    version: String,
+    /// `holds`, `fails` or `undecided`.
+    said: String,
+    /// The answer key: true when the property holds of this version.
+    truth: bool,
+    /// `correct`, `wrong`, or `no-answer`.
+    outcome: &'static str,
+    because: String,
+}
+
+/// The corpus's own `ground-truth.csv`, and the properties written against it.
+///
+/// The benchmark ships one encoding per tool: `certora/*.spec` for Certora,
+/// `solcmc/*.sol` for solc's model checker. `bench/properties/*.json` is
+/// mulu's, and this is where the two meet: for each (property, version) the
+/// key holds, ask mulu, and compare.
+struct AnswerKey {
+    /// use case -> the properties written for it
+    properties: BTreeMap<String, Vec<mulu_abstraction::call_property::CallProperty>>,
+    /// (use case, property, version) -> does it hold
+    truth: BTreeMap<(String, String, String), bool>,
+}
+
+impl AnswerKey {
+    fn load(dir: &std::path::Path, corpus: &std::path::Path) -> Result<Self> {
+        let mut properties = BTreeMap::new();
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", dir.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        files.sort();
+        for f in files {
+            let text = std::fs::read_to_string(&f)?;
+            let file: mulu_abstraction::call_property::PropertyFile = serde_json::from_str(&text)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
+            let use_case = if file.use_case.is_empty() {
+                f.file_stem().unwrap_or_default().to_string_lossy().to_string()
+            } else {
+                file.use_case.clone()
+            };
+            properties.insert(use_case, file.call_properties);
+        }
+
+        let mut truth = BTreeMap::new();
+        let contracts = corpus.join("contracts");
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&contracts)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", contracts.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_dir())
+            .collect();
+        dirs.sort();
+        for d in dirs {
+            let use_case = d.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let Ok(csv) = std::fs::read_to_string(d.join("ground-truth.csv")) else { continue };
+            for line in csv.lines().skip(1) {
+                let mut f = line.split(',');
+                let (Some(prop), Some(version), Some(t)) = (f.next(), f.next(), f.next()) else {
+                    continue;
+                };
+                truth.insert(
+                    (use_case.clone(), prop.trim().to_string(), version.trim().to_string()),
+                    t.trim() == "1",
+                );
+            }
+        }
+        Ok(Self { properties, truth })
+    }
+
+    /// `bank/Bank_v1.sol` -> the use case and the version.
+    fn split(name: &str) -> Option<(String, String)> {
+        let (use_case, file) = name.split_once('/')?;
+        let stem = file.strip_suffix(".sol")?;
+        let version = stem.rsplit_once('_')?.1.to_string();
+        Some((use_case.to_string(), version))
+    }
+
+    fn score(
+        &self,
+        name: &str,
+        paths: &[mulu_abstraction::model::PathSummary],
+    ) -> Vec<Scored> {
+        use mulu_abstraction::call_property::{check, Verdict};
+        let Some((use_case, version)) = Self::split(name) else { return vec![] };
+        let Some(props) = self.properties.get(&use_case) else { return vec![] };
+        let mut out = vec![];
+        for p in props {
+            let Some(truth) =
+                self.truth.get(&(use_case.clone(), p.id.clone(), version.clone())).copied()
+            else {
+                continue;
+            };
+            let a = check(p, paths);
+            let (said, outcome) = match a.verdict {
+                Verdict::Holds if truth => ("holds", "correct"),
+                Verdict::Holds => ("holds", "wrong"),
+                Verdict::Fails if !truth => ("fails", "correct"),
+                Verdict::Fails => ("fails", "wrong"),
+                Verdict::Undecided => ("undecided", "no-answer"),
+            };
+            out.push(Scored {
+                property: p.id.clone(),
+                version: version.clone(),
+                said: said.to_string(),
+                truth,
+                outcome,
+                because: a.because,
+            });
+        }
+        out
+    }
 }
 
 /// The reason strings carry contract and function names, which would make
@@ -107,7 +231,7 @@ fn category(reason: &str) -> String {
     r.lines().next().unwrap_or(r).trim().chars().take(90).collect()
 }
 
-fn measure(case: &corpus::Case, solc: Option<PathBuf>) -> Outcome {
+fn measure(case: &corpus::Case, solc: Option<PathBuf>, key: Option<&AnswerKey>) -> Outcome {
     let mut o = Outcome {
         name: case.name.clone(),
         stage: "out-of-scope",
@@ -118,6 +242,7 @@ fn measure(case: &corpus::Case, solc: Option<PathBuf>) -> Outcome {
         model_checks: 0,
         states: 0,
         transitions: 0,
+        answers: Vec::new(),
     };
     if let Some(why) = case.out_of_scope() {
         o.reason = why.to_string();
@@ -195,6 +320,13 @@ fn measure(case: &corpus::Case, solc: Option<PathBuf>) -> Outcome {
     } else {
         o.reason = category(abstraction.report.unsupported.first().map(|s| s.as_str()).unwrap_or(""));
     }
+    // Score the properties written for this use case against the corpus's
+    // own answer key. A contract whose model is incomplete is still asked:
+    // an incomplete model can still settle a property, and saying nothing
+    // would hide that it did.
+    if let Some(key) = key {
+        o.answers = key.score(&case.name, &abstraction.paths);
+    }
     let _ = std::fs::remove_dir_all(&dir);
     o
 }
@@ -249,6 +381,10 @@ fn compile_and_lower(
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let key = match &args.properties {
+        Some(dir) => Some(AnswerKey::load(dir, &args.corpus)?),
+        None => None,
+    };
     let mut cases = match args.corpus_kind {
         CorpusKind::SemanticTests => corpus::load(&args.corpus)?,
         CorpusKind::VerificationBenchmark => corpus::load_verification_benchmark(&args.corpus)?,
@@ -266,9 +402,10 @@ fn main() -> Result<()> {
         for _ in 0..args.jobs.max(1) {
             let (queue, results, done, solc) =
                 (queue.clone(), results.clone(), done.clone(), args.solc.clone());
+            let key = key.as_ref();
             s.spawn(move || loop {
                 let Some(case) = queue.lock().unwrap().next() else { return };
-                let o = measure(&case, solc.clone());
+                let o = measure(&case, solc.clone(), key);
                 results.lock().unwrap().push(o);
                 let mut d = done.lock().unwrap();
                 *d += 1;
@@ -310,6 +447,37 @@ fn main() -> Result<()> {
             100.0 * speaking as f64 / in_scope as f64
         );
     }
+    // The answer key, when there is one. This is the number that means
+    // something: a property mulu got wrong is visible here, and nowhere else.
+    let scored: Vec<&Scored> = out.iter().flat_map(|o| o.answers.iter()).collect();
+    if !scored.is_empty() {
+        let correct = scored.iter().filter(|s| s.outcome == "correct").count();
+        let wrong = scored.iter().filter(|s| s.outcome == "wrong").count();
+        let none = scored.iter().filter(|s| s.outcome == "no-answer").count();
+        println!("\nagainst the answer key");
+        println!("  {} (property, version) pair(s) asked", scored.len());
+        println!("  correct    {correct:>5}");
+        println!("  wrong      {wrong:>5}");
+        println!("  no answer  {none:>5}");
+        println!(
+            "  correct / asked: {:.1}%",
+            100.0 * correct as f64 / scored.len() as f64
+        );
+        if wrong > 0 {
+            println!("\n  wrong:");
+            for s in scored.iter().filter(|s| s.outcome == "wrong") {
+                println!(
+                    "    {}/{} said {}, key says {}: {}",
+                    s.property,
+                    s.version,
+                    s.said,
+                    if s.truth { "holds" } else { "fails" },
+                    s.because
+                );
+            }
+        }
+    }
+
     println!("\nwhy the rest stopped");
     let mut ranked: Vec<(&String, &usize)> = reasons.iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(a.1));

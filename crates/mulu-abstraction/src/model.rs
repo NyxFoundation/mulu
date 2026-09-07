@@ -75,6 +75,30 @@ impl AbstractionReport {
 pub struct Abstraction {
     pub model: FiniteProduct,
     pub report: AbstractionReport,
+    /// Every path the walk took, with what it assumed on the way. This is
+    /// what a property about *calls* is answered from: "does `withdraw`
+    /// revert whenever the amount is zero or above the balance" is a question
+    /// about which of these paths a request can be on, and how they end.
+    pub paths: Vec<PathSummary>,
+}
+
+/// One walk of one entrypoint, from one region of each argument and one
+/// region of storage, down one side of each choice the regions did not settle.
+#[derive(Debug, Clone, Serialize)]
+pub struct PathSummary {
+    pub entrypoint: String,
+    /// The body's parameter names, in order, so a property can say "argument
+    /// 0" and mean the same word the facts are written in.
+    pub parameters: Vec<String>,
+    /// The values each argument could take on this path, as intervals.
+    pub arguments: Vec<IntervalSet>,
+    /// Which region each storage slot was in, by label.
+    pub storage: BTreeMap<String, IntervalSet>,
+    /// The conditions the walk could not decide, and the side it took. Keys
+    /// are canonical relations: `var_amount_20 <= cell(balances, caller())`.
+    pub assumed: BTreeMap<String, bool>,
+    /// Whether the transaction ended by returning or by reverting.
+    pub reverts: bool,
 }
 
 /// One entrypoint reduced to what the walk needs.
@@ -103,9 +127,6 @@ struct Param {
 impl Entry {
     /// The values every argument can take at once, which is what a guard is
     /// decided against before any region is chosen.
-    fn domains(&self) -> crate::value::Env {
-        self.params.iter().map(|p| (p.name.clone(), p.domain.clone())).collect()
-    }
 
     /// The widest single domain, for the places that still summarise the
     /// call by one set (predicate translation over the body's parameters).
@@ -708,6 +729,8 @@ struct Walk<'a> {
     plant_transitions: Vec<Transition>,
     plant_sites: BTreeMap<String, ControlSite>,
     plant_bad_used: bool,
+    /// Every path the walk took, in the order it took them.
+    paths: Vec<PathSummary>,
 }
 
 /// One position of an abstract execution along the path where guards pass.
@@ -716,6 +739,7 @@ enum Step {
     Store { slot: usize, label: String, to: usize },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ending {
     Return,
     Revert,
@@ -724,6 +748,14 @@ enum Ending {
 struct Trace {
     steps: Vec<Step>,
     ending: Ending,
+    /// Conditions the regions did not decide, and the side this path took, as
+    /// far as the transaction got. A check that fails ends the transaction,
+    /// and the walk carries on past it only to record what the *other* side
+    /// of that check would meet; nothing after it is on this path.
+    assumed: BTreeMap<String, bool>,
+    /// The transaction ends by reverting: a check on it fails, or the walk
+    /// reached a `revert`.
+    reverts: bool,
 }
 
 /// Why a walk did not produce a trace.
@@ -807,6 +839,7 @@ impl<'a> Walk<'a> {
             plant_transitions: Vec::new(),
             plant_sites: BTreeMap::new(),
             plant_bad_used: false,
+            paths: Vec::new(),
         }
     }
 
@@ -1358,6 +1391,23 @@ impl<'a> Walk<'a> {
                         // and the pairing in `sites` means what it says.
                         match self.trace(e, &a, s, &sp) {
                             Ok(t) => {
+                                self.paths.push(PathSummary {
+                                    entrypoint: e.signature.clone(),
+                                    parameters: e.params.iter().map(|p| p.name.clone()).collect(),
+                                    arguments: a
+                                        .iter()
+                                        .map(|i| self.arg_regions[*i].clone())
+                                        .collect(),
+                                    storage: s
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, r)| {
+                                            (self.per_slot[i].0.clone(), self.per_slot[i].1[*r].clone())
+                                        })
+                                        .collect(),
+                                    assumed: t.assumed.clone(),
+                                    reverts: t.reverts,
+                                });
                                 self.emit_impl(e, &a, s, &t);
                                 self.emit_plant(e, &a, s, &t);
                             }
@@ -1539,7 +1589,7 @@ impl<'a> Walk<'a> {
             assumptions: self.b.assumptions,
             unsupported: self.b.unsupported,
         };
-        Abstraction { model, report }
+        Abstraction { model, report, paths: self.paths }
     }
 
     /// One abstract execution along the path where every guard passes.
@@ -1587,6 +1637,25 @@ impl<'a> Walk<'a> {
         // produced a path where the first passed and the second failed. That
         // path is not one the program has, and the paths multiply.
         let mut facts: BTreeMap<String, bool> = BTreeMap::new();
+        // What was assumed when the first check on this path failed. After
+        // that the transaction is over, so anything the walk goes on to
+        // assume is about a path this is not.
+        let mut reverted_at: Option<BTreeMap<String, bool>> = None;
+        // Storage named the way the contract names it, so a fact key reads
+        // `cell(balances, caller())` rather than carrying solc's generated
+        // helper names, which change with the types they encode.
+        let slots: BTreeMap<U256, String> = self
+            .per_slot
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (label, _))| {
+                let _ = i;
+                let v = self.b.storage.iter().find(|v| v.label == *label)?;
+                let slot = crate::interval::parse_decimal(&v.slot).ok()?;
+                Some((slot, label.clone()))
+            })
+            .collect();
+        let layout = move |s: U256| slots.get(&s).cloned();
         let mut frames: Vec<Frame> = vec![Frame {
             func: e.func.clone(),
             block: 0,
@@ -1657,11 +1726,15 @@ impl<'a> Walk<'a> {
                         None => decide_or_split(
                             &c.condition,
                             &terms,
+                            &layout,
                             &mut facts,
                             &mut splits,
                             || format!("check {} in {func}", c.id),
                         )?,
                     };
+                    if !passes && reverted_at.is_none() {
+                        reverted_at = Some(facts.clone());
+                    }
                     steps.push(Step::Check {
                         id: c.id.clone(),
                         text: c.condition_text.clone(),
@@ -1893,12 +1966,13 @@ impl<'a> Walk<'a> {
                             src: None,
                         },
                         &terms,
+                        &layout,
                         &mut facts,
                         &mut splits,
                         || format!("a panic inside an instruction in {func}"),
                     )?;
                     if reverts {
-                        return Ok(Trace { steps, ending: Ending::Revert });
+                        return Ok(Trace { steps, ending: Ending::Revert, assumed: reverted_at.unwrap_or(facts), reverts: true });
                     }
                     // It computes; whatever it defines stays unknown, which
                     // is what the arms above would have left had it not been
@@ -1952,11 +2026,15 @@ impl<'a> Walk<'a> {
                             None => decide_or_split(
                                 &c.condition,
                                 &terms,
+                                &layout,
                                 &mut facts,
                                 &mut splits,
                                 || format!("check {} in {func}", c.id),
                             )?,
                         };
+                        if !passes && reverted_at.is_none() {
+                            reverted_at = Some(facts.clone());
+                        }
                         steps.push(Step::Check {
                             id: c.id.clone(),
                             text: c.condition_text.clone(),
@@ -1987,7 +2065,7 @@ impl<'a> Walk<'a> {
                         .or_else(|| self.decide_cond(cond, &env, &storage, &memory))
                     {
                         Some(v) => v,
-                        None => decide_or_split(cond, &terms, &mut facts, &mut splits, || {
+                        None => decide_or_split(cond, &terms, &layout, &mut facts, &mut splits, || {
                             format!("a branch in {func}")
                         })?,
                     };
@@ -2000,17 +2078,17 @@ impl<'a> Walk<'a> {
                     fr.index = 0;
                 }
                 Terminator::Revert { .. } => {
-                    return Ok(Trace { steps, ending: Ending::Revert })
+                    return Ok(Trace { steps, ending: Ending::Revert, assumed: reverted_at.unwrap_or(facts), reverts: true })
                 }
                 Terminator::Return { .. } | Terminator::Stop => {
-                    return Ok(Trace { steps, ending: Ending::Return })
+                    return Ok(Trace { steps, ending: Ending::Return, assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()), reverts: reverted_at.is_some() })
                 }
                 Terminator::Leave => {
                     // Bind what the call produced, by the callee's own return
                     // names, before the frame that knew them goes away.
                     let done = frames.pop().expect("a frame");
                     if frames.is_empty() {
-                        return Ok(Trace { steps, ending: Ending::Return });
+                        return Ok(Trace { steps, ending: Ending::Return, assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()), reverts: reverted_at.is_some() });
                     }
                     if !done.returns_to.is_empty() {
                         let rets = self
@@ -2053,7 +2131,8 @@ impl<'a> Walk<'a> {
                         Ok(v) => Some(v),
                         Err(_) => None,
                     };
-                    let mut target = None;
+                    #[allow(unused_assignments)]
+                    let mut target: Option<usize> = None;
                     let Some(set) = set else {
                         let ways = cases.len() + 1;
                         let pick = splits.next().ok_or_else(|| TraceStop::Undecided {
@@ -2083,7 +2162,7 @@ impl<'a> Walk<'a> {
                             None => {
                                 frames.pop();
                                 if frames.is_empty() {
-                                    return Ok(Trace { steps, ending: Ending::Return });
+                                    return Ok(Trace { steps, ending: Ending::Return, assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()), reverts: reverted_at.is_some() });
                                 }
                                 continue;
                             }
@@ -2134,7 +2213,7 @@ impl<'a> Walk<'a> {
                             // Nothing matched and there is no default.
                             frames.pop();
                             if frames.is_empty() {
-                                return Ok(Trace { steps, ending: Ending::Return });
+                                return Ok(Trace { steps, ending: Ending::Return, assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()), reverts: reverted_at.is_some() });
                             }
                             continue;
                         }
@@ -2151,7 +2230,7 @@ impl<'a> Walk<'a> {
                             // the switch does nothing and the function ends.
                             frames.pop();
                             if frames.is_empty() {
-                                return Ok(Trace { steps, ending: Ending::Return });
+                                return Ok(Trace { steps, ending: Ending::Return, assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()), reverts: reverted_at.is_some() });
                             }
                             continue;
                         }
@@ -2688,11 +2767,18 @@ fn bind_arguments(
 fn decide_or_split(
     cond: &mulu_yul::Expr,
     terms: &BTreeMap<String, mulu_yul::Expr>,
+    layout: &impl crate::relation::Layout,
     facts: &mut BTreeMap<String, bool>,
     splits: &mut impl Iterator<Item = usize>,
     what: impl Fn() -> String,
 ) -> Result<bool, TraceStop> {
-    let key = canon(cond, terms).map(|t| t.render());
+    // The relation first, because it recognises the same question asked two
+    // ways: `iszero(gt(a, b))` and `iszero(lt(b, a))` are one fact. Where the
+    // condition is not a comparison, its canonical term still keys it, which
+    // catches the same condition asked twice.
+    let key = crate::relation::of_in(cond, terms, layout)
+        .map(|r| r.key())
+        .or_else(|| canon(cond, terms).map(|t| t.render()));
     if let Some(k) = &key {
         if let Some(known) = facts.get(k) {
             return Ok(*known);
@@ -2757,13 +2843,6 @@ fn product(per: &[Vec<usize>]) -> Vec<Vec<usize>> {
 }
 
 /// Environments in a message, so a refusal names what was known.
-fn show(env: &crate::value::Env) -> String {
-    if env.is_empty() {
-        return "{}".into();
-    }
-    let v: Vec<String> = env.iter().map(|(k, s)| format!("{k} in {s}")).collect();
-    format!("{{{}}}", v.join(", "))
-}
 
 fn instruction_calls(ins: &mulu_yul::ir::Instruction, name: Option<&str>) -> bool {
     let Some(name) = name else { return false };

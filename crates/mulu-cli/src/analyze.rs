@@ -122,6 +122,13 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         args.out.join("abstraction.json"),
         serde_json::to_string_pretty(&abstraction.report)?,
     )?;
+    // The paths, with what each assumed. A property about a *call* is
+    // answered from these, and a reader who wants to know why an answer came
+    // out the way it did reads them.
+    fs::write(
+        args.out.join("paths.json"),
+        serde_json::to_string_pretty(&abstraction.paths)?,
+    )?;
 
     print_abstraction(&abstraction, &props);
 
