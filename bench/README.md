@@ -31,11 +31,15 @@ them for it would flatter.
 
 ## What the corpus said, 2026-09-07
 
-| | |
-| --- | --- |
-| cases | 1682 |
-| in scope | 1430 |
-| reaching a complete model | 328 (22.9%) |
+| run | modelled / in scope | what changed |
+| --- | --- | --- |
+| first | 0% | — |
+| | 22.0% | `data` is not a reserved word inside Yul code |
+| | 22.9% | a constructor writing constants is determined |
+| | 24.5% | an environment, so a function may take several arguments |
+| | 34.5% | a `let` binds what it defines, and `sload` resolves |
+| | 34.7% | a guard may be over a local, and over two of them |
+| | **35.0%** | a switch, interval arithmetic, a condition evaluated |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every
@@ -43,20 +47,26 @@ array, struct and mapping. One line in the keyword list was the difference
 between reading a third of the corpus and reading almost none of it. That is
 the argument for measuring against programs someone else chose.
 
-Why the other 1102 stop, ranked:
+The largest single move, ten points, came from binding the targets of a `let`.
+Nothing bound them, so every local was unknown, and a guard over a local was
+"not the argument" even where the local *was* the argument one line later. It
+is not a feature anyone would have put on a roadmap; the corpus found it.
 
-| count | reason |
-| --- | --- |
-| 179 | an instruction with effects the model cannot represent |
-| 133 | a guard over something that is not an argument |
-| 103 | the constructor's effect on storage is not determined |
-| 37 | more than one argument |
-| 38 | reaches `call` or `staticcall` |
+Why the rest stop, ranked:
 
-**These are mostly one thing.** Of the 1102, 260 are in `array/` or `structs/`,
-and the array helpers account for most of the top three rows as well: a bounds
-check is a guard over a length rather than over an argument, and an allocation
-is an instruction whose effect the model has no room for. Arrays are the next
-fragment to decide about, and the decision is not only about coverage: every
-extension makes `simulation:step-covered` harder to prove, so the fragment
-should be chosen once and proved once rather than grown and re-proved.
+| count | reason | whose |
+| --- | --- | --- |
+| 252 | via-IR, a newer solc, an EVM version, or no calls | the corpus |
+| 113 | the constructor's effect on storage is not determined | arrays and structs |
+| 40 | an instruction with effects the model cannot represent | arrays and structs |
+| 38 | a branch is not decided by the argument regions | refinement |
+| 31 | reaches `call` or `staticcall` | out of the P1a subset |
+| 12 | the ABI lists one parameter and the body takes two | a decoder that returns two |
+
+An array **read** models now: the bounds check is decided by comparing the
+index region against the length read from storage, and the module elaborates
+in the semantics. What is still missing is the array as a *storage fact*: a
+length that changes when something is pushed, and a write to an element whose
+slot is computed. That is what the top two rows are, and it is the next thing
+to decide about, because it adds a kind of fact rather than generalising one
+that is there.
