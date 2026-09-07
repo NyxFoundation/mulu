@@ -164,6 +164,27 @@ pub struct Builder<'a> {
 /// Values a storage slot can be in, as an index into the slot's partition.
 type StorageRegion = Vec<usize>;
 
+/// What a constructor leaves in storage.
+#[derive(Debug, Default)]
+struct ConstructorEffect {
+    /// Slots whose final value the model followed to a constant.
+    determined: BTreeMap<usize, U256>,
+    /// Slots written in a way the model could not follow.
+    unknown: BTreeSet<usize>,
+    /// A write whose slot the model could not follow: any slot may have moved.
+    every_slot_unknown: bool,
+    /// Why, in the order the writes appear.
+    reasons: Vec<String>,
+}
+
+/// One initial state or several, as the schema distinguishes them.
+fn initial_of(names: &[String]) -> Initial {
+    match names {
+        [one] => Initial::One(one.clone()),
+        _ => Initial::Many(names.to_vec()),
+    }
+}
+
 impl<'a> Builder<'a> {
     pub fn new(ir: &'a ProgramIr, props: &'a [CompiledProperty]) -> Self {
         Self {
@@ -792,40 +813,65 @@ impl<'a> Walk<'a> {
     /// resolves to a constant slot and a constant value. `Err` names the
     /// first write that does not, because "the constructor writes storage"
     /// told a reader nothing about which write or why.
-    fn constructor_storage(
-        &self,
-        writes: &[&mulu_yul::ir::Instruction],
-    ) -> Result<BTreeMap<usize, U256>, String> {
-        let mut out = BTreeMap::new();
+    /// What the constructor leaves in storage, slot by slot.
+    ///
+    /// A write whose value is a constant determines its slot. A write the
+    /// model cannot follow does not: it leaves that slot at whatever the
+    /// deployment put there, which the model represents by starting in every
+    /// region of it at once. That is weaker than knowing the value and
+    /// stronger than refusing the contract, and refusing was what happened
+    /// before: `owner = msg.sender` in a constructor threw away the whole
+    /// analysis of every function, including the ones that never read
+    /// `owner`.
+    fn constructor_storage(&self, writes: &[&mulu_yul::ir::Instruction]) -> ConstructorEffect {
+        let mut out = ConstructorEffect::default();
         for i in writes {
             let Some(w) = &i.storage_write else {
-                return Err(
+                // The write shape is not one the front end reduced to a slot
+                // and a value, so it could have been to any slot.
+                out.reasons.push(
                     "an instruction writes storage in a way the front end did not recognise as \
                      a slot and a value"
                         .to_string(),
                 );
+                out.every_slot_unknown = true;
+                continue;
             };
             let slot = mulu_yul::fold::fold_fixpoint(&w.slot);
             let value = mulu_yul::fold::fold_fixpoint(&w.value);
             let Some(slot) = crate::value::constant(&slot) else {
-                return Err(format!("the slot in `{}` is not a constant", w.slot_text));
-            };
-            let Some(value) = crate::value::constant(&value) else {
-                return Err(format!(
-                    "the value written to slot {slot} is `{}`, which is not a constant",
-                    w.value_text
-                ));
+                out.reasons.push(format!("the slot in `{}` is not a constant", w.slot_text));
+                out.every_slot_unknown = true;
+                continue;
             };
             let Ok(slot) = usize::try_from(slot) else {
-                return Err(format!("slot {slot} is beyond the layout this models"));
+                out.reasons.push(format!("slot {slot} is beyond the layout this models"));
+                out.every_slot_unknown = true;
+                continue;
             };
             if slot >= self.per_slot.len() {
-                return Err(format!("slot {slot} is not in the contract's storage layout"));
+                // Not a declared variable: a mapping cell, or padding. It
+                // moves nothing the model tracks.
+                continue;
             }
-            // A later write wins, which is the order the constructor runs in.
-            out.insert(slot, value);
+            match crate::value::constant(&value) {
+                Some(v) => {
+                    // A later write wins, which is the order the constructor
+                    // runs in.
+                    out.determined.insert(slot, v);
+                    out.unknown.remove(&slot);
+                }
+                None => {
+                    out.reasons.push(format!(
+                        "the value written to slot {slot} is `{}`, which is not a constant",
+                        w.value_text
+                    ));
+                    out.determined.remove(&slot);
+                    out.unknown.insert(slot);
+                }
+            }
         }
-        Ok(out)
+        out
     }
 
     /// Decide a Yul condition by evaluating it, when the predicate built for
@@ -1110,33 +1156,65 @@ impl<'a> Walk<'a> {
         // away every contract with an initialiser. What is refused is a
         // constructor whose writes depend on something the model does not
         // have, such as `owner = msg.sender`.
-        let initial_storage: StorageRegion = match self.constructor_storage(&ctor_writes) {
-            Ok(values) => {
-                if ctor_writes.is_empty() {
-                    self.b.note(
-                        "initial-state: the constructor writes no storage, so every slot starts \
-                         at zero",
-                    );
-                } else {
-                    self.b.note(
-                        "initial-state: every constructor write resolved to a constant, so the \
-                         model starts where the deployment leaves the contract",
-                    );
+        let effect = self.constructor_storage(&ctor_writes);
+        if ctor_writes.is_empty() {
+            self.b.note(
+                "initial-state: the constructor writes no storage, so every slot starts at zero",
+            );
+        } else if effect.reasons.is_empty() {
+            self.b.note(
+                "initial-state: every constructor write resolved to a constant, so the model \
+                 starts where the deployment leaves the contract",
+            );
+        }
+        // Each slot contributes the regions the deployment could have left it
+        // in: one, when the constructor's write is a constant or there is no
+        // write; all of them, when the model could not follow the write.
+        let per_slot_initial: Vec<Vec<usize>> = (0..self.per_slot.len())
+            .map(|i| {
+                let unknown = effect.every_slot_unknown || effect.unknown.contains(&i);
+                if unknown {
+                    return (0..self.per_slot[i].1.len()).collect();
                 }
-                (0..self.per_slot.len())
-                    .map(|i| {
-                        let v = values.get(&i).copied().unwrap_or(U256::ZERO);
-                        self.region_of(i, &IntervalSet::point(v)).unwrap_or(0)
+                let v = effect.determined.get(&i).copied().unwrap_or(U256::ZERO);
+                vec![self.region_of(i, &IntervalSet::point(v)).unwrap_or(0)]
+            })
+            .collect();
+        if !effect.reasons.is_empty() {
+            let mut reasons = effect.reasons.clone();
+            reasons.sort();
+            reasons.dedup();
+            let where_ = if effect.every_slot_unknown {
+                "every slot".to_string()
+            } else {
+                let mut names: Vec<&str> = effect
+                    .unknown
+                    .iter()
+                    .map(|i| self.per_slot[*i].0.as_str())
+                    .collect();
+                names.sort();
+                names.join(", ")
+            };
+            self.b.note(format!(
+                "initial-state-widened: the constructor's effect on {where_} is not determined \
+                 ({}), so the model starts in every region of it at once. Findings hold for any \
+                 deployment, and none of them rests on a value the constructor set",
+                reasons.join("; ")
+            ));
+        }
+        let initial_storage: Vec<StorageRegion> = per_slot_initial
+            .iter()
+            .fold(vec![Vec::new()], |acc: Vec<StorageRegion>, choices| {
+                acc.iter()
+                    .flat_map(|prefix| {
+                        choices.iter().map(move |c| {
+                            let mut v = prefix.clone();
+                            v.push(*c);
+                            v
+                        })
                     })
                     .collect()
-            }
-            Err(why) => {
-                self.b.refuse(&format!(
-                    "the constructor's effect on storage is not determined: {why}"
-                ));
-                (0..self.per_slot.len()).map(|_| 0).collect()
-            }
-        };
+            });
 
         // idle states, one per storage region
         for s in &storage_regions {
@@ -1213,8 +1291,16 @@ impl<'a> Walk<'a> {
             self.states.insert("bad".into());
         }
 
-        let initial = format!("idle_{}", self.storage_name(&initial_storage));
-        self.states.insert(initial.clone());
+        let mut initial_names: Vec<String> = initial_storage
+            .iter()
+            .map(|s| format!("idle_{}", self.storage_name(s)))
+            .collect();
+        initial_names.sort();
+        initial_names.dedup();
+        for n in &initial_names {
+            self.states.insert(n.clone());
+        }
+        let initial = initial_names.first().cloned().unwrap_or_else(|| "idle_".to_string());
 
         // Names the plant shares with the implementation, taken before any
         // field of `self` is moved out below.
@@ -1271,7 +1357,7 @@ impl<'a> Walk<'a> {
             pmarked.sort();
             Some(ControlPlant {
                 states: all,
-                initial: Initial::One(initial.clone()),
+                initial: initial_of(&initial_names),
                 marked: pmarked,
                 accepting: Some(paccepting),
                 bad: if plant_bad { vec!["bad".to_string()] } else { vec![] },
@@ -1286,7 +1372,7 @@ impl<'a> Walk<'a> {
             kind: "finite-product".into(),
             description: Some(description),
             states,
-            initial: Initial::One(initial),
+            initial: initial_of(&initial_names),
             marked,
             bad,
             events,

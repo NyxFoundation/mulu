@@ -77,9 +77,15 @@ What the histogram says to implement, in the order the corpus asks for it:
 
 | cases | what stops it |
 | --- | --- |
-| 20 | a constructor writing something other than a constant, such as `owner = msg.sender` |
-| 11 | a guard against a value read from a mapping, which no argument region decides |
+| 22 | a guard against a value read from storage, which no argument region decides |
 | 8 | an argument that is not a numeric word: `string`, `bytes32` |
+| 4 | an instruction whose effects the model cannot represent |
+
+The first row was the second row until the constructor was fixed, and it is
+now the whole of the remaining mass. `require(amount <= balances[msg.sender])`
+compares an argument against a mapping cell that no partition of the argument
+space decides, because the two are independent and the relation between them
+is what the guard is about.
 
 ## What the corpus said, 2026-09-07
 
@@ -99,7 +105,8 @@ What the histogram says to implement, in the order the corpus asks for it:
 | | 28.1% | **an exponential removed**: `and` evaluated each side twice |
 | | 28.2% | a branch over a parameter refines the partition |
 | | **28.3%** | a call made for its value is followed when finding what is reachable |
-| latest | 28.4% | `call` is modelled, under a stated no-reentrancy assumption |
+| | 28.4% | `call` is modelled, under a stated no-reentrancy assumption |
+| latest | 31.9% | a constructor write the model cannot follow widens the initial state |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every
