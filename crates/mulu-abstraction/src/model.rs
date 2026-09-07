@@ -781,6 +781,88 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// Evaluate a call to a helper that only computes.
+    ///
+    /// solc's IR is mostly tiny pure converters: `cleanup_t_uint256`,
+    /// `convert_t_rational_2_by_1_to_t_uint256`, `identity`. A value passing
+    /// through one of them became unknown, and everything downstream of it
+    /// with it, which is why a guard on an allocation size saw an empty
+    /// environment for a size that was the literal 2.
+    ///
+    /// Only straight-line bodies, and only functions with no effect and no
+    /// check: a helper that can revert is a helper the walk must *enter*, so
+    /// that the revert path reaches the model, and evaluating it here instead
+    /// would lose exactly that.
+    fn eval_call(
+        &self,
+        callee: &str,
+        args: &[mulu_yul::Expr],
+        env: &crate::value::Env,
+        storage: &StorageRegion,
+        memory: &BTreeMap<U256, IntervalSet>,
+        depth: usize,
+    ) -> Result<IntervalSet, String> {
+        const MAX: usize = 8;
+        if depth >= MAX {
+            return Err(format!("evaluating {callee} nests deeper than {MAX} calls"));
+        }
+        let g = self
+            .b
+            .ir
+            .function(callee)
+            .ok_or_else(|| format!("`{callee}` is not a function this build defines"))?;
+        if g.effects.writes_storage
+            || g.effects.can_revert
+            || self.b.ir.checks.iter().any(|c| c.function == callee)
+        {
+            return Err(format!("`{callee}` has effects, so it is entered rather than evaluated"));
+        }
+        if g.blocks.len() != 1 {
+            return Err(format!("`{callee}` branches, so it is not a straight-line helper"));
+        }
+        let ret = g
+            .returns
+            .first()
+            .ok_or_else(|| format!("`{callee}` returns nothing to evaluate"))?;
+        let mut inner = crate::value::Env::new();
+        for (p, a) in g.parameters.iter().zip(args.iter()) {
+            inner.insert(p.clone(), self.eval_at(a, env, storage, memory, depth + 1)?);
+        }
+        for i in &g.blocks[0].instructions {
+            let (targets, value) = match &i.op {
+                mulu_yul::ir::Op::Let { targets, value: Some(v) } => (targets, v),
+                mulu_yul::ir::Op::Assign { targets, value } => (targets, value),
+                // A `let` with no value is zero; anything else in a pure
+                // helper is bookkeeping this does not need.
+                mulu_yul::ir::Op::Let { targets, value: None } => {
+                    for t in targets {
+                        inner.insert(t.clone(), IntervalSet::point(U256::ZERO));
+                    }
+                    continue;
+                }
+                mulu_yul::ir::Op::Effect { .. } => continue,
+            };
+            if targets.len() != 1 {
+                for t in targets {
+                    inner.remove(t);
+                }
+                continue;
+            }
+            match self.eval_at(value, &inner, storage, memory, depth + 1) {
+                Ok(v) => {
+                    inner.insert(targets[0].clone(), v);
+                }
+                Err(_) => {
+                    inner.remove(&targets[0]);
+                }
+            }
+        }
+        inner
+            .get(ret)
+            .cloned()
+            .ok_or_else(|| format!("`{callee}` did not determine its result"))
+    }
+
     /// The single value an address expression denotes, if it denotes one.
     ///
     /// A slot is usually a literal, but solc passes it as a parameter to its
@@ -814,6 +896,17 @@ impl<'a> Walk<'a> {
         storage: &StorageRegion,
         memory: &BTreeMap<U256, IntervalSet>,
     ) -> Result<IntervalSet, String> {
+        self.eval_at(e, env, storage, memory, 0)
+    }
+
+    fn eval_at(
+        &self,
+        e: &mulu_yul::Expr,
+        env: &crate::value::Env,
+        storage: &StorageRegion,
+        memory: &BTreeMap<U256, IntervalSet>,
+        depth: usize,
+    ) -> Result<IntervalSet, String> {
         if let mulu_yul::Expr::Call { name, args, .. } = e {
             if name == "mload" && args.len() == 1 {
                 let Some(k) = self.address(&args[0], env, storage, memory) else {
@@ -842,7 +935,17 @@ impl<'a> Walk<'a> {
                     .ok_or_else(|| format!("slot {i} has no region {}", storage[i]));
             }
         }
-        crate::value::value_set(e, env)
+        match crate::value::value_set(e, env) {
+            Ok(v) => Ok(v),
+            // A call `value_set` does not know may still be a helper that
+            // only computes.
+            Err(why) => match e {
+                mulu_yul::Expr::Call { name, args, .. } => {
+                    self.eval_call(name, args, env, storage, memory, depth)
+                }
+                _ => Err(why),
+            },
+        }
     }
 
     /// Which region of `slot` a value known to lie in `values` falls into.

@@ -42,7 +42,18 @@ pub fn value_set(e: &Expr, env: &Env) -> Result<IntervalSet, String> {
             // A mask that covers everything the inner expression can produce
             // leaves it alone. Solidity's narrowing cleanups are this shape.
             ("and", 2) => {
-                let (inner, mask) = match (mask_of(&args[0]), mask_of(&args[1])) {
+                // The mask side may be written rather than given: solc emits
+                // `not(31)` for a round-down. Evaluating it first is the
+                // difference between reading that and refusing it.
+                let point = |e: &Expr| -> Option<U256> {
+                    if let Some(m) = mask_of(e) {
+                        return Some(m);
+                    }
+                    let set = value_set(e, env).ok()?;
+                    let (lo, hi) = set.bounds()?;
+                    (lo == hi).then_some(lo)
+                };
+                let (inner, mask) = match (point(&args[0]), point(&args[1])) {
                     (None, Some(m)) => (&args[0], m),
                     (Some(m), None) => (&args[1], m),
                     (Some(a), Some(b)) => return Ok(IntervalSet::point(a & b)),
@@ -51,6 +62,15 @@ pub fn value_set(e: &Expr, env: &Env) -> Result<IntervalSet, String> {
                     }
                 };
                 let set = value_set(inner, env)?;
+                // A high-bit mask clears the low bits, which is a round down
+                // to a power of two. `and(x, not(31))` is how solc rounds an
+                // allocation size, and the result is exact: the operation is
+                // monotone, so the ends map to the ends.
+                if let Some(low) = clears_low_bits(mask) {
+                    let (lo, hi) = set.bounds().unwrap_or((U256::ZERO, U256::ZERO));
+                    let _ = low;
+                    return Ok(IntervalSet::range(lo & mask, hi & mask));
+                }
                 let covered = full_mask_set(mask).ok_or_else(|| {
                     format!("the mask 0x{mask:x} is not a low-bit mask; P1a does not model it")
                 })?;
@@ -66,6 +86,13 @@ pub fn value_set(e: &Expr, env: &Env) -> Result<IntervalSet, String> {
             // Arithmetic on what is known. Exact where it cannot wrap, and
             // refused where it can: a wrapped result is a different value and
             // approximating it would put a number in a region it is not in.
+            // `not(k)` for a literal is a constant. solc writes the
+            // round-down mask that way: `and(x, not(31))`.
+            ("not", 1) => {
+                let v = mask_of(&args[0])
+                    .ok_or_else(|| "`not` of a non-literal is outside the P1a fragment".to_string())?;
+                Ok(IntervalSet::point(!v))
+            }
             ("add", 2) | ("sub", 2) | ("mul", 2) => {
                 let (l, r) = (value_set(&args[0], env)?, value_set(&args[1], env)?);
                 arith(name, &l, &r)
@@ -84,6 +111,18 @@ fn mask_of(e: &Expr) -> Option<U256> {
         Expr::Literal { text, .. } => crate::interval::parse_decimal(text).ok(),
         _ => None,
     }
+}
+
+/// `n` when `mask` is `!(2^n - 1)`: a mask that keeps the high bits and
+/// clears the low ones, which is a round down to a multiple of `2^n`.
+fn clears_low_bits(mask: U256) -> Option<u32> {
+    let complement = !mask;
+    // The complement must be `2^n - 1`, and not everything.
+    if complement == U256::ZERO || mask == U256::ZERO {
+        return None;
+    }
+    let n = complement.checked_add(U256::from(1u8))?;
+    (n & complement == U256::ZERO).then(|| complement.bit_len() as u32)
 }
 
 /// `[0, mask]` when `mask` is `2^n - 1`, else `None`.
@@ -256,5 +295,39 @@ mod arith_tests {
         };
         let env = env_of("x", &IntervalSet::range(u(0), u(99)));
         assert_eq!(value_set(&e("add(x, 1)"), &env).unwrap(), IntervalSet::range(u(1), u(100)));
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+    use crate::interval::U256;
+
+    fn u(n: u64) -> U256 {
+        U256::from(n)
+    }
+
+    #[test]
+    fn a_high_bit_mask_rounds_an_interval_down() {
+        // `and(x, not(31))` is how solc rounds an allocation size down to a
+        // multiple of 32. The operation is monotone, so the ends map to the
+        // ends and the result is exact rather than approximated.
+        assert_eq!(clears_low_bits(!u(31)), Some(5));
+        assert_eq!(clears_low_bits(u(31)), None, "a low-bit mask is the other case");
+        assert_eq!(clears_low_bits(U256::ZERO), None);
+
+        let env = env_of("x", &IntervalSet::range(u(33), u(70)));
+        let e = |src: &str| {
+            let s = format!("object \"T\" {{ code {{ let c := {src} }} }}");
+            let p = mulu_yul::parse_object(&s).unwrap();
+            let mulu_yul::Stmt::Let { value: Some(v), .. } = &p.object.code.stmts[0] else {
+                panic!()
+            };
+            v.clone()
+        };
+        assert_eq!(
+            value_set(&e("and(x, not(31))"), &env).unwrap(),
+            IntervalSet::range(u(32), u(64))
+        );
     }
 }
