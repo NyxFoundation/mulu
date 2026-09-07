@@ -219,8 +219,25 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         }
     }
 
+    // The contract in the adopted Yul semantics, beside the model built from
+    // the same `ir`. This proves nothing; it is what the correspondence
+    // conditions would be stated about, and the normalisations the rendering
+    // needed are the assumptions that come with it.
+    let (semantics_path, normalisations) =
+        crate::build::write_semantics_module(&args.out, &contract.ir, &name)?;
+    println!("\nsemantics");
+    println!("  {} in EvmYul's notation", semantics_path.display());
+    if normalisations.is_empty() {
+        println!("  the rendering is a transcription: nothing was normalised");
+    } else {
+        for l in &normalisations {
+            println!("  {l}");
+        }
+    }
+
     // P1-04: what stands between a model claim and a claim about the program.
-    let ledger = crate::obligations::ledger(&ir, &abstraction.report, drift.as_ref());
+    let ledger =
+        crate::obligations::ledger(&ir, &abstraction.report, drift.as_ref(), &normalisations);
     print_obligations(&ledger);
 
     println!("\n--- analysis of the generated model ---\n");

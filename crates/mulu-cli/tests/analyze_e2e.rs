@@ -881,3 +881,81 @@ fn a_project_with_no_build_is_told_to_build_it() {
     assert!(err.contains("build the project first"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_contract_is_written_into_the_semantics_it_will_be_proved_against() {
+    if !ready() {
+        return;
+    }
+    // `Mulu.Semantics.Simulation` states the correspondence over an arbitrary
+    // concrete system. Stating it about *this* contract needs the contract in
+    // the semantics, so the analysis writes it there, from the same `ir` the
+    // model was built from.
+    let spec = root().join("examples/limits/Limits.spec.json");
+    let (_code, out) = analyze("semantics", &["--spec", spec.to_str().unwrap()]);
+    let module = out.join("semantics/Limits.lean");
+    let text = std::fs::read_to_string(&module).expect("semantics module");
+
+    assert!(text.contains("import EvmYul.Yul.Interpreter"), "{text:.200}");
+    assert!(text.contains("def contract : YulContract"), "{text:.200}");
+    assert!(text.contains("dispatcher :="));
+    // the guards the analysis reports on are in it
+    assert!(text.contains("external_fun_setLimit"), "the entrypoints must be there");
+    // `memoryguard` is a hint to solc's optimizer, and EvmYul has no such call
+    assert!(!text.contains("memoryguard("), "memoryguard must be unwrapped, not passed through");
+    // a require message is a word, not a quoted string: the notation has no
+    // string literal, and Yul says a string literal *is* that word
+    assert!(!text.contains("\"cap\""), "a string literal must become the word it denotes");
+
+    // and what the rendering did that a transcription would not is recorded
+    // against the obligation it raises, not left in a warning
+    let raised: Vec<String> = json(&out.join("obligations.json"))["obligations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "semantics:rendering-preserves-the-program")
+        .expect("the rendering obligation")["raised_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap().to_string())
+        .collect();
+    let joined = raised.join("\n");
+    assert!(joined.contains("memoryguard"), "{joined}");
+    assert!(joined.contains("32-byte word"), "{joined}");
+    // this contract has no loop and no defaultless switch, so it must not be
+    // made to carry those assumptions
+    assert!(!joined.contains("for loop"), "{joined}");
+    assert!(!joined.contains("no default"), "{joined}");
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[test]
+fn every_example_renders_into_the_semantics() {
+    if !ready() {
+        return;
+    }
+    // Refusing is the design: a half-rendered contract would give a semantics
+    // for a program that is not the one analysed. So every example has to go
+    // through, or the renderer is not usable on real solc output.
+    for (path, name) in [
+        ("examples/limits/Limits.sol", "Limits"),
+        ("examples/access/Vault.sol", "Vault"),
+        ("examples/typed/Meter.sol", "Meter"),
+        ("examples/overload/Over.sol", "Over"),
+        ("examples/guards/Gate.sol", "Gate"),
+    ] {
+        let out = std::env::temp_dir().join(format!("mulu-yl-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let o = mulu()
+            .args(["yul-lean", root().join(path).to_str().unwrap()])
+            .args(["--contract", name, "--out", out.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(0), "{name}: {}", String::from_utf8_lossy(&o.stderr));
+        let text = std::fs::read_to_string(out.join(format!("{name}.lean"))).unwrap();
+        assert!(text.contains("def contract : YulContract"), "{name}");
+        assert!(!text.contains("memoryguard("), "{name}");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+}

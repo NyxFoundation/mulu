@@ -30,3 +30,38 @@ jobs:
         run: make fixtures
       - name: Solidity end to end (analyze + verify, three examples)
         run: make analyze
+
+  # The correspondence side. Separate because EvmYul pulls mathlib: several
+  # gigabytes and a network fetch, which the job above must not need. It is
+  # its own job so that a break here never looks like a break in the checker.
+  semantics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        run: |
+          curl -sSfL https://github.com/leanprover/elan/releases/latest/download/elan-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./elan-init -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+      - name: Cache the dependency closure
+        uses: actions/cache@v4
+        with:
+          path: semantics/.lake
+          key: semantics-${{ hashFiles('semantics/lakefile.lean', 'semantics/lean-toolchain') }}
+      - name: Mathlib oleans
+        run: cd semantics && lake exe cache get || true
+      - name: Build the Concrete instance
+        run: cd semantics && lake build
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install solc
+        run: |
+          curl -sSfL https://github.com/ethereum/solidity/releases/download/v0.8.28/solc-static-linux -o /usr/local/bin/solc
+          chmod +x /usr/local/bin/solc
+      - name: Every example elaborates in the semantics it is rendered for
+        run: cargo build --release && make semantics-check
+      - name: Axiom audit
+        run: |
+          cd semantics
+          printf 'import MuluSemantics\n#print axioms MuluSemantics.no_step_to_out_of_fuel\n#print axioms MuluSemantics.step_consumes_one\n#print axioms MuluSemantics.no_step_from_error\n' > /tmp/ax.lean
+          lake env lean /tmp/ax.lean | tee /tmp/axioms.txt
+          ! grep -E "sorryAx|native_decide" /tmp/axioms.txt

@@ -4,7 +4,7 @@
 LEAN_DIR := $(CURDIR)/lean
 export MULU_LEAN_DIR := $(LEAN_DIR)
 
-.PHONY: build lean rust test check fixtures ir analyze regen-fixtures semantics clean
+.PHONY: build lean rust test check fixtures ir analyze regen-fixtures semantics semantics-check clean
 
 build: lean rust
 
@@ -63,6 +63,18 @@ fixtures: build
 # `verify` imports this.
 semantics:
 	cd semantics && lake build
+
+# The generated modules have to be accepted by the semantics they are written
+# for. Rendering that only mulu can read would prove nothing about anything.
+semantics-check: semantics
+	cd semantics && lake build EvmYul.Yul.YulNotation
+	@set -e; for f in examples/limits/Limits examples/access/Vault examples/typed/Meter \
+	                  examples/overload/Over examples/guards/Gate; do \
+	  n=$$(basename $$f); \
+	  ./target/release/mulu yul-lean $$f.sol --contract $$n --out /tmp/mulu-yul-lean; \
+	  (cd semantics && lake env lean /tmp/mulu-yul-lean/$$n.lean); \
+	  echo "$$n elaborates"; \
+	done
 
 check: test fixtures analyze
 

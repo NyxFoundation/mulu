@@ -217,7 +217,7 @@ correspondence
   findings are reported at: abstract-model
   9 obligation(s), 9 open
   6 to prove here:
-    semantics:contract-not-instantiated      reaches yul-semantics
+    semantics:rendering-preserves-the-program  reaches yul-semantics
     simulation:initial-covered               reaches yul-semantics
     simulation:step-covered                  reaches yul-semantics
     check:fail-step-matched:A                reaches yul-semantics
@@ -257,6 +257,23 @@ requires mathlib, so its dependency closure is several gigabytes and needs the
 network. `mulu analyze` and `mulu verify` import none of it, and `make check`
 still builds from Lean core alone, because the point of the kernel re-check is
 that a reader can reproduce it without trusting a supply chain.
+
+Every analysis writes the contract into that semantics, at
+`semantics/<Name>.lean` in the output directory, from the same `ir` the model
+was built from. `mulu yul-lean` produces the same module on its own. The
+rendering is not a transcription, and each way it is not is reported and
+recorded against the obligation it raises:
+
+```
+semantics
+  analysis-limits/semantics/Limits.lean in EvmYul's notation
+  a string literal was rendered as the 32-byte word Yul says it denotes, left-aligned and zero-padded
+  memoryguard(x) was rendered as x: it is a hint to solc's optimizer with no run-time meaning
+```
+
+A contract that needed no rewrite carries no such assumption. `make
+semantics-check` renders every example and checks Lean accepts it, because a
+rendering only mulu can read would prove nothing about anything.
 
 The rule is executable, not documentary. `verify` recomputes each finding's
 scope from the ledger and refuses a report that claims more; it also refuses a

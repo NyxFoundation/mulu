@@ -114,6 +114,22 @@ enum Cmd {
         #[arg(long, default_value = DEFAULT_EVM_VERSION)]
         evm_version: String,
     },
+    /// Render a contract's Yul as an EvmYul `YulContract` (Lean), for the correspondence
+    YulLean {
+        /// Solidity source files to compile
+        #[arg(required = true)]
+        sources: Vec<PathBuf>,
+        /// Which contract to render; required when the build defines several
+        #[arg(long)]
+        contract: Option<String>,
+        #[arg(long)]
+        out: PathBuf,
+        /// Path to solc (default: $MULU_SOLC, then PATH)
+        #[arg(long)]
+        solc: Option<PathBuf>,
+        #[arg(long, default_value = DEFAULT_EVM_VERSION)]
+        evm_version: String,
+    },
     /// Analyse a finite-product model (schema v1) and write an analysis directory
     AnalyzeModel {
         model: PathBuf,
@@ -195,6 +211,9 @@ fn run() -> Result<i32> {
             )?;
             copy_sarif(&out2, sarif.as_deref())?;
             Ok(code)
+        }
+        Cmd::YulLean { sources, contract, out, solc, evm_version } => {
+            build::yul_lean(&build::IrArgs { sources, contract, out, solc, evm_version })
         }
         Cmd::Ir { sources, contract, out, solc, evm_version } => build::run(&build::IrArgs {
             sources,

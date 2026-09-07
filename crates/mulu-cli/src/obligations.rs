@@ -191,6 +191,7 @@ pub fn ledger(
     ir: &ProgramIr,
     report: &AbstractionReport,
     drift: Option<&mulu_solc::Drift>,
+    normalisations: &[String],
 ) -> Ledger {
     let mut out = Vec::new();
 
@@ -202,22 +203,33 @@ pub fn ledger(
     // claim true, it split one obligation into two smaller and more honest
     // ones: this contract is not yet expressed in that semantics, and that
     // semantics is not proved to agree with the EVM.
-    let mut root = ob(
-        "semantics:contract-not-instantiated",
+    // The contract is in the semantics now: `semantics/<Name>.lean` in the
+    // analysis directory renders the same `ir` the model was built from. What
+    // is not proved is that the rendering is the same program. It is not a
+    // transcription, and each way it is not is listed here rather than
+    // described, so a contract that needed none of them carries none.
+    let mut rendering = ob(
+        "semantics:rendering-preserves-the-program",
         "yul-semantics",
-        "The Yul of this contract, expressed in the adopted semantics, with the state the \
-         analysis starts from. `MuluSemantics.concrete` takes both and produces the `Concrete` \
-         the simulation theorem applies to; nothing yet produces them from the ProgramIR, so \
-         there is no concrete system at the artifact analysed here.",
+        "The module rendered into `semantics/` denotes the same program as the Yul it was \
+         rendered from. It is not a transcription: EvmYul's notation and AST differ from Yul's \
+         grammar in a few places, and each difference is bridged by a rewrite that is faithful \
+         to the Yul specification and is not proved to be.",
         Some("MuluSemantics.concrete"),
-        vec![format!("the analysed artifact is {}", ir.derived_from)],
+        {
+            let mut v = vec![format!("the analysed artifact is {}", ir.derived_from)];
+            v.extend(normalisations.iter().cloned());
+            v
+        },
     );
-    root.would_need = Some(
-        "mulu emitting this contract as `EvmYul.Yul.Ast.Stmt` and a starting `Yul.State`, so \
-         that `MuluSemantics.concrete` names this artifact rather than an arbitrary program."
+    rendering.would_need = Some(
+        "a proof that each rewrite the renderer applies preserves the meaning of the Yul, \
+         stated against the same semantics. Nothing in the toolchain proves it today; a \
+         differential run of the rendered module against the EVM would be evidence and not a \
+         proof."
             .into(),
     );
-    out.push(root);
+    out.push(rendering);
     let mut adopted = ob(
         "semantics:evmyul-matches-the-evm",
         "yul-semantics",
@@ -484,7 +496,7 @@ mod tests {
 /// layer all of these reach.
 pub fn depends_on(kind: &str, check_id: Option<&str>) -> Vec<String> {
     let mut v = vec![
-        "semantics:contract-not-instantiated".to_string(),
+        "semantics:rendering-preserves-the-program".to_string(),
         "semantics:evmyul-matches-the-evm".to_string(),
         "simulation:initial-covered".to_string(),
         "simulation:step-covered".to_string(),

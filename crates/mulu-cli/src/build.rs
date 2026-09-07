@@ -4,7 +4,7 @@
 //! This command performs no analysis. It produces the intermediate artifact
 //! and says plainly what it could not model.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use mulu_solc::{CompileOptions, Solc};
 use mulu_yul::ir::{FunctionKind, Op};
 use mulu_yul::{CheckOrigin, ProgramIr, Purity};
@@ -404,4 +404,71 @@ pub fn check_sites(
     root: &Path,
 ) -> std::collections::BTreeMap<String, Site> {
     ir.checks.iter().filter_map(|c| Some((c.id.clone(), site_of(bundle, ir, root, c.source)?))).collect()
+}
+
+/// `mulu yul-lean` — the contract's Yul as an `EvmYul` `YulContract`, so the
+/// correspondence conditions can be stated about this contract rather than
+/// about an arbitrary program. `analyze` writes the same module into its
+/// output directory; this command is for looking at one on its own.
+///
+/// It reads the same unoptimized `ir` the analysis reads, from the same
+/// build, so the Lean module and the model are about the same bytes.
+pub fn yul_lean(args: &IrArgs) -> Result<i32> {
+    let (bundle, name, _ir) =
+        compile_and_lower(&args.sources, args.contract.as_deref(), args.solc.clone(), &args.evm_version)?;
+    let c = bundle.contract(&name).expect("selected contract");
+    let parsed = mulu_yul::parse::parse_object(&c.ir)
+        .map_err(|e| anyhow!("parsing the Yul of {name}: {e}"))?;
+    let deployed = parsed
+        .object
+        .deployed()
+        .ok_or_else(|| anyhow!("{name}: the Yul has no deployed object to render"))?;
+    let (module, norm) = mulu_yul::lean::contract_module(deployed, &name)
+        .map_err(|e| anyhow!("rendering {name} in EvmYul's notation: {e}"))?;
+    fs::create_dir_all(&args.out)?;
+    let path = args.out.join(format!("{name}.lean"));
+    fs::write(&path, &module)?;
+    println!("contract {name} from {}", c.source_path);
+    println!("compiler {}", bundle.compiler);
+    println!("object   {}", deployed.name);
+    println!("functions {}", deployed.functions().len());
+    if norm.is_empty() {
+        println!("\nthe rendering is a transcription: nothing was normalised");
+    } else {
+        println!("\nthe rendering is not a transcription:");
+        for l in norm.lines() {
+            println!("  {l}");
+        }
+    }
+    println!("\nwrote {}", path.display());
+    println!(
+        "\nThis states nothing. It puts the contract where the correspondence conditions of\n\
+         Mulu.Semantics.Simulation can be stated about it. That the rendering is the same\n\
+         program is itself unproved: semantics:rendering-preserves-the-program."
+    );
+    Ok(0)
+}
+
+/// The same rendering, for the analysis directory. `analyze` writes it beside
+/// the model so that the artifact the correspondence would be stated about
+/// sits next to the artifact the claims are about, and both came from the
+/// same `ir` bytes. Writing it needs no Lean and no mathlib: it is text.
+pub fn write_semantics_module(
+    out: &Path,
+    ir_text: &str,
+    name: &str,
+) -> Result<(PathBuf, Vec<String>)> {
+    let parsed = mulu_yul::parse::parse_object(ir_text)
+        .map_err(|e| anyhow!("parsing the Yul of {name}: {e}"))?;
+    let deployed = parsed
+        .object
+        .deployed()
+        .ok_or_else(|| anyhow!("{name}: the Yul has no deployed object to render"))?;
+    let (module, norm) = mulu_yul::lean::contract_module(deployed, name)
+        .map_err(|e| anyhow!("rendering {name} in EvmYul's notation: {e}"))?;
+    let dir = out.join("semantics");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{name}.lean"));
+    fs::write(&path, module)?;
+    Ok((path, norm.lines()))
 }
