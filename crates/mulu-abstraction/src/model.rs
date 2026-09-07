@@ -1256,6 +1256,64 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// What the loop whose head is `head` does, as much of it as the model
+    /// represents. See `LoopEffect`.
+    fn loop_effect(&mut self, f: &Function, head: usize) -> Result<LoopEffect, TraceStop> {
+        let body = loop_body(f, head);
+        let Some(hb) = f.blocks.iter().find(|b| b.id == head) else {
+            return Err(format!("the loop head {head} of {} is not a block", f.id).into());
+        };
+        // The head of a `for` decides whether to go round again; its other
+        // side is where the loop ends. A back edge to anything else is a
+        // shape this does not recognise.
+        let Terminator::Branch { then_block, else_block, .. } = &hb.terminator else {
+            return Err(format!(
+                "the loop at block {head} of {} does not end in a condition, so where it \
+                 leaves off is not determined",
+                f.id
+            )
+            .into());
+        };
+        let exit = if body.contains(then_block) { *else_block } else { *then_block };
+        if body.contains(&exit) {
+            return Err(format!("the loop at block {head} of {} has no way out", f.id).into());
+        }
+
+        let mut writes = Some(BTreeSet::new());
+        let mut defines = BTreeSet::new();
+        let mut can_revert = false;
+        for b in f.blocks.iter().filter(|b| body.contains(&b.id)) {
+            if matches!(b.terminator, Terminator::Revert { .. }) {
+                can_revert = true;
+            }
+            for ins in &b.instructions {
+                can_revert |= ins.effects.can_revert;
+                for t in ins.writes.iter() {
+                    defines.insert(t.clone());
+                }
+                if !ins.effects.writes_storage {
+                    continue;
+                }
+                let Some(w) = &ins.storage_write else {
+                    // A write the front end did not reduce to a slot and a
+                    // value: it could have been to any of them.
+                    writes = None;
+                    continue;
+                };
+                match self.slot_of(&w.slot_text) {
+                    Ok((_, label)) => {
+                        if let Some(set) = &mut writes {
+                            set.insert(label);
+                        }
+                    }
+                    // A mapping or array cell, which the model does not track.
+                    Err(_) => {}
+                }
+            }
+        }
+        Ok(LoopEffect { exit, writes, defines, can_revert })
+    }
+
     /// Does every check inside this expression's helpers pass, given what the
     /// walk knows about its arguments?
     ///
@@ -2128,10 +2186,81 @@ impl<'a> Walk<'a> {
 
             match &blk.terminator {
                 Terminator::Jump { target } => {
-                    let fr = frames.last_mut().unwrap();
-                    if !fr.visited.insert((*target, 0)) {
-                        return Err("the abstract execution revisits a block; P1a does not model loops".into());
+                    if frames.last().unwrap().visited.contains(&(*target, 0)) {
+                        // A back edge. The loop is over-approximated rather
+                        // than unrolled, and the walk continues past it.
+                        let eff = self.loop_effect(&f, *target)?;
+                        self.b.note(format!(
+                            "loop-over-approximated: the loop at block {target} of {func} is not \
+                             unrolled. Everything its body writes is unknown afterwards and \
+                             everything it defines is forgotten, so a check after it is decided \
+                             by what the loop cannot have changed"
+                        ));
+                        // What it writes, forgotten.
+                        let slots: Vec<usize> = match &eff.writes {
+                            Some(w) => (0..self.per_slot.len())
+                                .filter(|i| w.contains(&self.per_slot[*i].0))
+                                .collect(),
+                            None => (0..self.per_slot.len()).collect(),
+                        };
+                        for i in slots {
+                            let ways = self.per_slot[i].1.len();
+                            let to = if ways <= 1 {
+                                0
+                            } else {
+                                splits.next().ok_or_else(|| TraceStop::Undecided {
+                                    ways,
+                                    what: format!(
+                                        "what the loop in {func} leaves in {}",
+                                        self.per_slot[i].0
+                                    ),
+                                })?
+                            };
+                            let label = self.per_slot[i].0.clone();
+                            storage[i] = to;
+                            steps.push(Step::Store { slot: i, label, to });
+                        }
+                        // What it defines, forgotten.
+                        {
+                            let fr = frames.last_mut().unwrap();
+                            for n in &eff.defines {
+                                fr.env.remove(n);
+                                fr.terms.remove(n);
+                            }
+                        }
+                        // Whether it reverted.
+                        if eff.can_revert {
+                            let reverted = decide_or_split(
+                                &mulu_yul::Expr::Ident {
+                                    name: format!("loop-reverts:{func}#{target}"),
+                                    src: None,
+                                },
+                                &terms,
+                                &layout,
+                                &mut facts,
+                                &mut splits,
+                                || format!("whether the loop in {func} reverts"),
+                            )?;
+                            if reverted {
+                                if reverted_at.is_none() {
+                                    reverted_at = Some(facts.clone());
+                                }
+                                return Ok(Trace {
+                                    steps,
+                                    ending: Ending::Revert,
+                                    assumed: reverted_at.unwrap_or(facts),
+                                    reverts: true,
+                                });
+                            }
+                        }
+                        let fr = frames.last_mut().unwrap();
+                        fr.visited.insert((eff.exit, 0));
+                        fr.block = eff.exit;
+                        fr.index = 0;
+                        continue;
                     }
+                    let fr = frames.last_mut().unwrap();
+                    fr.visited.insert((*target, 0));
                     fr.block = *target;
                     fr.index = 0;
                 }
@@ -2952,6 +3081,70 @@ fn bind_terms(
         }
     }
     out
+}
+
+/// What a loop does, as much of it as the model represents.
+///
+/// P1a does not unroll a loop: unrolling a finite number of times and using
+/// the result for an unbounded claim is exactly what docs/09 forbids. It
+/// over-approximates instead. Everything the body writes is unknown
+/// afterwards, everything it defines is forgotten, and if any part of it can
+/// revert then so can the loop. That is weaker than knowing what the loop
+/// does and much stronger than refusing the function, which is what happened
+/// before: a contract that copies an array was thrown away whole.
+#[derive(Debug, Clone)]
+struct LoopEffect {
+    /// Where control goes when the loop is done.
+    exit: usize,
+    /// Declared slots the body writes. `None` means it writes a slot the
+    /// model could not resolve, so any of them may have moved.
+    writes: Option<BTreeSet<String>>,
+    /// Names the body assigns, which are no longer what they were.
+    defines: BTreeSet<String>,
+    /// Some path through the body reverts.
+    can_revert: bool,
+}
+
+/// The blocks of `f` that `head` reaches and that reach `head`: the body of
+/// the loop whose head it is.
+fn loop_body(f: &Function, head: usize) -> BTreeSet<usize> {
+    let succs = |b: usize| -> Vec<usize> {
+        let Some(blk) = f.blocks.iter().find(|x| x.id == b) else { return vec![] };
+        match &blk.terminator {
+            Terminator::Jump { target } => vec![*target],
+            Terminator::Branch { then_block, else_block, .. } => vec![*then_block, *else_block],
+            Terminator::Switch { cases, default, .. } => {
+                cases.iter().map(|(_, b)| *b).chain(*default).collect()
+            }
+            _ => vec![],
+        }
+    };
+    // Forward from the head.
+    let mut fwd = BTreeSet::new();
+    let mut stack = vec![head];
+    while let Some(b) = stack.pop() {
+        if !fwd.insert(b) {
+            continue;
+        }
+        stack.extend(succs(b));
+    }
+    // Backward: the blocks in `fwd` from which the head is reachable.
+    let mut back: BTreeSet<usize> = BTreeSet::new();
+    back.insert(head);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in &fwd {
+            if back.contains(b) {
+                continue;
+            }
+            if succs(*b).iter().any(|s| back.contains(s)) {
+                back.insert(*b);
+                changed = true;
+            }
+        }
+    }
+    back
 }
 
 /// Every call in an expression, with its arguments, innermost last.

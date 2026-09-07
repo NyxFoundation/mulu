@@ -180,6 +180,76 @@ fn a_guard_in_an_imported_modifier_is_attributed_to_it() {
 }
 
 #[test]
+fn a_loop_is_over_approximated_rather_than_unrolled_or_refused() {
+    if !ready() {
+        return;
+    }
+    // Unrolling a loop a finite number of times and using the result for an
+    // unbounded claim is what docs/09 forbids, and refusing it threw away
+    // every contract that copies an array. The loop's *effect* is
+    // over-approximated instead: what it writes is unknown afterwards, what
+    // it defines is forgotten, and if it can revert then so can the function.
+    let dir = std::env::temp_dir().join(format!("mulu-loop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("C.sol"),
+        r#"pragma solidity ^0.8.0;
+contract C {
+    uint256 public total;
+    uint256 public untouched;
+    function sum(uint256 n) external {
+        require(n > 0);
+        uint256 acc = 0;
+        for (uint256 i = 0; i < n; i++) { acc += i; }
+        total = acc;
+    }
+}"#,
+    )
+    .unwrap();
+    let out = dir.join("out");
+    let code = mulu()
+        .args(["analyze", dir.join("C.sol").to_str().unwrap()])
+        .args(["--contract", "C", "--out", out.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .code()
+        .unwrap();
+    assert_eq!(code, 0, "a loop is a coarser model, not an incomplete one");
+
+    let a = json(&out.join("abstraction.json"));
+    assert!(
+        a["unsupported"].as_array().unwrap().is_empty(),
+        "nothing should be unmodelled: {:?}",
+        a["unsupported"]
+    );
+    let assumptions: Vec<String> = a["assumptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        assumptions.iter().any(|x| x.starts_with("loop-over-approximated:")),
+        "the coarseness has to be on the record: {assumptions:?}"
+    );
+
+    // The guard before the loop is still decided, because the loop cannot
+    // have changed the argument. That is the point of over-approximating
+    // rather than giving up on the function.
+    let model = json(&out.join("model.json"));
+    let events: Vec<String> = model["transitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["event"].as_str().unwrap().to_string())
+        .collect();
+    assert!(events.iter().any(|e| e == "A_pass"), "{events:?}");
+    assert!(events.iter().any(|e| e == "A_fail"), "{events:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_guard_the_regions_do_not_decide_splits_the_walk_and_says_so() {
     if !ready() {
         return;
