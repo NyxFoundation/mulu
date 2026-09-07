@@ -24,6 +24,17 @@ regression fails and normal noise does not. It also catches something a floor
 would not obviously catch: the run has to *finish*, and the worst defect this
 corpus found was a ten-line contract that never did.
 
+**28.3% overstates it, and the harness now says so.** Of the 404 contracts
+that reach a complete model, 56 contain a guard mulu would report on. The rest
+model to three states and a straight line, because there is nothing in them to
+say anything about. Coverage that produces no finding is not coverage.
+
+Both numbers are about a corpus that is a catalogue of language features, not
+a sample of contracts people write: only 13% of it contains a `require` or an
+`assert` at all, because most of it is testing arithmetic and ABI encoding.
+The question "how much real Solidity can mulu read" is a different
+measurement, on a different corpus, and it has not been made.
+
 The number to read is not the percentage. It is the histogram of *why* mulu
 stops, because that is the list of things to implement, in the order the
 corpus says they matter. A percentage on its own would only say whether the

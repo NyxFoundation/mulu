@@ -58,8 +58,14 @@ struct Outcome {
     calls: usize,
     /// Entrypoints the abstraction modelled, when it got that far.
     entrypoints: usize,
+    /// Checks in the ProgramIR, which includes the ones solc inserts.
     checks: usize,
+    /// Checks in the *model*: the guards mulu would report on. A model with
+    /// none is a model with nothing to say, and counting those as coverage
+    /// would flatter the number.
+    model_checks: usize,
     states: usize,
+    transitions: usize,
 }
 
 /// The reason strings carry contract and function names, which would make
@@ -98,7 +104,9 @@ fn measure(case: &corpus::Case, solc: Option<PathBuf>) -> Outcome {
         calls: case.expectations.len(),
         entrypoints: 0,
         checks: 0,
+        model_checks: 0,
         states: 0,
+        transitions: 0,
     };
     if let Some(why) = case.out_of_scope() {
         o.reason = why.to_string();
@@ -162,6 +170,8 @@ fn measure(case: &corpus::Case, solc: Option<PathBuf>) -> Outcome {
     let abstraction = mulu_abstraction::model::Builder::new(&ir, &[]).build();
     o.entrypoints = abstraction.report.entrypoints_modelled.len();
     o.states = abstraction.model.states.len();
+    o.transitions = abstraction.model.transitions.len();
+    o.model_checks = abstraction.model.checks.len();
     if abstraction.report.complete() {
         o.stage = "modelled";
     } else {
@@ -267,7 +277,17 @@ fn main() -> Result<()> {
         println!("  {stage:<14} {n:>5}");
     }
     if in_scope > 0 {
-        println!("\n  modelled / in scope: {modelled}/{in_scope} = {:.1}%", 100.0 * modelled as f64 / in_scope as f64);
+        println!(
+            "\n  modelled / in scope: {modelled}/{in_scope} = {:.1}%",
+            100.0 * modelled as f64 / in_scope as f64
+        );
+        // The number that says whether the coverage is worth anything: a
+        // model with no guard in it is a model mulu has nothing to say about.
+        let speaking = out.iter().filter(|o| o.stage == "modelled" && o.model_checks > 0).count();
+        println!(
+            "  of those, with a guard to report on: {speaking} = {:.1}% of in scope",
+            100.0 * speaking as f64 / in_scope as f64
+        );
     }
     println!("\nwhy the rest stopped");
     let mut ranked: Vec<(&String, &usize)> = reasons.iter().collect();
