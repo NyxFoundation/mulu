@@ -3,16 +3,26 @@ import EvmYul.Yul.YulNotation
 import MuluDiff.Runner
 
 /-!
-# Where the adopted semantics differs from the Yul specification
+# Two defects in the adopted semantics
 
 `semantics:evmyul-matches-the-evm` is an assumption, not a proof, and this
 file is what an assumption looks like when someone checks it. Each case below
 is a Yul program whose meaning the specification fixes, run through EvmYul,
 with what the specification says next to what came out.
 
-Both cases found here are reasons `mulu`'s renderer does what it does. The
-second is why `mulu-yul/src/lean.rs` writes an explicit empty `default`: not a
-precaution, a demonstrated need.
+Where they differ, **EvmYul is wrong**. These are not two defensible readings
+of an ambiguous document. The Yul specification says a switch takes "the
+branch corresponding to the matching constant", and that the default "is taken
+if none of the literal constants matches". Both cases below contradict that in
+the direction of the implementation, and the first is asymmetric in a way no
+intended semantics would be: each case's error is recorded per case while the
+default's escapes.
+
+What follows from that is not that mulu works around them. It is that a
+contract containing the first construct cannot be read in this semantics at
+all, so `mulu-yul/src/lean.rs` refuses to compare one and records it against
+the obligation it defeats. The second never arises from solc, which always
+writes `default {}` itself.
 
 Run with `make semantics-probe`. A case that starts agreeing is as
 interesting as one that starts disagreeing, so the expected strings are
@@ -59,9 +69,9 @@ def unmatchedNoDefault : YulContract where
     } >
   functions := noFunctions
 
-/-- The same program with the empty `default` `mulu` writes instead. This one
-agrees with the specification, which is the whole reason the renderer writes
-it. -/
+/-- The same program with an explicit empty `default`, which is what solc
+writes and therefore what mulu renders. It agrees with the specification, so
+the second defect does not reach anything compiled from Solidity. -/
 def unmatchedEmptyDefault : YulContract where
   dispatcher :=
     <s {
@@ -87,7 +97,7 @@ def unmatchedAstDirect : YulContract where
 def cases : List (String × String × YulContract) :=
   [ ("matching case, reverting default", "ok 0=7", matchedCaseWithRevertingDefault)
   , ("unmatched, no default (notation)", "ok 1=3", unmatchedNoDefault)
-  , ("unmatched, empty default (what mulu writes)", "ok 1=3", unmatchedEmptyDefault)
+  , ("unmatched, empty default (what solc writes)", "ok 1=3", unmatchedEmptyDefault)
   , ("unmatched, empty default list (AST)", "ok 1=3", unmatchedAstDirect) ]
 
 /-- What EvmYul actually does, today. Pinned so that a change in either
@@ -109,7 +119,7 @@ def run : IO UInt32 := do
       IO.println s!"           CHANGED: this probe expected {expected}"
       bad := bad + 1
   if bad == 0 then
-    IO.println "\nEvery case behaves as this probe recorded. Two of them still differ from the specification."
+    IO.println "\nEvery case behaves as this probe recorded. Two of them are still wrong."
   return bad
 
 end MuluDiff.Probe

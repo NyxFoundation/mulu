@@ -423,7 +423,7 @@ pub fn yul_lean(args: &IrArgs) -> Result<i32> {
         .object
         .deployed()
         .ok_or_else(|| anyhow!("{name}: the Yul has no deployed object to render"))?;
-    let (module, norm) = mulu_yul::lean::contract_module(deployed, &name)
+    let (module, norm, hazards) = mulu_yul::lean::contract_module(deployed, &name)
         .map_err(|e| anyhow!("rendering {name} in EvmYul's notation: {e}"))?;
     fs::create_dir_all(&args.out)?;
     let path = args.out.join(format!("{name}.lean"));
@@ -438,6 +438,12 @@ pub fn yul_lean(args: &IrArgs) -> Result<i32> {
         println!("\nthe rendering is not a transcription:");
         for l in norm.lines() {
             println!("  {l}");
+        }
+    }
+    if !hazards.is_empty() {
+        eprintln!("\nthis contract cannot be read in the adopted semantics as it stands:");
+        for l in hazards.lines() {
+            eprintln!("  {l}");
         }
     }
     println!("\nwrote {}", path.display());
@@ -457,18 +463,18 @@ pub fn write_semantics_module(
     out: &Path,
     ir_text: &str,
     name: &str,
-) -> Result<(PathBuf, Vec<String>)> {
+) -> Result<(PathBuf, Vec<String>, Vec<String>)> {
     let parsed = mulu_yul::parse::parse_object(ir_text)
         .map_err(|e| anyhow!("parsing the Yul of {name}: {e}"))?;
     let deployed = parsed
         .object
         .deployed()
         .ok_or_else(|| anyhow!("{name}: the Yul has no deployed object to render"))?;
-    let (module, norm) = mulu_yul::lean::contract_module(deployed, name)
+    let (module, norm, hazards) = mulu_yul::lean::contract_module(deployed, name)
         .map_err(|e| anyhow!("rendering {name} in EvmYul's notation: {e}"))?;
     let dir = out.join("semantics");
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{name}.lean"));
     fs::write(&path, module)?;
-    Ok((path, norm.lines()))
+    Ok((path, norm.lines(), hazards.lines()))
 }

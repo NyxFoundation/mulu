@@ -192,6 +192,7 @@ pub fn ledger(
     report: &AbstractionReport,
     drift: Option<&mulu_solc::Drift>,
     normalisations: &[String],
+    hazards: &[String],
 ) -> Ledger {
     let mut out = Vec::new();
 
@@ -242,6 +243,9 @@ pub fn ledger(
     // Not ours. Adopting a semantics moves an assumption; it does not remove
     // one, and the ledger has to show where the assumption went.
     adopted.bearer = "evmyul".into();
+    // Not a possibility any more, where a contract contains one of them: a
+    // measured defect belongs on the obligation it defeats.
+    adopted.raised_by.extend(hazards.iter().cloned());
     adopted.would_need = Some(
         "a proof that EvmYul agrees with the EVM. None exists for any EVM semantics. Its \
          conformance runs against ethereum/tests are the evidence there is."

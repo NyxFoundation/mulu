@@ -34,6 +34,29 @@ use std::fmt::Write as _;
 #[derive(Debug, Default, Clone)]
 pub struct Normalisations(BTreeSet<&'static str>);
 
+/// Constructs in this contract that the adopted semantics gets **wrong**.
+///
+/// Separate from [`Normalisations`], which is what mulu did to the program.
+/// This is what someone else's semantics does to it, and the two must not be
+/// read as one list: a rewrite mulu chose is a thing to justify, a defect in
+/// EvmYul is a thing that makes the rendered module not mean the Yul.
+#[derive(Debug, Default, Clone)]
+pub struct Hazards(BTreeSet<String>);
+
+impl Hazards {
+    fn note(&mut self, what: String) {
+        self.0.insert(what);
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        self.0.iter().cloned().collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 impl Normalisations {
     fn note(&mut self, what: &'static str) {
         self.0.insert(what);
@@ -52,7 +75,8 @@ const MEMORYGUARD: &str = "memoryguard(x) was rendered as x: it is a hint to sol
                            with no run-time meaning, and EvmYul does not model it";
 const SWITCH_DEFAULT: &str = "a switch with no default was given an empty one: Yul says an \
                               unmatched switch does nothing, and EvmYul's notation otherwise \
-                              supplies `default { break }`";
+                              supplies `default { break }`. solc always writes `default {}` \
+                              itself, so this fires only on Yul that did not come from solc";
 const FOR_INIT: &str = "a for loop's initialiser was hoisted before the loop: EvmYul's `Stmt.For` \
                         has none, following solc's own ForLoopInitRewriter, and this is sound \
                         only because Yul scopes those names to the loop";
@@ -203,12 +227,18 @@ fn pad(indent: usize) -> String {
     "  ".repeat(indent)
 }
 
-fn stmt(s: &Stmt, indent: usize, out: &mut String, n: &mut Normalisations) -> Result<(), LeanEmitError> {
+fn stmt(
+    s: &Stmt,
+    indent: usize,
+    out: &mut String,
+    n: &mut Normalisations,
+    h: &mut Hazards,
+) -> Result<(), LeanEmitError> {
     let p = pad(indent);
     match s {
         Stmt::Block(b) => {
             let _ = writeln!(out, "{p}{{");
-            block_body(b, indent + 1, out, n)?;
+            block_body(b, indent + 1, out, n, h)?;
             let _ = writeln!(out, "{p}}}");
         }
         Stmt::Function(_) => {
@@ -235,7 +265,7 @@ fn stmt(s: &Stmt, indent: usize, out: &mut String, n: &mut Normalisations) -> Re
         }
         Stmt::If { cond, body, .. } => {
             let _ = writeln!(out, "{p}if {} {{", rendered(cond, n)?);
-            block_body(body, indent + 1, out, n)?;
+            block_body(body, indent + 1, out, n, h)?;
             let _ = writeln!(out, "{p}}}");
         }
         Stmt::Switch { value, cases, .. } => {
@@ -248,10 +278,24 @@ fn stmt(s: &Stmt, indent: usize, out: &mut String, n: &mut Normalisations) -> Re
                     }
                     None => {
                         has_default = true;
+                        // EvmYul runs the default branch before selecting and
+                        // propagates its error, so a non-empty default runs
+                        // even when a case matches. The program is ordinary
+                        // Yul; the semantics is what is wrong, and a contract
+                        // that contains one cannot be read there.
+                        if !c.body.stmts.is_empty() {
+                            h.note(
+                                "a `switch` here has a non-empty `default`. EvmYul executes the \
+                                 default branch even when a case matches and propagates its \
+                                 error, so the rendered module does not mean what this Yul \
+                                 means. See semantics/MuluDiff/Probe.lean"
+                                    .to_string(),
+                            );
+                        }
                         let _ = writeln!(out, "{p}default {{");
                     }
                 }
-                block_body(&c.body, indent + 1, out, n)?;
+                block_body(&c.body, indent + 1, out, n, h)?;
                 let _ = writeln!(out, "{p}}}");
             }
             if !has_default {
@@ -267,12 +311,12 @@ fn stmt(s: &Stmt, indent: usize, out: &mut String, n: &mut Normalisations) -> Re
                 n.note(FOR_INIT);
             }
             for s in &pre.stmts {
-                stmt(s, indent, out, n)?;
+                stmt(s, indent, out, n, h)?;
             }
             let _ = writeln!(out, "{p}for {{}} {} {{", rendered(cond, n)?);
-            block_body(post, indent + 1, out, n)?;
+            block_body(post, indent + 1, out, n, h)?;
             let _ = writeln!(out, "{p}}} {{");
-            block_body(body, indent + 1, out, n)?;
+            block_body(body, indent + 1, out, n, h)?;
             let _ = writeln!(out, "{p}}}");
         }
         Stmt::Break { .. } => {
@@ -288,37 +332,43 @@ fn stmt(s: &Stmt, indent: usize, out: &mut String, n: &mut Normalisations) -> Re
     Ok(())
 }
 
-fn block_body(b: &Block, indent: usize, out: &mut String, n: &mut Normalisations) -> Result<(), LeanEmitError> {
+fn block_body(
+    b: &Block,
+    indent: usize,
+    out: &mut String,
+    n: &mut Normalisations,
+    h: &mut Hazards,
+) -> Result<(), LeanEmitError> {
     for s in &b.stmts {
-        stmt(s, indent, out, n)?;
+        stmt(s, indent, out, n, h)?;
     }
     Ok(())
 }
 
 /// The dispatcher: everything in the object's code block that is not a named
 /// function definition.
-fn dispatcher(o: &Object, n: &mut Normalisations) -> Result<String, LeanEmitError> {
+fn dispatcher(o: &Object, n: &mut Normalisations, h: &mut Hazards) -> Result<String, LeanEmitError> {
     let mut out = String::new();
     out.push_str("{\n");
     for s in &o.code.stmts {
         if matches!(s, Stmt::Function(_)) {
             continue;
         }
-        stmt(s, 1, &mut out, n)?;
+        stmt(s, 1, &mut out, n, h)?;
     }
     out.push_str("}\n");
     Ok(out)
 }
 
 /// One named function, in the form `<f … >` takes.
-fn function(f: &FunctionDef, n: &mut Normalisations) -> Result<String, LeanEmitError> {
+fn function(f: &FunctionDef, n: &mut Normalisations, h: &mut Hazards) -> Result<String, LeanEmitError> {
     let mut out = String::new();
     let _ = write!(out, "function {}({})", ident(&f.name)?, names(&f.params)?);
     if !f.returns.is_empty() {
         let _ = write!(out, " -> {}", names(&f.returns)?);
     }
     out.push_str(" {\n");
-    block_body(&f.body, 1, &mut out, n)?;
+    block_body(&f.body, 1, &mut out, n, h)?;
     out.push_str("}\n");
     Ok(out)
 }
@@ -328,15 +378,15 @@ fn function(f: &FunctionDef, n: &mut Normalisations) -> Result<String, LeanEmitE
 pub fn contract_module(
     o: &Object,
     module: &str,
-) -> Result<(String, Normalisations), LeanEmitError> {
-    let (def, n) = contract_def(o)?;
+) -> Result<(String, Normalisations, Hazards), LeanEmitError> {
+    let (def, n, h) = contract_def(o)?;
     let mut out = String::new();
     out.push_str(HEADER);
     out.push_str("import EvmYul.Yul.Interpreter\nimport EvmYul.Yul.YulNotation\n\n");
     let _ = writeln!(out, "namespace MuluGenerated.{}\n", ident(module)?);
     out.push_str("open EvmYul EvmYul.Yul EvmYul.Yul.Ast\n\n");
     out.push_str(&def);
-    Ok((out, n))
+    Ok((out, n, h))
 }
 
 /// The header every generated module carries, so a reader of the file alone
@@ -353,17 +403,18 @@ pub const HEADER: &str = concat!(
 
 /// Just the `def contract : YulContract` block, for a caller that supplies
 /// its own namespace and imports.
-pub fn contract_def(o: &Object) -> Result<(String, Normalisations), LeanEmitError> {
+pub fn contract_def(o: &Object) -> Result<(String, Normalisations, Hazards), LeanEmitError> {
     let mut n = Normalisations::default();
+    let mut h = Hazards::default();
     let mut out = String::new();
     let _ = writeln!(out, "/-- Derived from the Yul object `{}`. -/", o.name);
     out.push_str("def contract : YulContract where\n  dispatcher :=\n    <s ");
-    out.push_str(&dispatcher(o, &mut n)?);
+    out.push_str(&dispatcher(o, &mut n, &mut h)?);
     out.push_str("    >\n  functions :=\n    (∅ : Finmap (fun (_ : YulFunctionName) ↦ FunctionDefinition))\n");
     for f in o.functions() {
-        let _ = writeln!(out, "    |>.insert \"{}\"\n      <f {}      >", f.name, function(f, &mut n)?);
+        let _ = writeln!(out, "    |>.insert \"{}\"\n      <f {}      >", f.name, function(f, &mut n, &mut h)?);
     }
-    Ok((out, n))
+    Ok((out, n, h))
 }
 
 #[cfg(test)]

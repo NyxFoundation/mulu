@@ -923,10 +923,28 @@ fn the_contract_is_written_into_the_semantics_it_will_be_proved_against() {
     let joined = raised.join("\n");
     assert!(joined.contains("memoryguard"), "{joined}");
     assert!(joined.contains("32-byte word"), "{joined}");
-    // this contract has no loop and no defaultless switch, so it must not be
-    // made to carry those assumptions
+    // this contract has no loop, and solc writes `default {}` itself, so it
+    // must not be made to carry either assumption
     assert!(!joined.contains("for loop"), "{joined}");
     assert!(!joined.contains("no default"), "{joined}");
+
+    // and solc's dispatcher has an empty default, so the contract does not
+    // trigger the defect that would make it unreadable in the semantics
+    let evmyul: Vec<String> = json(&out.join("obligations.json"))["obligations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "semantics:evmyul-matches-the-evm")
+        .unwrap()["raised_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        !evmyul.iter().any(|l| l.contains("non-empty `default`")),
+        "{evmyul:?}"
+    );
     let _ = std::fs::remove_dir_all(&out);
 }
 
@@ -958,4 +976,45 @@ fn every_example_renders_into_the_semantics() {
         assert!(!text.contains("memoryguard("), "{name}");
         let _ = std::fs::remove_dir_all(&out);
     }
+}
+
+#[test]
+fn a_contract_the_semantics_mis_executes_is_not_compared() {
+    if !ready() {
+        return;
+    }
+    // EvmYul runs a switch's default branch even when a case matches, and
+    // propagates its error. That is a defect in the semantics, not a rewrite
+    // mulu could make: the program is ordinary Yul. So a contract containing
+    // one is refused rather than measured, because agreement or disagreement
+    // on a path the semantics gets wrong says nothing about the rendering.
+    let dir = std::env::temp_dir().join(format!("mulu-sw-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Sw.sol"),
+        r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract Sw {
+    uint256 public v;
+    function pick(uint256 x) external {
+        assembly {
+            switch x
+            case 1 { sstore(0, 7) }
+            default { revert(0, 0) }
+        }
+    }
+}"#,
+    )
+    .unwrap();
+
+    let o = mulu()
+        .args(["yul-lean", dir.join("Sw.sol").to_str().unwrap()])
+        .args(["--contract", "Sw", "--out", dir.join("out").to_str().unwrap()])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("cannot be read in the adopted semantics"), "{err}");
+    assert!(err.contains("non-empty `default`"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

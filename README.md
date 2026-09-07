@@ -294,6 +294,23 @@ divergence, which is a defect in one of three places: the rendering is a
 different program, EvmYul and revm disagree about the EVM, or the analysis is
 reading the wrong artifact.
 
+`make semantics-probe` asks the other question: does the adopted semantics
+agree with the Yul specification? On two of four programs it does not, and
+the specification is not ambiguous about either, so EvmYul is wrong.
+
+| program | Yul says | EvmYul |
+| --- | --- | --- |
+| `switch 1 case 1 { sstore(0,7) } default { revert(0,0) }` | `ok 0=7` | `revert` |
+| `sstore(1,3); switch 9 case 1 { … }` with no `default` | `ok 1=3` | `ok`, the write is lost |
+
+The first is in the interpreter, which runs the default branch before
+selecting and lets its error escape while catching each case's. A contract
+containing a non-empty `default` therefore cannot be read in this semantics at
+all, so mulu refuses to compare one and records it against
+`semantics:evmyul-matches-the-evm`. The second is in the notation, which
+substitutes `default { break }`; solc always writes `default {}` itself, so
+nothing compiled from Solidity reaches it.
+
 The rule is executable, not documentary. `verify` recomputes each finding's
 scope from the ledger and refuses a report that claims more; it also refuses a
 ledger that claims a discharge, since the tool discharges nothing and cannot

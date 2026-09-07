@@ -223,7 +223,7 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
     // the same `ir`. This proves nothing; it is what the correspondence
     // conditions would be stated about, and the normalisations the rendering
     // needed are the assumptions that come with it.
-    let (semantics_path, normalisations) =
+    let (semantics_path, normalisations, hazards) =
         crate::build::write_semantics_module(&args.out, &contract.ir, &name)?;
     println!("\nsemantics");
     println!("  {} in EvmYul's notation", semantics_path.display());
@@ -234,10 +234,13 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
             println!("  {l}");
         }
     }
+    for l in &hazards {
+        println!("  CANNOT BE READ THERE: {l}");
+    }
 
     // P1-04: what stands between a model claim and a claim about the program.
     let ledger =
-        crate::obligations::ledger(&ir, &abstraction.report, drift.as_ref(), &normalisations);
+        crate::obligations::ledger(&ir, &abstraction.report, drift.as_ref(), &normalisations, &hazards);
     print_obligations(&ledger);
 
     println!("\n--- analysis of the generated model ---\n");

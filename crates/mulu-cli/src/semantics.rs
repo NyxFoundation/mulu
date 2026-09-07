@@ -146,8 +146,18 @@ pub fn run(args: &DiffArgs) -> Result<i32> {
         .object
         .deployed()
         .ok_or_else(|| anyhow!("{name}: the Yul has no deployed object"))?;
-    let (def, norm) = mulu_yul::lean::contract_def(object)
+    let (def, norm, hazards) = mulu_yul::lean::contract_def(object)
         .map_err(|e| anyhow!("rendering {name} in EvmYul's notation: {e}"))?;
+    if !hazards.is_empty() {
+        // Comparing the two here would be measuring a path the semantics is
+        // known to get wrong, and reporting agreement or disagreement on it
+        // would say nothing about the rendering.
+        eprintln!("this contract cannot be read in the adopted semantics as it stands:");
+        for l in hazards.lines() {
+            eprintln!("  {l}");
+        }
+        bail!("refusing to compare a contract the semantics is known to mis-execute");
+    }
     let module = generated_module(&def, &initial, &calls)?;
 
     let dir = args.semantics_dir.join("MuluDiff");
