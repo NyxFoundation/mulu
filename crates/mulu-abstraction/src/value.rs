@@ -42,26 +42,40 @@ pub fn value_set(e: &Expr, env: &Env) -> Result<IntervalSet, String> {
             // A mask that covers everything the inner expression can produce
             // leaves it alone. Solidity's narrowing cleanups are this shape.
             ("and", 2) => {
-                // The mask side may be written rather than given: solc emits
-                // `not(31)` for a round-down. Evaluating it first is the
-                // difference between reading that and refusing it.
-                let point = |e: &Expr| -> Option<U256> {
-                    if let Some(m) = mask_of(e) {
-                        return Some(m);
-                    }
-                    let set = value_set(e, env).ok()?;
+                // Each side is evaluated **once**. An earlier version asked
+                // whether each side was a single value and then evaluated the
+                // chosen side again, so every nested `and` evaluated its
+                // child twice and a chain of cleanups cost two to the depth.
+                // The mask may be written rather than given, since solc emits
+                // `not(31)` for a round-down, so a literal check alone is not
+                // enough.
+                let (l, r) = (mask_of(&args[0]), mask_of(&args[1]));
+                if let (Some(a), Some(b)) = (l, r) {
+                    return Ok(IntervalSet::point(a & b));
+                }
+                let single = |set: &IntervalSet| -> Option<U256> {
                     let (lo, hi) = set.bounds()?;
                     (lo == hi).then_some(lo)
                 };
-                let (inner, mask) = match (point(&args[0]), point(&args[1])) {
-                    (None, Some(m)) => (&args[0], m),
-                    (Some(m), None) => (&args[1], m),
-                    (Some(a), Some(b)) => return Ok(IntervalSet::point(a & b)),
+                let (set, mask) = match (l, r) {
+                    (None, Some(m)) => (value_set(&args[0], env)?, m),
+                    (Some(m), None) => (value_set(&args[1], env)?, m),
                     (None, None) => {
-                        return Err("`and` of two non-literals is outside the P1a fragment".into())
+                        let a = value_set(&args[0], env)?;
+                        let b = value_set(&args[1], env)?;
+                        match (single(&a), single(&b)) {
+                            (Some(x), Some(y)) => return Ok(IntervalSet::point(x & y)),
+                            (_, Some(m)) => (a, m),
+                            (Some(m), _) => (b, m),
+                            (None, None) => {
+                                return Err(
+                                    "`and` of two ranges is outside the P1a fragment".into()
+                                )
+                            }
+                        }
                     }
+                    (Some(_), Some(_)) => unreachable!("handled above"),
                 };
-                let set = value_set(inner, env)?;
                 // A high-bit mask clears the low bits, which is a round down
                 // to a power of two. `and(x, not(31))` is how solc rounds an
                 // allocation size, and the result is exact: the operation is
@@ -329,5 +343,31 @@ mod mask_tests {
             value_set(&e("and(x, not(31))"), &env).unwrap(),
             IntervalSet::range(u(32), u(64))
         );
+    }
+}
+
+#[cfg(test)]
+mod nesting_tests {
+    use super::*;
+    use crate::interval::U256;
+
+    #[test]
+    fn a_chain_of_cleanups_costs_its_length_not_two_to_it() {
+        // solc nests cleanups: `and(and(and(x, m), m), m)`. Asking whether
+        // each side was a single value and then evaluating the chosen side
+        // again meant every node evaluated its child twice, so a chain of
+        // twenty took longer than anyone would wait. This is not a timing
+        // test; it simply would not finish before the fix.
+        let mut e = "var_x".to_string();
+        for _ in 0..24 {
+            e = format!("and({e}, 0xffff)");
+        }
+        let src = format!("object \"T\" {{ code {{ let c := {e} }} }}");
+        let p = mulu_yul::parse_object(&src).unwrap();
+        let mulu_yul::Stmt::Let { value: Some(v), .. } = &p.object.code.stmts[0] else {
+            panic!()
+        };
+        let dom = IntervalSet::le(U256::from(0xffffu32));
+        assert_eq!(value_set(v, &env_of("var_x", &dom)).unwrap(), dom);
     }
 }
