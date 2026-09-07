@@ -242,6 +242,9 @@ pub struct ProgramIr {
     /// AST id to name, for the contract's `immutable` variables.
     #[serde(default)]
     pub immutables: BTreeMap<String, String>,
+    /// Enum canonical name to member count.
+    #[serde(default)]
+    pub enums: BTreeMap<String, u64>,
     pub unsupported: Vec<Unsupported>,
 }
 

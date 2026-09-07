@@ -32,7 +32,7 @@ fn ir_with_table() -> ProgramIr {
         YUL,
         &serde_json::from_str(ABI).unwrap(),
         serde_json::from_str(LAYOUT).unwrap(),
-        SolcFacts { origins: None, selectors: selectors(), immutables: Default::default() },
+        SolcFacts { origins: None, selectors: selectors(), immutables: Default::default(), enums: Default::default() },
     )
     .unwrap()
 }

@@ -16,6 +16,26 @@
 
 use crate::interval::{IntervalSet, U256};
 
+/// The values a type can take, knowing the contract's enums.
+///
+/// `enum Escrow.State` with five members holds 0 to 4, and solc reverts on
+/// anything else, so that is the slot's universe. Without the count the slot
+/// takes the whole word, and every comparison against it carries a panic path
+/// the contract does not have.
+pub fn domain_in(
+    ty: &str,
+    enums: &std::collections::BTreeMap<String, u64>,
+) -> Result<IntervalSet, String> {
+    if let Some(name) = ty.trim().strip_prefix("enum ") {
+        if let Some(n) = enums.get(name.trim()) {
+            if *n > 0 {
+                return Ok(IntervalSet::le(U256::from(*n - 1)));
+            }
+        }
+    }
+    domain_of(ty)
+}
+
 /// The values a type can take, as an unsigned 256-bit word.
 pub fn domain_of(ty: &str) -> Result<IntervalSet, String> {
     let t = ty.trim();
@@ -122,6 +142,19 @@ mod tests {
         assert!(addr.contains(U256::from_str_radix("ffffffffffffffffffffffffffffffffffffffff", 16).unwrap()));
         assert!(!addr.contains(U256::from_str_radix("10000000000000000000000000000000000000000", 16).unwrap()));
         assert_eq!(domain_of("address payable").unwrap(), addr);
+    }
+
+    /// solc reverts on a value outside an enum, so a slot of that type holds
+    /// only its members. Not knowing that put a panic on every path through
+    /// every comparison against such a slot.
+    #[test]
+    fn an_enum_slot_holds_only_its_members() {
+        let enums = [("Escrow.State".to_string(), 5u64)].into_iter().collect();
+        let d = domain_in("enum Escrow.State", &enums).unwrap();
+        assert_eq!(d, IntervalSet::le(u(4)));
+        // an enum the table does not have falls back to the plain answer
+        assert!(domain_in("enum Other.Thing", &enums).is_err());
+        assert_eq!(domain_in("uint8", &enums).unwrap(), domain_of("uint8").unwrap());
     }
 
     #[test]

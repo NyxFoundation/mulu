@@ -116,6 +116,7 @@ fn lower_bundle(
             origins: Some(&lookup),
             selectors,
             immutables: bundle.ast_index.immutables.clone(),
+            enums: bundle.ast_index.enums.clone(),
         },
     )
     .with_context(|| format!("lowering the Yul of {}", c.name))?;

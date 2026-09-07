@@ -251,16 +251,15 @@ fn holds(op: Op, left: &Term, right: &Term, p: &PathSummary) -> Tri {
             }
         }
     }
-    // Otherwise the path has to have taken a side on it.
+    // Otherwise the path has to have taken a side on it, or the order facts
+    // it carries have to settle it. Asking the closure both ways is what
+    // makes `a < b` and `b < a` two sides of one question rather than two
+    // unrelated keys.
     let (Some(l), Some(r)) = (render(left, p), render(right, p)) else { return Tri::Unknown };
     let key = Relation { op, left: l.clone(), right: r.clone() }.key();
     if let Some(v) = p.assumed.get(&key) {
         return if *v { Tri::True } else { Tri::False };
     }
-    // `a <= b` is settled by `b < a` too, and by `a < b`.
-    let flip = |op: Op, a: &str, b: &str| {
-        Relation { op, left: a.to_string(), right: b.to_string() }.key()
-    };
     // Two literals cannot both be it: if the path assumed `state == 0`, then
     // `state == 1` is settled, and it is settled false. This is what an enum
     // in a guard needs, because every state is one equality.
@@ -276,22 +275,27 @@ fn holds(op: Op, left: &Term, right: &Term, p: &PathSummary) -> Tri {
                 }
             }
         }
+        return Tri::Unknown;
     }
-    match op {
-        Op::Le => {
-            if let Some(v) = p.assumed.get(&flip(Op::Lt, &r, &l)) {
-                return if *v { Tri::False } else { Tri::True };
-            }
-            if p.assumed.get(&flip(Op::Lt, &l, &r)) == Some(&true) {
-                return Tri::True;
-            }
-        }
-        Op::Lt => {
-            if let Some(v) = p.assumed.get(&flip(Op::Le, &r, &l)) {
-                return if *v { Tri::False } else { Tri::True };
-            }
-        }
-        Op::Eq => {}
+    // `a <= b` holds when adding `b < a` makes the path impossible, and fails
+    // when adding `a <= b` does.
+    let base: Vec<(String, String, bool)> =
+        order_edges(p).into_iter().chain(interval_edges(p)).collect();
+    let with = |e: (String, String, bool)| {
+        let mut v = base.clone();
+        v.push(e);
+        contradictory(&v)
+    };
+    let (assert_yes, assert_no) = match op {
+        Op::Lt => ((l.clone(), r.clone(), true), (r.clone(), l.clone(), false)),
+        Op::Le => ((l.clone(), r.clone(), false), (r.clone(), l.clone(), true)),
+        Op::Eq => unreachable!("handled above"),
+    };
+    if with(assert_no) {
+        return Tri::True;
+    }
+    if with(assert_yes) {
+        return Tri::False;
     }
     Tri::Unknown
 }

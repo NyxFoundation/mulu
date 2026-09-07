@@ -206,22 +206,26 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
 /// boolean, a conjunction, arithmetic on both sides. Those still fork; they
 /// just do not join up with anything.
 pub fn of(cond: &Expr, terms: &BTreeMap<String, Expr>) -> Option<Relation> {
-    of_in(cond, terms, &|_: crate::interval::U256| None)
+    of_in(cond, terms, &|_: crate::interval::U256| None).map(|(r, _)| r)
 }
 
 /// The same, naming storage the way the contract's layout does.
+/// The relation, and whether the condition is that relation or its negation.
+/// `iszero(eq(a, b))` is the relation `a == b` with the sense `false`: one
+/// key, two sides, which is what lets a `require(a == b)` and the `if
+/// iszero(a == b)` solc writes for the other half of an `||` meet.
 pub fn of_in(
     cond: &Expr,
     terms: &BTreeMap<String, Expr>,
     layout: &impl Layout,
-) -> Option<Relation> {
+) -> Option<(Relation, bool)> {
     let e = strip(&mulu_yul::fold::fold_fixpoint(&cond.substitute(terms)));
     rel(&normalise(&e, layout), false)
 }
 
 /// `negated` tracks an odd number of enclosing `iszero`, which is how solc
 /// writes `<=` as `iszero(gt(..))`.
-fn rel(e: &Expr, negated: bool) -> Option<Relation> {
+fn rel(e: &Expr, negated: bool) -> Option<(Relation, bool)> {
     let Expr::Call { name, args, .. } = e else { return None };
     if name == "iszero" && args.len() == 1 {
         return rel(&args[0], !negated);
@@ -241,21 +245,23 @@ fn rel(e: &Expr, negated: bool) -> Option<Relation> {
             let (x, y) = (strip(&sa[0]).render(), strip(&sa[1]).render());
             match (name.as_str(), negated) {
                 // gt(sub(a, b), a) negated is sub(a, b) <= a, i.e. b <= a
-                ("gt", true) => return Some(Relation { op: Op::Le, left: y, right: x }),
-                ("gt", false) => return Some(Relation { op: Op::Lt, left: x, right: y }),
+                ("gt", true) => return Some((Relation { op: Op::Le, left: y, right: x }, true)),
+                ("gt", false) => return Some((Relation { op: Op::Lt, left: x, right: y }, true)),
                 _ => {}
             }
         }
     }
-    let (op, left, right) = match (name.as_str(), negated) {
-        ("lt", false) => (Op::Lt, a, b),
-        ("lt", true) => (Op::Le, b, a),
-        ("gt", false) => (Op::Lt, b, a),
-        ("gt", true) => (Op::Le, a, b),
-        ("eq", false) => (Op::Eq, a, b),
+    let (op, left, right, sense) = match (name.as_str(), negated) {
+        ("lt", false) => (Op::Lt, a, b, true),
+        ("lt", true) => (Op::Le, b, a, true),
+        ("gt", false) => (Op::Lt, b, a, true),
+        ("gt", true) => (Op::Le, a, b, true),
+        ("eq", false) => (Op::Eq, a, b, true),
+        // A disequality is one relation read the other way round, not two.
+        ("eq", true) => (Op::Eq, a, b, false),
         _ => return None,
     };
-    Some(Relation { op, left, right })
+    Some((Relation { op, left, right }, sense))
 }
 
 #[cfg(test)]
@@ -359,12 +365,12 @@ mod tests {
         let from_code =
             of_in(&parse("iszero(gt(cleanup_t_uint256(expr_30), cleanup_t_uint256(expr_34)))"), &t, &layout)
                 .expect("a relation");
-        assert_eq!(from_code.key(), "var_amount_20 <= cell(balances, caller())");
+        assert_eq!(from_code.0.key(), "var_amount_20 <= cell(balances, caller())");
 
         // and a plain slot is named by its variable
         t.insert("g".to_string(), parse("read_from_storage_split_offset_0_t_uint256(0x00)"));
         let r = of_in(&parse("lt(g, x)"), &t, &layout).expect("a relation");
-        assert_eq!(r.key(), "storage(balances) < x");
+        assert_eq!(r.0.key(), "storage(balances) < x");
     }
 
     /// solc checks `a - b` for underflow by asking whether the difference
@@ -386,7 +392,9 @@ mod tests {
         let t = BTreeMap::new();
         assert!(of(&parse("var_success_46"), &t).is_none());
         assert!(of(&parse("and(a, b)"), &t).is_none());
-        // a disequality is two relations, not one
-        assert!(of(&parse("iszero(eq(a, b))"), &t).is_none());
+        // a disequality is the equality with the sense reversed
+        let (r, sense) = of_in(&parse("iszero(eq(a, b))"), &t, &|_: crate::interval::U256| None)
+            .expect("a relation");
+        assert_eq!((r.key().as_str(), sense), ("a == b", false));
     }
 }

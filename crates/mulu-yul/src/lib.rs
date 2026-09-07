@@ -54,6 +54,9 @@ pub struct SolcFacts<'a> {
     /// one as `loadimmutable("13")`, where 13 is the declaration's AST id,
     /// and a reader of a guard needs the name the source gave it.
     pub immutables: std::collections::BTreeMap<String, String>,
+    /// Enum canonical name to member count, for the same reason: a slot of
+    /// that type holds one of them and nothing else.
+    pub enums: std::collections::BTreeMap<String, u64>,
 }
 
 /// As `lower_contract`, using what the compiler reported alongside the Yul.
@@ -74,5 +77,6 @@ pub fn lower_contract_with(
     }
     lowering = lowering.with_selectors(facts.selectors);
     lowering = lowering.with_immutables(facts.immutables);
+    lowering = lowering.with_enums(facts.enums);
     Ok(lowering.run(&parsed.object, parsed.use_src, storage_layout, abi))
 }

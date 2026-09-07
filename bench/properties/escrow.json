@@ -374,6 +374,53 @@
           "assert": "reverts"
         }
       ]
+    },
+    {
+      "id": "dispute-if-agree",
+      "from": "certora/dispute-if-agree.spec",
+      "rules": [
+        {
+          "entrypoint": "open_dispute()",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "storage": "state"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "or",
+                "args": [
+                  {
+                    "op": "eq",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "buyer"
+                    }
+                  },
+                  {
+                    "op": "eq",
+                    "left": {
+                      "env": "caller"
+                    },
+                    "right": {
+                      "immutable": "seller"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
     }
   ]
 }

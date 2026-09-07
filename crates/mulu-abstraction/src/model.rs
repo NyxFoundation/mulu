@@ -478,7 +478,7 @@ impl<'a> Builder<'a> {
             // every `address` slot a region holding the values an address
             // cannot be, and the walk enumerates the product over the slots.
             let type_label = v.type_label.clone().unwrap_or_else(|| v.type_id.clone());
-            let universe = match crate::types::domain_of(&type_label) {
+            let universe = match crate::types::domain_in(&type_label, &self.ir.enums) {
                 Ok(d) => {
                     if !d.is_full() {
                         storage_preds.push(PredicateInfo {
@@ -1195,6 +1195,23 @@ impl<'a> Walk<'a> {
             if (name == "call" && args.len() == 7) || (name == "staticcall" && args.len() == 6) {
                 return Ok(IntervalSet::point(U256::ZERO).union(&IntervalSet::point(U256::from(1))));
             }
+            // `read_from_storage_split_offset_0_t_T(slot)` is solc's read of a
+            // whole-slot variable: the slot's value, narrowed to T. The
+            // narrowing is what the slot's own universe already says, so the
+            // region is the answer. Without this the read went through a
+            // helper chain whose last link panics, and the value came back
+            // unknown even though the model had it.
+            if name.starts_with("read_from_storage_split_offset_0_") && args.len() == 1 {
+                if let Some(v) = self.address(&args[0], env, storage, memory, depth) {
+                    if let Ok(i) = usize::try_from(v) {
+                        if let Some((_, regions)) = self.per_slot.get(i) {
+                            if let Some(r) = regions.get(storage[i]) {
+                                return Ok(r.clone());
+                            }
+                        }
+                    }
+                }
+            }
             if name == "sload" && args.len() == 1 {
                 let Some(v) = self.address(&args[0], env, storage, memory, depth) else {
                     return Err("`sload` of a computed slot is outside the P1a fragment".into());
@@ -1224,6 +1241,60 @@ impl<'a> Walk<'a> {
                 _ => Err(why),
             },
         }
+    }
+
+    /// Does every check inside this expression's helpers pass, given what the
+    /// walk knows about its arguments?
+    ///
+    /// `false` means "not established", not "it reverts": a helper this
+    /// cannot see into, or a check the regions do not decide, both answer
+    /// `false` and leave the fork to happen.
+    fn every_inner_check_passes(
+        &mut self,
+        e: &mulu_yul::Expr,
+        env: &crate::value::Env,
+        storage: &StorageRegion,
+        memory: &BTreeMap<U256, IntervalSet>,
+    ) -> bool {
+        let mut calls = Vec::new();
+        collect_calls(e, &mut calls);
+        for (name, args) in calls {
+            let Some(g) = self.b.ir.function(&name).cloned() else {
+                // A builtin. `revert` and `invalid` are the ones that can, and
+                // nothing here can say they will not.
+                if matches!(
+                    mulu_yul::builtins::classify(&name),
+                    Some(mulu_yul::builtins::Builtin::Revert)
+                        | Some(mulu_yul::builtins::Builtin::Invalid)
+                ) {
+                    return false;
+                }
+                continue;
+            };
+            if !g.effects.can_revert {
+                continue;
+            }
+            let checks: Vec<_> =
+                self.b.ir.checks.iter().filter(|c| c.function == name).cloned().collect();
+            if checks.is_empty() {
+                return false;
+            }
+            // `eval` rather than `value_set`, because the argument may be a
+            // storage read the walk resolves and a plain value lookup does
+            // not: `cleanup_t_enum(state)` is the case that matters.
+            let mut inner = crate::value::Env::new();
+            for (i, a) in args.iter().enumerate() {
+                let Some(param) = g.parameters.get(i) else { break };
+                let Ok(set) = self.eval(a, env, storage, memory) else { return false };
+                inner.insert(param.clone(), set);
+            }
+            for c in &checks {
+                if self.decide_cond(&c.condition, &inner, storage, memory) != Some(true) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Which region of `slot` a value known to lie in `values` falls into.
@@ -1963,7 +2034,25 @@ impl<'a> Walk<'a> {
                 // Skipping it would drop the revert path, which is the hole
                 // this net exists to stop.
                 if ins.effects.can_revert && !ins.effects.writes_storage {
-                    let reverts = decide_or_split(
+                    // Can it actually revert *here*? The helpers inside it
+                    // carry their own checks, and the walk has values for the
+                    // arguments they are given. `cleanup_t_enum$_State_$8`
+                    // reverts when its argument is 5 or more, and a state the
+                    // model knows is 0 is not. Forking anyway put a revert on
+                    // every path through every enum comparison.
+                    let value_expr = match &ins.op {
+                        mulu_yul::ir::Op::Let { value: Some(v), .. }
+                        | mulu_yul::ir::Op::Assign { value: v, .. } => Some(v.clone()),
+                        mulu_yul::ir::Op::Effect { call } => Some(call.clone()),
+                        _ => None,
+                    };
+                    let settled_safe = value_expr.as_ref().is_some_and(|v| {
+                        self.every_inner_check_passes(v, &env, &storage, &memory)
+                    });
+                    let reverts = if settled_safe {
+                        false
+                    } else {
+                        decide_or_split(
                         &mulu_yul::Expr::Ident {
                             name: format!("panic-in:{func}#{block}#{index}"),
                             src: None,
@@ -1973,7 +2062,8 @@ impl<'a> Walk<'a> {
                         &mut facts,
                         &mut splits,
                         || format!("a panic inside an instruction in {func}"),
-                    )?;
+                    )?
+                    };
                     if reverts {
                         return Ok(Trace { steps, ending: Ending::Revert, assumed: reverted_at.unwrap_or(facts), reverts: true });
                     }
@@ -2814,17 +2904,23 @@ fn decide_or_split(
     // ways: `iszero(gt(a, b))` and `iszero(lt(b, a))` are one fact. Where the
     // condition is not a comparison, its canonical term still keys it, which
     // catches the same condition asked twice.
-    let key = crate::relation::of_in(cond, terms, layout)
-        .map(|r| r.key())
-        .or_else(|| canon(cond, terms).map(|t| t.render()));
+    // `sense` is false when the condition is the *negation* of the relation
+    // the key names, which is how `require(a == b)` and the `if iszero(a ==
+    // b)` solc writes for the other half of an `||` come to share one fact.
+    let keyed = crate::relation::of_in(cond, terms, layout);
+    let key = match &keyed {
+        Some((r, _)) => Some(r.key()),
+        None => canon(cond, terms).map(|t| t.render()),
+    };
+    let sense = keyed.as_ref().map(|(_, s)| *s).unwrap_or(true);
     if let Some(k) = &key {
         if let Some(known) = facts.get(k) {
-            return Ok(*known);
+            return Ok(if sense { *known } else { !*known });
         }
     }
     let side = splits.next().ok_or_else(|| TraceStop::Undecided { ways: 2, what: what() })? == 1;
     if let Some(k) = key {
-        facts.insert(k, side);
+        facts.insert(k, if sense { side } else { !side });
     }
     Ok(side)
 }
@@ -2843,6 +2939,16 @@ fn bind_terms(
         }
     }
     out
+}
+
+/// Every call in an expression, with its arguments, innermost last.
+fn collect_calls(e: &mulu_yul::Expr, out: &mut Vec<(String, Vec<mulu_yul::Expr>)>) {
+    if let mulu_yul::Expr::Call { name, args, .. } = e {
+        for a in args {
+            collect_calls(a, out);
+        }
+        out.push((name.clone(), args.clone()));
+    }
 }
 
 /// The canonical term of an expression: every local replaced by what defines

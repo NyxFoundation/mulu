@@ -43,6 +43,8 @@ pub struct Lowering<'a> {
     selectors: BTreeMap<String, String>,
     /// AST id -> name, for the contract's `immutable` variables
     immutables: BTreeMap<String, String>,
+    /// enum canonical name -> member count
+    enums: BTreeMap<String, u64>,
 }
 
 fn loc(s: Option<SrcSpan>) -> Option<Location> {
@@ -134,6 +136,11 @@ impl<'a> Lowering<'a> {
         self
     }
 
+    pub fn with_enums(mut self, m: BTreeMap<String, u64>) -> Self {
+        self.enums = m;
+        self
+    }
+
     pub fn with_selectors(mut self, selectors: BTreeMap<String, String>) -> Self {
         self.selectors = selectors;
         self
@@ -156,6 +163,7 @@ impl<'a> Lowering<'a> {
             store_helpers: BTreeMap::new(),
             selectors: BTreeMap::new(),
             immutables: BTreeMap::new(),
+            enums: BTreeMap::new(),
         }
     }
 
@@ -1155,6 +1163,7 @@ impl<'a> Lowering<'a> {
             checks: self.checks,
             storage_layout,
             immutables: std::mem::take(&mut self.immutables),
+            enums: std::mem::take(&mut self.enums),
             unsupported,
         }
     }

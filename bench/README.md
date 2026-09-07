@@ -79,7 +79,7 @@ What the histogram says to implement, in the order the corpus asks for it:
 report on. Three loops and two contracts that run out of the time budget are
 what is left.
 
-### The score, 2026-09-08
+### The score, 2026-09-08 (later the same day)
 
 `bench/properties/` holds mulu's encodings, one file per use case, beside the
 `certora/` and `solcmc/` encodings the benchmark ships for the other tools.
@@ -87,13 +87,14 @@ Each property names the file it was written from.
 
 | | |
 | --- | --- |
-| (property, version) pairs asked | 35 |
-| correct | 32 |
+| (property, version) pairs asked | 56 |
+| correct | 53 |
 | wrong | 3 |
 | no answer | 0 |
 
-The three are all cases where mulu produces a concrete request that the
-answer key says cannot exist. They are left in the score as wrong, because a
+Every pair mulu and the key agree on the facts about is answered correctly.
+The three that are not are all cases where mulu produces a concrete request
+that the answer key says cannot exist. They are left in the score as wrong, because a
 tool does not get to grade its own disagreements, but each is checkable in a
 minute:
 

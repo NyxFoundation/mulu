@@ -59,6 +59,11 @@ pub struct AstIndex {
     /// 13 is this id, and a guard on it is unreadable without the name.
     #[serde(default)]
     pub immutables: std::collections::BTreeMap<String, String>,
+    /// Enum canonical name to how many members it has. A storage slot of an
+    /// enum type holds one of them, and solc reverts on any other value, so
+    /// the count is the slot's universe.
+    #[serde(default)]
+    pub enums: std::collections::BTreeMap<String, u64>,
 }
 
 impl AstIndex {
@@ -71,10 +76,12 @@ impl AstIndex {
         // Innermost first when spans nest, so a plain scan finds the tightest.
         nodes.sort_by_key(|n| (n.file_id, n.start, n.length));
         let mut immutables = std::collections::BTreeMap::new();
+        let mut enums = std::collections::BTreeMap::new();
         for ast in asts.values() {
             collect_immutables(ast, &mut immutables);
+            collect_enums(ast, &mut enums);
         }
-        Self { nodes, immutables }
+        Self { nodes, immutables, enums }
     }
 
     /// The tightest node containing the span, if any.
@@ -135,6 +142,31 @@ fn collect_immutables(
         serde_json::Value::Array(a) => {
             for v in a {
                 collect_immutables(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every `EnumDefinition`, by canonical name, with its member count.
+fn collect_enums(node: &serde_json::Value, out: &mut std::collections::BTreeMap<String, u64>) {
+    if node.get("nodeType").and_then(|v| v.as_str()) == Some("EnumDefinition") {
+        if let (Some(name), Some(members)) = (
+            node.get("canonicalName").and_then(|v| v.as_str()),
+            node.get("members").and_then(|v| v.as_array()),
+        ) {
+            out.insert(name.to_string(), members.len() as u64);
+        }
+    }
+    match node {
+        serde_json::Value::Object(m) => {
+            for v in m.values() {
+                collect_enums(v, out);
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for v in a {
+                collect_enums(v, out);
             }
         }
         _ => {}

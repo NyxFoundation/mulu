@@ -387,6 +387,7 @@ fn compile_and_lower(
             origins: Some(&lookup),
             selectors,
             immutables: bundle.ast_index.immutables.clone(),
+            enums: bundle.ast_index.enums.clone(),
         },
     )?;
     Ok((bundle, selected, ir))
