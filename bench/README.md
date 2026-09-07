@@ -88,9 +88,16 @@ Each property names the file it was written from.
 | | |
 | --- | --- |
 | (property, version) pairs asked | 66 |
-| correct | 63 |
+| correct, against the key as shipped | 63 |
 | wrong | 3 |
 | no answer | 0 |
+| correct, with this project's corrections to the key | 66 |
+
+The first number is the one that counts. The second is printed beside it
+because the difference is exactly three rows, each with a counterexample that
+runs, and folding them in silently would be a tool grading its own
+disagreements. `bench/properties/corrections.json` says which rows and why,
+and names the test that runs each one.
 
 Every pair mulu and the key agree on the facts about is answered correctly.
 The three that are not are all cases where mulu produces a concrete request

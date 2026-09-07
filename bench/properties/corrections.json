@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "note": "Rows of the corpus's `ground-truth.csv` that this project believes are wrong, each with a counterexample in `bench/disagreements/` that runs on an EVM. The harness scores against the key as shipped and reports that number first; this file only adds a second number beside it, so a reader can see both and check the difference. Nothing here changes what mulu answered.",
+  "corrections": [
+    {
+      "use_case": "vault",
+      "property": "wd-fin-before",
+      "version": "v3",
+      "shipped": true,
+      "corrected": false,
+      "test": "test_vault_finalizes_before_the_wait_time",
+      "why": "v3 is the version that removed `require(block.number >= request_time + wait_time)` from `finalize`, so `finalize` succeeds in the same block as the `withdraw` that requested it. The corpus's own experiment table for this cell marks Certora FN, which is only possible if the property fails."
+    },
+    {
+      "use_case": "zerotoken_bank",
+      "property": "wd-not-revert",
+      "version": "v5",
+      "shipped": true,
+      "corrected": false,
+      "test": "test_ztb5_withdraw_reverts_within_the_balance",
+      "why": "The property is `does not revert if amount is bigger than zero and less or equal to the balance entry`. v5 is the version that adds `require(amount <= 100)` to `withdraw`, and `withdraw(150)` against a balance of 300 reverts."
+    },
+    {
+      "use_case": "zerotoken_bank",
+      "property": "dep-not-revert",
+      "version": "v7",
+      "shipped": true,
+      "corrected": false,
+      "test": "test_ztb7_deposit_reverts_on_overflow",
+      "why": "`deposit` is byte-identical in v1 through v7 and the key says the property fails in v1 through v6, where the reason given is overflow. It overflows in v7 too."
+    }
+  ]
+}

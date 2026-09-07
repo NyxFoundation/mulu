@@ -97,7 +97,35 @@ struct Scored {
     truth: bool,
     /// `correct`, `wrong`, or `no-answer`.
     outcome: &'static str,
+    /// The same, against the key with this project's corrections applied.
+    /// Equal to `outcome` for every row no correction touches.
+    corrected_outcome: &'static str,
     because: String,
+}
+
+/// A row of the corpus's `ground-truth.csv` this project believes is wrong.
+///
+/// The score against the key *as shipped* is the number this harness reports
+/// first, and it is the one that counts: a tool does not grade its own
+/// disagreements. These only add a second number beside it, so a reader can
+/// see the difference and check it. Each one names a test in
+/// `bench/disagreements/` that runs the counterexample on an EVM.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct Correction {
+    use_case: String,
+    property: String,
+    version: String,
+    corrected: bool,
+    #[serde(default)]
+    test: String,
+    #[serde(default)]
+    why: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct CorrectionFile {
+    #[serde(default)]
+    corrections: Vec<Correction>,
 }
 
 /// The corpus's own `ground-truth.csv`, and the properties written against it.
@@ -113,6 +141,8 @@ struct AnswerKey {
     invariants: BTreeMap<String, Vec<mulu_abstraction::call_property::Invariant>>,
     /// (use case, property, version) -> does it hold
     truth: BTreeMap<(String, String, String), bool>,
+    /// The same, where this project believes the shipped key is wrong.
+    corrections: BTreeMap<(String, String, String), Correction>,
 }
 
 impl AnswerKey {
@@ -125,8 +155,20 @@ impl AnswerKey {
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
             .collect();
         files.sort();
+        let mut corrections = BTreeMap::new();
         for f in files {
             let text = std::fs::read_to_string(&f)?;
+            if f.file_name().is_some_and(|n| n == "corrections.json") {
+                let file: CorrectionFile = serde_json::from_str(&text)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
+                for c in file.corrections {
+                    corrections.insert(
+                        (c.use_case.clone(), c.property.clone(), c.version.clone()),
+                        c,
+                    );
+                }
+                continue;
+            }
             let file: mulu_abstraction::call_property::PropertyFile = serde_json::from_str(&text)
                 .map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
             let use_case = if file.use_case.is_empty() {
@@ -160,7 +202,7 @@ impl AnswerKey {
                 );
             }
         }
-        Ok(Self { properties, invariants, truth })
+        Ok(Self { properties, invariants, truth, corrections })
     }
 
     /// `bank/Bank_v1.sol` -> the use case and the version.
@@ -188,19 +230,25 @@ impl AnswerKey {
             };
             let inv = self.invariants.get(&use_case).map(|v| v.as_slice()).unwrap_or(&[]);
             let a = check_with(p, inv, paths);
-            let (said, outcome) = match a.verdict {
-                Verdict::Holds if truth => ("holds", "correct"),
+            let key = (use_case.clone(), p.id.clone(), version.clone());
+            let corrected_truth =
+                self.corrections.get(&key).map(|c| c.corrected).unwrap_or(truth);
+            let judge = |t: bool| match a.verdict {
+                Verdict::Holds if t => ("holds", "correct"),
                 Verdict::Holds => ("holds", "wrong"),
-                Verdict::Fails if !truth => ("fails", "correct"),
+                Verdict::Fails if !t => ("fails", "correct"),
                 Verdict::Fails => ("fails", "wrong"),
                 Verdict::Undecided => ("undecided", "no-answer"),
             };
+            let (said, outcome) = judge(truth);
+            let (_, corrected_outcome) = judge(corrected_truth);
             out.push(Scored {
                 property: p.id.clone(),
                 version: version.clone(),
                 said: said.to_string(),
                 truth,
                 outcome,
+                corrected_outcome,
                 because: if a.assuming.is_empty() {
                     a.because
                 } else {
@@ -477,6 +525,18 @@ fn main() -> Result<()> {
             "  correct / asked: {:.1}%",
             100.0 * correct as f64 / scored.len() as f64
         );
+        // The same score against the key with this project's corrections
+        // applied. Second, and always beside the first: a tool does not get
+        // to grade its own disagreements, and the point of printing both is
+        // that the difference is visible rather than folded in.
+        let corrected = scored.iter().filter(|s| s.corrected_outcome == "correct").count();
+        if corrected != correct {
+            println!(
+                "  with this project's corrections to the key: {corrected} correct ({:.1}%), \
+                 each one a test in bench/disagreements/",
+                100.0 * corrected as f64 / scored.len() as f64
+            );
+        }
         if wrong > 0 {
             println!("\n  wrong:");
             for s in scored.iter().filter(|s| s.outcome == "wrong") {
