@@ -1,4 +1,9 @@
-<h1 align="center">mulu</h1>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/mulu-lockup-dark.png">
+    <img alt="mulu" src="assets/logo/mulu-lockup.png" width="340">
+  </picture>
+</p>
 
 <p align="center">
   <em>A Supervisory Control-based static analyzer for code redundancy and gap detection.</em>
