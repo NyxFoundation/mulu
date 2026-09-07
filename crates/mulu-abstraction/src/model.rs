@@ -322,11 +322,14 @@ impl<'a> Builder<'a> {
                 ));
                 continue;
             }
-            match crate::predicate::translate_in(&c.condition, &f.parameters, domain) {
-                Ok(p) => {
-                    out.insert(c.id.clone(), p);
-                }
-                Err(why) => self.refuse(format!("check {} in {}: {why}", c.id, f.id)),
+            // A guard that has no predicate form is not yet a refusal. The
+            // predicate is what refines the partition, and a condition can
+            // fail to be one and still be decidable where both sides are
+            // values: `gt(add(memPtr, size), 0xffffffff)` is a comparison
+            // whose left is arithmetic. Refusing here meant the walk never
+            // got to look. It refuses instead, if it also cannot decide.
+            if let Ok(p) = crate::predicate::translate_in(&c.condition, &f.parameters, domain) {
+                out.insert(c.id.clone(), p);
             }
         }
         out
@@ -693,6 +696,82 @@ impl<'a> Walk<'a> {
         Ok(out)
     }
 
+    /// Decide a Yul condition by evaluating it, when the predicate built for
+    /// it could not decide.
+    ///
+    /// The predicate form is a partition refiner: it has to be a set over one
+    /// variable, so `gt(add(memPtr, size), 0xffffffff)` has no form to take.
+    /// Evaluating the condition needs no such form, because both sides are
+    /// already values here. It refines nothing and is therefore not a
+    /// substitute for the predicate; it is what to try when the predicate has
+    /// nothing to say.
+    fn decide_cond(
+        &self,
+        cond: &mulu_yul::Expr,
+        env: &crate::value::Env,
+        storage: &StorageRegion,
+    ) -> Option<bool> {
+        let order = |a: &mulu_yul::Expr, b: &mulu_yul::Expr, strict: bool| -> Option<bool> {
+            let (l, r) = (self.eval(a, env, storage).ok()?, self.eval(b, env, storage).ok()?);
+            let ((llo, lhi), (rlo, rhi)) = (l.bounds()?, r.bounds()?);
+            if if strict { lhi < rlo } else { lhi <= rlo } {
+                Some(true)
+            } else if if strict { llo >= rhi } else { llo > rhi } {
+                Some(false)
+            } else {
+                None
+            }
+        };
+        let mulu_yul::Expr::Call { name, args, .. } = cond else {
+            // A bare value is the condition: non-zero is true.
+            let set = self.eval(cond, env, storage).ok()?;
+            let zero = IntervalSet::point(U256::ZERO);
+            return if set.disjoint_from(&zero) {
+                Some(true)
+            } else if set.subset_of(&zero) {
+                Some(false)
+            } else {
+                None
+            };
+        };
+        match (name.as_str(), args.len()) {
+            ("lt", 2) => order(&args[0], &args[1], true),
+            ("gt", 2) => order(&args[1], &args[0], true),
+            ("iszero", 1) => self.decide_cond(&args[0], env, storage).map(|b| !b),
+            ("eq", 2) => {
+                let (l, r) = (
+                    self.eval(&args[0], env, storage).ok()?,
+                    self.eval(&args[1], env, storage).ok()?,
+                );
+                if l.disjoint_from(&r) {
+                    Some(false)
+                } else if l == r && l.bounds().map(|(a, b)| a == b).unwrap_or(false) {
+                    // Both are the same single value.
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+            ("and", 2) => match (
+                self.decide_cond(&args[0], env, storage),
+                self.decide_cond(&args[1], env, storage),
+            ) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            },
+            ("or", 2) => match (
+                self.decide_cond(&args[0], env, storage),
+                self.decide_cond(&args[1], env, storage),
+            ) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// `value_set`, plus the one thing it cannot know on its own: what a
     /// storage slot holds in the region being walked. `sload` of a constant
     /// slot is the whole reason a length or a bound is ever in scope.
@@ -1004,12 +1083,21 @@ impl<'a> Walk<'a> {
 
                 if let Some(c) = self.check_at(&f, block, index, ins) {
                     let guards = self.guards_of(&f, &e.widest());
-                    let Some(p) = guards.get(&c.id) else {
-                        return Err(format!("check {} could not be turned into a predicate", c.id));
-                    };
-                    let passes = p.decide(&env).ok_or_else(|| {
-                        format!("check {} is not decided by the argument regions {}", c.id, show(&env))
-                    })?;
+                    // The predicate first, because it is what refines the
+                    // partition. Where it has nothing to say, the condition
+                    // is evaluated directly: both sides are values here even
+                    // when neither is a set over one variable.
+                    let passes = guards
+                        .get(&c.id)
+                        .and_then(|p| p.decide(&env))
+                        .or_else(|| self.decide_cond(&c.condition, &env, &storage))
+                        .ok_or_else(|| {
+                            format!(
+                                "check {} is not decided by the argument regions {}",
+                                c.id,
+                                show(&env)
+                            )
+                        })?;
                     steps.push(Step::Check {
                         id: c.id.clone(),
                         text: c.condition_text.clone(),
@@ -1127,19 +1215,17 @@ impl<'a> Walk<'a> {
                     // parameterise it out of the plant.
                     if let Some(c) = self.branch_check(&f, block) {
                         let guards = self.guards_of(&f, &e.widest());
-                        let Some(p) = guards.get(&c.id) else {
-                            return Err(format!(
-                                "check {} could not be turned into a predicate",
-                                c.id
-                            ));
-                        };
-                        let passes = p.decide(&env).ok_or_else(|| {
-                            format!(
-                                "check {} is not decided by the argument regions {}",
-                                c.id,
-                                show(&env)
-                            )
-                        })?;
+                        let passes = guards
+                            .get(&c.id)
+                            .and_then(|p| p.decide(&env))
+                            .or_else(|| self.decide_cond(&c.condition, &env, &storage))
+                            .ok_or_else(|| {
+                                format!(
+                                    "check {} is not decided by the argument regions {}",
+                                    c.id,
+                                    show(&env)
+                                )
+                            })?;
                         steps.push(Step::Check {
                             id: c.id.clone(),
                             text: c.condition_text.clone(),
@@ -1162,12 +1248,10 @@ impl<'a> Walk<'a> {
                         fr.index = 0;
                         continue;
                     }
-                    let p = crate::predicate::translate_in(cond, &f.parameters, &e.widest())
-                        .map_err(|w| {
-                        format!("a branch condition is outside the P1a fragment: {w}")
-                    })?;
-                    let taken = p
-                        .decide(&env)
+                    let taken = crate::predicate::translate_in(cond, &f.parameters, &e.widest())
+                        .ok()
+                        .and_then(|p| p.decide(&env))
+                        .or_else(|| self.decide_cond(cond, &env, &storage))
                         .ok_or("a branch is not decided by the argument regions")?;
                     let target = if taken { *then_block } else { *else_block };
                     let fr = frames.last_mut().unwrap();
@@ -1189,8 +1273,54 @@ impl<'a> Walk<'a> {
                         return Ok(Trace { steps, ending: Ending::Return });
                     }
                 }
-                Terminator::Switch { .. } => {
-                    return Err("a switch in a function body is outside P1a".into())
+                // A switch is a chain of equality tests on one value, which
+                // is what the walk already does for a branch. Refusing it
+                // left out the dispatcher's own shape and any hand-written
+                // `switch` in a body.
+                Terminator::Switch { value, cases, default } => {
+                    let set = self.eval(value, &env, &storage).map_err(|why| {
+                        format!("a switch value is outside the P1a fragment: {why}")
+                    })?;
+                    let mut target = None;
+                    for (lit, block) in cases {
+                        let v = crate::interval::parse_decimal(lit)
+                            .map_err(|e| format!("a switch case label is not a literal: {e}"))?;
+                        let case = IntervalSet::point(v);
+                        if set.subset_of(&case) {
+                            target = Some(*block);
+                            break;
+                        }
+                        if !set.disjoint_from(&case) {
+                            return Err(format!(
+                                "a switch value {set} straddles the case {v}, so which branch \
+                                 runs is not determined"
+                            ));
+                        }
+                    }
+                    let target = match (target, default) {
+                        (Some(t), _) => t,
+                        // Yul: an unmatched switch with no default does
+                        // nothing, which here is falling out of the function.
+                        (None, Some(d)) => *d,
+                        (None, None) => {
+                            // Nothing matched and there is no default, so
+                            // the switch does nothing and the function ends.
+                            frames.pop();
+                            if frames.is_empty() {
+                                return Ok(Trace { steps, ending: Ending::Return });
+                            }
+                            continue;
+                        }
+                    };
+                    let fr = frames.last_mut().unwrap();
+                    if !fr.visited.insert((target, 0)) {
+                        return Err(
+                            "the abstract execution revisits a block; P1a does not model loops"
+                                .into(),
+                        );
+                    }
+                    fr.block = target;
+                    fr.index = 0;
                 }
                 Terminator::Unsupported { reason } => return Err(reason.clone()),
             }

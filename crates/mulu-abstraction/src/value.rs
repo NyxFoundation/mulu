@@ -63,6 +63,13 @@ pub fn value_set(e: &Expr, env: &Env) -> Result<IntervalSet, String> {
                     ))
                 }
             }
+            // Arithmetic on what is known. Exact where it cannot wrap, and
+            // refused where it can: a wrapped result is a different value and
+            // approximating it would put a number in a region it is not in.
+            ("add", 2) | ("sub", 2) | ("mul", 2) => {
+                let (l, r) = (value_set(&args[0], env)?, value_set(&args[1], env)?);
+                arith(name, &l, &r)
+            }
             ("or", 2) if mask_of(&args[0]) == Some(U256::ZERO) => value_set(&args[1], env),
             ("or", 2) if mask_of(&args[1]) == Some(U256::ZERO) => value_set(&args[0], env),
             (other, _) => Err(format!(
@@ -157,9 +164,12 @@ mod tests {
     }
 
     #[test]
-    fn arithmetic_is_not_evaluated_it_is_refused() {
+    fn what_this_cannot_evaluate_is_refused_not_guessed() {
+        // `add` and `mul` are evaluated now, exactly; see `arith_tests`.
+        // These are still outside: a storage read needs the walk's current
+        // region, and a shift is not modelled at all.
         let r = IntervalSet::le(u(100));
-        for expr in ["add(var_x, 1)", "mul(var_x, 2)", "sload(0)", "shr(1, var_x)"] {
+        for expr in ["sload(0)", "shr(1, var_x)", "div(var_x, 2)", "keccak256(var_x, 32)"] {
             assert!(value_set(&e(expr), &env_of("var_x", &r)).is_err(), "{expr}");
         }
     }
@@ -171,5 +181,80 @@ pub fn constant(e: &Expr) -> Option<U256> {
     match e {
         Expr::Literal { text, .. } => crate::interval::parse_decimal(text).ok(),
         _ => None,
+    }
+}
+
+/// `add`, `sub` and `mul` on interval sets, exact or refused.
+///
+/// Only the ends are needed: each is monotone in both operands over the range
+/// where it does not wrap. Where it can wrap the answer is not an interval at
+/// all, and returning one anyway would be inventing a value.
+fn arith(op: &str, l: &IntervalSet, r: &IntervalSet) -> Result<IntervalSet, String> {
+    let (Some((llo, lhi)), Some((rlo, rhi))) = (l.bounds(), r.bounds()) else {
+        return Ok(IntervalSet::empty());
+    };
+    let wrap = || format!("`{op}` of {l} and {r} can wrap, so the result is not an interval");
+    match op {
+        "add" => {
+            let hi = lhi.checked_add(rhi).ok_or_else(wrap)?;
+            Ok(IntervalSet::range(llo + rlo, hi))
+        }
+        "sub" => {
+            // Unsigned: every value of the left must be at or above every
+            // value of the right, or the subtraction wraps.
+            let lo = llo.checked_sub(rhi).ok_or_else(wrap)?;
+            Ok(IntervalSet::range(lo, lhi - rlo))
+        }
+        "mul" => {
+            let hi = lhi.checked_mul(rhi).ok_or_else(wrap)?;
+            Ok(IntervalSet::range(llo * rlo, hi))
+        }
+        _ => Err(format!("`{op}` is outside the P1a fragment")),
+    }
+}
+
+#[cfg(test)]
+mod arith_tests {
+    use super::*;
+    use crate::interval::U256;
+
+    fn u(n: u64) -> U256 {
+        U256::from(n)
+    }
+
+    #[test]
+    fn arithmetic_is_exact_where_it_cannot_wrap() {
+        let a = IntervalSet::range(u(10), u(20));
+        let b = IntervalSet::range(u(1), u(2));
+        assert_eq!(arith("add", &a, &b).unwrap(), IntervalSet::range(u(11), u(22)));
+        assert_eq!(arith("sub", &a, &b).unwrap(), IntervalSet::range(u(8), u(19)));
+        assert_eq!(arith("mul", &a, &b).unwrap(), IntervalSet::range(u(10), u(40)));
+    }
+
+    #[test]
+    fn arithmetic_that_can_wrap_is_refused_not_approximated() {
+        // A wrapped result is a different value, and putting it in an
+        // interval anyway would place a number in a region it is not in.
+        let big = IntervalSet::range(crate::interval::max_u256() - u(1), crate::interval::max_u256());
+        let one = IntervalSet::point(u(2));
+        assert!(arith("add", &big, &one).is_err());
+        assert!(arith("mul", &big, &one).is_err());
+        // and unsigned subtraction wraps when the right can exceed the left
+        assert!(arith("sub", &IntervalSet::point(u(1)), &IntervalSet::point(u(2))).is_err());
+    }
+
+    #[test]
+    fn a_computed_local_becomes_known() {
+        // `capped(x + 1)`: the modifier's parameter is the argument plus one.
+        let e = |src: &str| {
+            let s = format!("object \"T\" {{ code {{ let c := {src} }} }}");
+            let p = mulu_yul::parse_object(&s).unwrap();
+            let mulu_yul::Stmt::Let { value: Some(v), .. } = &p.object.code.stmts[0] else {
+                panic!()
+            };
+            v.clone()
+        };
+        let env = env_of("x", &IntervalSet::range(u(0), u(99)));
+        assert_eq!(value_set(&e("add(x, 1)"), &env).unwrap(), IntervalSet::range(u(1), u(100)));
     }
 }

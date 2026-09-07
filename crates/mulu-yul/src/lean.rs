@@ -107,17 +107,56 @@ fn err<T>(reason: impl Into<String>) -> Result<T, LeanEmitError> {
 /// solc emits neither in the unoptimized `ir`, so hitting one is a refusal
 /// rather than a mangling: two names that mangled to one would silently make
 /// a different program.
-fn ident(name: &str) -> Result<&str, LeanEmitError> {
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return err(format!("the identifier {name:?} is not one Lean can parse as an `ident`"));
+fn ident(name: &str) -> Result<String, LeanEmitError> {
+    if name.is_empty() {
+        return err("an empty identifier");
     }
-    Ok(name)
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !name.starts_with(|c: char| c.is_ascii_digit()) {
+        return Ok(name.to_string());
+    }
+    // Yul admits `$` and `.` in a name and Lean does not. solc puts a `$`
+    // in every generated helper for an array, a struct or a mapping, so
+    // refusing meant refusing all of them. The rewrite is minimal on purpose:
+    // a name that is already a Lean identifier is left exactly as written,
+    // because these files are read by people checking a correspondence.
+    let mangled: String = name
+        .chars()
+        .map(|c| match c {
+            '$' => "_S".to_string(),
+            '.' => "_D".to_string(),
+            c if c.is_ascii_alphanumeric() || c == '_' => c.to_string(),
+            _ => "_X".to_string(),
+        })
+        .collect();
+    if mangled.starts_with(|c: char| c.is_ascii_digit()) {
+        return err(format!("the identifier {name:?} starts with a digit"));
+    }
+    Ok(mangled)
+}
+
+/// Two Yul names that rewrite to one Lean name would silently merge two
+/// functions. Collecting every name a module uses and checking the rewrite is
+/// injective on it is cheaper than making the rewrite injective in general,
+/// and it leaves the readable names readable.
+fn check_injective(names: &[String]) -> Result<(), LeanEmitError> {
+    let mut seen: std::collections::BTreeMap<String, String> = Default::default();
+    for n in names {
+        let m = ident(n)?;
+        if let Some(other) = seen.insert(m.clone(), n.clone()) {
+            if &other != n {
+                return err(format!(
+                    "{n:?} and {other:?} both become {m:?} in Lean, which would merge them"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn expr(e: &Expr, out: &mut String, n: &mut Normalisations) -> Result<(), LeanEmitError> {
     match e {
         Expr::Ident { name, .. } => {
-            out.push_str(ident(name)?);
+            out.push_str(&ident(name)?);
         }
         Expr::Literal { text, .. } => {
             // The notation's `expr` accepts a numeral only. A Yul string
@@ -143,7 +182,7 @@ fn expr(e: &Expr, out: &mut String, n: &mut Normalisations) -> Result<(), LeanEm
                 n.note(MEMORYGUARD);
                 return expr(inner, out, n);
             }
-            out.push_str(ident(name)?);
+            out.push_str(&ident(name)?);
             out.push('(');
             for (i, a) in args.iter().enumerate() {
                 if i > 0 {
@@ -218,7 +257,7 @@ fn rendered(e: &Expr, n: &mut Normalisations) -> Result<String, LeanEmitError> {
 fn names(v: &[String]) -> Result<String, LeanEmitError> {
     let mut parts = vec![];
     for n in v {
-        parts.push(ident(n)?.to_string());
+        parts.push(ident(n)?);
     }
     Ok(parts.join(", "))
 }
@@ -407,12 +446,25 @@ pub fn contract_def(o: &Object) -> Result<(String, Normalisations, Hazards), Lea
     let mut n = Normalisations::default();
     let mut h = Hazards::default();
     let mut out = String::new();
+    let mut all: Vec<String> = o.functions().iter().map(|f| f.name.clone()).collect();
+    for f in o.functions() {
+        all.extend(f.params.iter().cloned());
+        all.extend(f.returns.iter().cloned());
+    }
+    check_injective(&all)?;
     let _ = writeln!(out, "/-- Derived from the Yul object `{}`. -/", o.name);
     out.push_str("def contract : YulContract where\n  dispatcher :=\n    <s ");
     out.push_str(&dispatcher(o, &mut n, &mut h)?);
     out.push_str("    >\n  functions :=\n    (∅ : Finmap (fun (_ : YulFunctionName) ↦ FunctionDefinition))\n");
     for f in o.functions() {
-        let _ = writeln!(out, "    |>.insert \"{}\"\n      <f {}      >", f.name, function(f, &mut n, &mut h)?);
+        // The map key is the name the dispatcher calls, so it is the Lean
+        // one: the notation's `<f …>` elaborates the mangled name.
+        let _ = writeln!(
+            out,
+            "    |>.insert \"{}\"\n      <f {}      >",
+            ident(&f.name)?,
+            function(f, &mut n, &mut h)?
+        );
     }
     Ok((out, n, h))
 }
@@ -437,5 +489,41 @@ mod tests {
         assert!(string_word("\"a\\qb\"").is_err());
         assert!(string_word(&format!("\"{}\"", "x".repeat(33))).is_err());
         assert_eq!(&string_word("\"\\x41\"").unwrap()[..4], "0x41");
+    }
+}
+
+#[cfg(test)]
+mod ident_tests {
+    use super::*;
+
+    #[test]
+    fn a_name_lean_can_take_is_left_exactly_as_written() {
+        // These files are read by people checking a correspondence, so a
+        // rewrite that touched every name would cost more than it bought.
+        assert_eq!(ident("fun_setLimit_27").unwrap(), "fun_setLimit_27");
+        assert_eq!(ident("value").unwrap(), "value");
+    }
+
+    #[test]
+    fn a_yul_name_lean_cannot_take_is_rewritten() {
+        // solc puts a `$` in every generated helper for an array, a struct or
+        // a mapping, so refusing them refused all of those contracts.
+        assert_eq!(
+            ident("array_length_t_array$_t_uint256_$dyn_storage").unwrap(),
+            "array_length_t_array_S_t_uint256__Sdyn_storage"
+        );
+        assert_eq!(ident("a.b").unwrap(), "a_Db");
+        assert!(ident("").is_err());
+        assert!(ident("0x").is_err(), "a Lean identifier cannot start with a digit");
+    }
+
+    #[test]
+    fn two_names_that_would_become_one_are_refused() {
+        // Silently merging two Yul functions into one Lean definition would
+        // give a semantics for a program that is not the one analysed.
+        assert!(check_injective(&["a$b".into(), "a_Sb".into()]).is_err());
+        assert!(check_injective(&["a$b".into(), "a$c".into()]).is_ok());
+        // the same name twice is not a collision
+        assert!(check_injective(&["a$b".into(), "a$b".into()]).is_ok());
     }
 }
