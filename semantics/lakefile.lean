@@ -43,3 +43,9 @@ lean_lib «MuluDiff» where
 
 lean_exe «mulu-diff» where
   root := `MuluDiff.Main
+
+/-- `make semantics-probe`. Runs the Yul programs whose meaning the
+specification fixes and reports what the adopted semantics does with them.
+It needs no generated file, so it builds on its own. -/
+lean_exe «mulu-semantics-probe» where
+  root := `MuluDiff.ProbeMain

@@ -4,7 +4,7 @@
 LEAN_DIR := $(CURDIR)/lean
 export MULU_LEAN_DIR := $(LEAN_DIR)
 
-.PHONY: build lean rust test check fixtures ir analyze regen-fixtures semantics semantics-check semantics-diff clean
+.PHONY: build lean rust test check fixtures ir analyze regen-fixtures semantics semantics-check semantics-diff semantics-probe clean
 
 build: lean rust
 
@@ -79,6 +79,11 @@ semantics-check: semantics
 # Run every example in the Lean semantics and on revm, and compare. Agreement
 # is evidence, never a proof: the obligation stays open either way. What this
 # catches is a rendering that is a different program.
+# What the adopted semantics does with programs whose meaning the Yul
+# specification fixes. Two of the four cases still differ from it.
+semantics-probe: semantics
+	cd semantics && lake build mulu-semantics-probe && ./.lake/build/bin/mulu-semantics-probe
+
 semantics-diff: semantics
 	./target/release/mulu semantics-diff examples/limits/Limits.sol --contract Limits \
 	  --call 'setLimit(uint256)=50' --call 'setLimit(uint256)=101' --call 'forceSet(uint256)=1001'

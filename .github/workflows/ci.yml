@@ -61,6 +61,8 @@ jobs:
         run: cargo build --release && make semantics-check
       - name: Every example agrees with revm when run in the semantics
         run: make semantics-diff
+      - name: Where the semantics differs from the Yul specification
+        run: make semantics-probe
       - name: Axiom audit
         run: |
           cd semantics
