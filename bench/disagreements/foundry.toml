@@ -1,0 +1,8 @@
+# The contracts are not vendored: they are read from the corpus that
+# `bench/fetch.sh` clones, the same as everywhere else in `bench/`.
+[profile.default]
+src = "test"
+test = "test"
+out = "out"
+allow_paths = ["../corpus"]
+remappings = ["corpus/=../corpus/"]
