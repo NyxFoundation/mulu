@@ -447,6 +447,35 @@ impl<'a> Builder<'a> {
                 }
                 guards_by_func.insert(fname.clone(), g);
 
+                // A plain branch is a boundary the regions have to respect
+                // too. Only guards refined the partition, so a region could
+                // straddle a branch condition and the walk had no region fine
+                // enough to take one side of it. Same restriction as a guard:
+                // only a condition over one of this function's own parameters
+                // partitions the argument space.
+                for b in &f.blocks {
+                    let Terminator::Branch { cond, .. } = &b.terminator else { continue };
+                    let Ok(pred) = crate::predicate::translate_in(cond, &f.parameters, &e.widest())
+                    else {
+                        continue;
+                    };
+                    let Some(var) = pred.var() else { continue };
+                    if !f.parameters.iter().any(|x| x == var) {
+                        continue;
+                    }
+                    let set = pred.set();
+                    let id = format!("branch:{fname}#{}", b.id);
+                    if !set.is_full() && !set.is_empty() && !arg_sets.iter().any(|(n, _)| *n == id) {
+                        arg_preds.push(PredicateInfo {
+                            id: id.clone(),
+                            source: format!("a branch in {fname} reached from {}", e.solidity_name),
+                            text: format!("{pred}"),
+                            set: set.clone(),
+                        });
+                        arg_sets.push((id, set));
+                    }
+                }
+
                 // pull the spec back through `slot := argument`
                 for b in &f.blocks {
                     for ins in &b.instructions {

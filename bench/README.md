@@ -42,7 +42,10 @@ them for it would flatter.
 | | 35.0% | a switch, interval arithmetic, a condition evaluated |
 | | **25.0%** | **a soundness regression found and reverted** |
 | | 25.5% | a call that defines a value is entered, not skipped |
-| | **25.6%** | memory word 64, and a slot passed as a parameter |
+| | 25.6% | memory word 64, and a slot passed as a parameter |
+| | 27.0% | the helpers solc writes everything through are evaluated |
+| | 28.1% | **an exponential removed**: `and` evaluated each side twice |
+| | **28.2%** | a branch over a parameter refines the partition |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every
@@ -52,35 +55,49 @@ the argument for measuring against programs someone else chose.
 
 The largest single move, ten points, came from binding the targets of a `let`.
 Nothing bound them, so every local was unknown, and a guard over a local was
-"not the argument" even where the local *was* the argument one line later. It
-is not a feature anyone would have put on a roadmap; the corpus found it.
+"not the argument" even where the local *was* the argument one line later.
 
 **Then ten points came back off, on purpose.** Binding a definition and moving
 on skipped the safety net for an instruction that can revert, so a `let` whose
 value reverts was passed over and the revert path was dropped from the model.
 That is the exact hole the net exists to stop, and it was worth ten points of
-score. Only definitions that compute are bound now. Some of those points came
-back the right way: a call that defines a value is entered like one made as a
-statement, so its checks are seen and its results are bound on the way out.
-A number that goes down because the tool got more correct is the number to
-publish.
+score. Only definitions that compute are bound now, and a call that defines a
+value is entered rather than skipped, so its checks are seen. A number that
+goes down because the tool got more correct is the number to publish.
 
-Why the rest stop, ranked:
+The corpus also found a ten-line contract that never finished being analysed.
+`and` asked whether each side was a single value, which evaluates it, and then
+evaluated the chosen side again; solc nests cleanups, so a chain of them cost
+two to its length. Three wrong guesses at the cause were made before bisecting
+the commit that introduced it. The bounds and the two quadratic dedups fixed
+along the way were all real and are all kept, but none of them was this.
 
-| count | reason | whose |
-| --- | --- | --- |
-| 252 | via-IR, a newer solc, an EVM version, or no calls | the corpus |
-| 113 | the constructor's effect on storage is not determined | arrays and structs |
-| 40 | an instruction with effects the model cannot represent | arrays and structs |
-| 38 | a branch is not decided by the argument regions | refinement |
-| 31 | reaches `call` or `staticcall` | out of the P1a subset |
-| 12 | the ABI lists one parameter and the body takes two | a decoder that returns two |
+## What is left, and why it is not more of the same
 
-An array **read** with a constant index models, and the module elaborates in
-the semantics. An array read or write with a *symbolic* index does not, and
-this is a structural limit rather than a missing case: the guard is
-`index < length`, both sides are regions, and independent interval regions
-over two variables cannot decide a relation between them. Deciding it needs
-the partition to be over the pair, which is a different abstraction from the
-one that is there. That, and the array as a storage fact whose length changes,
-are what the top rows are.
+1027 in-scope cases still stop. They are not spread evenly.
+
+| count | directory |
+| --- | --- |
+| 200 | `array/` |
+| 116 | `abicoder/` |
+| 53 | `viaYul/` |
+| 52 | `structs/` |
+
+Two things account for most of it, and neither is a missing case.
+
+**A relation between two regions.** An array access is guarded by
+`index < length`. Both sides are regions, and independent interval regions over
+two variables cannot decide a relation between them: with the index anywhere
+in `uint256` and the length anywhere in `uint256`, neither `<` nor `>=` holds.
+Deciding it needs the partition to be over the *pair*, which is a different
+abstraction from the one that is here. An array access with a constant index
+does model, and the module elaborates in the semantics; a symbolic one does
+not.
+
+**Loops.** Copying an array or a struct is a loop, and P1a refuses one rather
+than unrolling it a fixed number of times and calling the result general.
+Most of the constructor failures are this.
+
+Both are fragment decisions rather than bugs, and both make
+`simulation:step-covered` harder to prove in a way the incremental work so far
+did not. That is the reason to decide them once rather than grow into them.
