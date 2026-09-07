@@ -693,6 +693,38 @@ impl<'a> Walk<'a> {
         Ok(out)
     }
 
+    /// `value_set`, plus the one thing it cannot know on its own: what a
+    /// storage slot holds in the region being walked. `sload` of a constant
+    /// slot is the whole reason a length or a bound is ever in scope.
+    fn eval(
+        &self,
+        e: &mulu_yul::Expr,
+        env: &crate::value::Env,
+        storage: &StorageRegion,
+    ) -> Result<IntervalSet, String> {
+        if let mulu_yul::Expr::Call { name, args, .. } = e {
+            if name == "sload" && args.len() == 1 {
+                let slot = mulu_yul::fold::fold_fixpoint(&args[0]);
+                let Some(v) = crate::value::constant(&slot) else {
+                    return Err("`sload` of a computed slot is outside the P1a fragment".into());
+                };
+                let Ok(i) = usize::try_from(v) else {
+                    return Err(format!("slot {v} is beyond the layout this models"));
+                };
+                let (label, regions) = self
+                    .per_slot
+                    .get(i)
+                    .ok_or_else(|| format!("slot {i} is not in the storage layout"))?;
+                let _ = label;
+                return regions
+                    .get(storage[i])
+                    .cloned()
+                    .ok_or_else(|| format!("slot {i} has no region {}", storage[i]));
+            }
+        }
+        crate::value::value_set(e, env)
+    }
+
     /// Which region of `slot` a value known to lie in `values` falls into.
     fn region_of(&self, slot: usize, values: &IntervalSet) -> Option<usize> {
         self.per_slot[slot].1.iter().position(|r| values.subset_of(r))
@@ -1000,6 +1032,49 @@ impl<'a> Walk<'a> {
                     storage[slot_idx] = to;
                     steps.push(Step::Store { slot: slot_idx, label: slot_label, to });
                     continue;
+                }
+
+                // A local defined here is a value the rest of the walk can
+                // use. Nothing bound them before, so every guard over a local
+                // was "not the argument" even when the local *was* the
+                // argument, one `let` later. This is where a bounds check
+                // stops being unreachable: `let arrayLength := sload(slot)`
+                // then `if iszero(lt(index, arrayLength))`.
+                match &ins.op {
+                    mulu_yul::ir::Op::Let { targets, value: Some(v) }
+                    | mulu_yul::ir::Op::Assign { targets, value: v }
+                        if targets.len() == 1 =>
+                    {
+                        if let Ok(set) = self.eval(v, &env, &storage) {
+                            frames.last_mut().unwrap().env.insert(targets[0].clone(), set);
+                        } else {
+                            // Not knowing a local is not an error. A guard
+                            // that needs it refuses later, by name.
+                            frames.last_mut().unwrap().env.remove(&targets[0]);
+                        }
+                        continue;
+                    }
+                    mulu_yul::ir::Op::Let { targets, value: None } => {
+                        // `let a, b` is zero until assigned.
+                        for t in targets {
+                            frames
+                                .last_mut()
+                                .unwrap()
+                                .env
+                                .insert(t.clone(), IntervalSet::point(U256::ZERO));
+                        }
+                        continue;
+                    }
+                    mulu_yul::ir::Op::Let { targets, .. }
+                    | mulu_yul::ir::Op::Assign { targets, .. } => {
+                        // Several targets from one call: nothing here can say
+                        // which value went where, so they stay unknown.
+                        for t in targets {
+                            frames.last_mut().unwrap().env.remove(t);
+                        }
+                        continue;
+                    }
+                    mulu_yul::ir::Op::Effect { .. } => {}
                 }
 
                 if let Some((callee, args)) = statement_call(ins) {

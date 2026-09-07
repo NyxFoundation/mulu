@@ -214,10 +214,15 @@ contract C is B {
     let unsupported = a["unsupported"].as_array().unwrap();
     assert!(!unsupported.is_empty());
     let joined = unsupported.iter().map(|u| u.as_str().unwrap()).collect::<Vec<_>>().join("\n");
-    // The safety net that matters: an instruction whose effects the model
-    // cannot express stops the walk instead of being skipped.
+    // The safety net that matters: the walk stops rather than skipping.
+    // *Which* net catches it moved when locals began to be bound: the
+    // modifier's parameter is now bound to whatever `x + 1` evaluates to,
+    // which is nothing, so the guard over it refuses by name before the
+    // instruction's effects are ever reached. Either message is a refusal;
+    // silently modelling `f` as a no-op is what must not happen.
     assert!(
-        joined.contains("carries effects the model does not represent"),
+        joined.contains("could not be turned into a predicate")
+            || joined.contains("carries effects the model does not represent"),
         "{joined}"
     );
     // and the model that was written out does not claim f is a no-op
