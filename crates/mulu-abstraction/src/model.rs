@@ -424,6 +424,16 @@ impl<'a> Builder<'a> {
                 let f = f.clone();
                 let g = self.guards(&f, &e.widest());
                 for (id, p) in &g {
+                    // Only a guard over one of this function's own parameters
+                    // refines the *argument* partition. Letting a predicate
+                    // over a local in was what made `partition` exponential
+                    // in practice: it is exponential in how many sets it is
+                    // given, and every local appearing in a condition added
+                    // one. A guard over a local is still decided, at the
+                    // walk, where the local has a value.
+                    if !p.var().is_some_and(|v| f.parameters.iter().any(|x| x == v)) {
+                        continue;
+                    }
                     let set = p.set();
                     if !set.is_full() && !set.is_empty() && !arg_sets.iter().any(|(n, _)| n == id) {
                         arg_preds.push(PredicateInfo {
@@ -488,6 +498,19 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // `partition` builds the atoms of the boolean algebra these generate,
+        // which is exponential in how many there are. A contract needing more
+        // boundaries than this is refused rather than waited for.
+        const MAX_ARG_PREDICATES: usize = 12;
+        if arg_sets.len() > MAX_ARG_PREDICATES {
+            self.refuse(format!(
+                "this contract's guards need {} argument boundaries and the limit is \
+                 {MAX_ARG_PREDICATES}; partitioning that many would cost more than the answer \
+                 is worth",
+                arg_sets.len()
+            ));
+            arg_sets.clear();
+        }
         let (arg_regions, infeasible) = Self::partition(&arg_sets);
         for i in infeasible {
             self.discharged.push(format!("argument: {i} is unsatisfiable"));
@@ -539,6 +562,31 @@ struct Walk<'a> {
     storage_preds: Vec<PredicateInfo>,
     /// (slot label, regions of that slot)
     per_slot: Vec<(String, Vec<IntervalSet>)>,
+    /// Helpers that only compute, worked out once. `eval_call` used to
+    /// establish this per call by scanning every function and every check of
+    /// the contract, on every expression `value_set` could not read, in every
+    /// walk. That scan, not the evaluation, was the cost.
+    pure_helpers: BTreeSet<String>,
+    /// Steps taken across every walk of this contract.
+    ///
+    /// `MAX_STEPS` bounds one walk and `MAX_WALKS` bounds how many there are,
+    /// and neither bounds their product: a contract can ask for a few
+    /// thousand walks that are each a few thousand steps and take longer than
+    /// anyone will wait. The budget is spent across all of them, and running
+    /// out refuses the contract rather than returning a model built from the
+    /// part that fit.
+    budget: usize,
+    /// What `transitions` already holds, so adding one is a lookup.
+    transition_keys: BTreeSet<(String, String, String)>,
+    plant_transition_keys: BTreeSet<(String, String, String)>,
+    /// When this contract's walks must be over.
+    ///
+    /// The step count and the walk count each bound one thing, and a
+    /// pathology can hide between them or inside a single step. A wall clock
+    /// bounds all of them at once, and it is the only bound that holds for a
+    /// cost nobody has thought of yet. Running out refuses the contract; it
+    /// never returns a model built from the part that fit.
+    deadline: std::time::Instant,
     states: BTreeSet<String>,
     marked: BTreeSet<String>,
     events: BTreeMap<String, EventDecl>,
@@ -581,6 +629,24 @@ impl<'a> Walk<'a> {
         storage_preds: Vec<PredicateInfo>,
         per_slot: Vec<(String, Vec<IntervalSet>)>,
     ) -> Self {
+        // Worked out once, from the whole contract, before `b` is moved.
+        const MAX_BODY: usize = 32;
+        let with_checks: BTreeSet<&str> = b.ir.checks.iter().map(|c| c.function.as_str()).collect();
+        let pure_helpers: BTreeSet<String> = b
+            .ir
+            .functions
+            .iter()
+            .filter(|f| {
+                !f.effects.writes_storage
+                    && !f.effects.can_revert
+                    && !with_checks.contains(f.id.as_str())
+                    && f.blocks.len() == 1
+                    && f.blocks[0].instructions.len() <= MAX_BODY
+                    && !f.returns.is_empty()
+            })
+            .map(|f| f.id.clone())
+            .collect();
+        drop(with_checks);
         Self {
             b,
             entries,
@@ -589,6 +655,11 @@ impl<'a> Walk<'a> {
             arg_preds,
             storage_preds,
             per_slot,
+            pure_helpers,
+            budget: 4_000_000,
+            transition_keys: BTreeSet::new(),
+            plant_transition_keys: BTreeSet::new(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(20),
             states: BTreeSet::new(),
             marked: BTreeSet::new(),
             events: BTreeMap::new(),
@@ -648,16 +719,21 @@ impl<'a> Walk<'a> {
         id.to_string()
     }
 
+    /// Add a transition once. The duplicate check was a scan of everything
+    /// added so far, which is quadratic in the number of transitions and was
+    /// fine while a walk was a dozen steps. It stopped being fine when the
+    /// walk began entering the calls it used to skip: a few thousand steps
+    /// turned a scan into minutes.
     fn add(&mut self, from: &str, event: &str, to: &str) {
         self.states.insert(from.to_string());
         self.states.insert(to.to_string());
-        let t = Transition { from: from.to_string(), event: event.to_string(), to: to.to_string() };
-        if !self
-            .transitions
-            .iter()
-            .any(|x| x.from == t.from && x.event == t.event && x.to == t.to)
-        {
-            self.transitions.push(t);
+        let key = (from.to_string(), event.to_string(), to.to_string());
+        if self.transition_keys.insert(key) {
+            self.transitions.push(Transition {
+                from: from.to_string(),
+                event: event.to_string(),
+                to: to.to_string(),
+            });
         }
     }
 
@@ -802,28 +878,25 @@ impl<'a> Walk<'a> {
         memory: &BTreeMap<U256, IntervalSet>,
         depth: usize,
     ) -> Result<IntervalSet, String> {
-        const MAX: usize = 8;
-        if depth >= MAX {
-            return Err(format!("evaluating {callee} nests deeper than {MAX} calls"));
+        // Nesting is bounded because the walk enumerates a product of regions
+        // and evaluates the same helper many times over.
+        const MAX_DEPTH: usize = 4;
+        if depth >= MAX_DEPTH {
+            return Err(format!("evaluating {callee} nests deeper than {MAX_DEPTH} calls"));
+        }
+        // A helper with an effect or a check is *not* evaluated: the walk
+        // must enter one of those so its revert path reaches the model, and
+        // evaluating it here would lose exactly that. Membership is decided
+        // once per contract rather than by scanning it per call.
+        if !self.pure_helpers.contains(callee) {
+            return Err(format!("`{callee}` is not a helper that only computes"));
         }
         let g = self
             .b
             .ir
             .function(callee)
             .ok_or_else(|| format!("`{callee}` is not a function this build defines"))?;
-        if g.effects.writes_storage
-            || g.effects.can_revert
-            || self.b.ir.checks.iter().any(|c| c.function == callee)
-        {
-            return Err(format!("`{callee}` has effects, so it is entered rather than evaluated"));
-        }
-        if g.blocks.len() != 1 {
-            return Err(format!("`{callee}` branches, so it is not a straight-line helper"));
-        }
-        let ret = g
-            .returns
-            .first()
-            .ok_or_else(|| format!("`{callee}` returns nothing to evaluate"))?;
+        let ret = g.returns.first().expect("a pure helper returns something");
         let mut inner = crate::value::Env::new();
         for (p, a) in g.parameters.iter().zip(args.iter()) {
             inner.insert(p.clone(), self.eval_at(a, env, storage, memory, depth + 1)?);
@@ -832,8 +905,6 @@ impl<'a> Walk<'a> {
             let (targets, value) = match &i.op {
                 mulu_yul::ir::Op::Let { targets, value: Some(v) } => (targets, v),
                 mulu_yul::ir::Op::Assign { targets, value } => (targets, value),
-                // A `let` with no value is zero; anything else in a pure
-                // helper is bookkeeping this does not need.
                 mulu_yul::ir::Op::Let { targets, value: None } => {
                     for t in targets {
                         inner.insert(t.clone(), IntervalSet::point(U256::ZERO));
@@ -875,13 +946,17 @@ impl<'a> Walk<'a> {
         env: &crate::value::Env,
         storage: &StorageRegion,
         memory: &BTreeMap<U256, IntervalSet>,
+        depth: usize,
     ) -> Option<U256> {
         let folded = mulu_yul::fold::fold_fixpoint(e);
         if let Some(v) = crate::value::constant(&folded) {
             return Some(v);
         }
-        // A set with one value in it is that value.
-        let set = self.eval(e, env, storage, memory).ok()?;
+        // Carrying the depth is what stops this: `eval` resolves an address
+        // through `address`, and `address` used to start over at zero, so
+        // `mload(mload(64))` recursed for ever between them. Optimised, that
+        // is a loop rather than a crash, which is the worst of both.
+        let set = self.eval_at(e, env, storage, memory, depth + 1).ok()?;
         let (lo, hi) = set.bounds()?;
         (lo == hi).then_some(lo)
     }
@@ -907,9 +982,14 @@ impl<'a> Walk<'a> {
         memory: &BTreeMap<U256, IntervalSet>,
         depth: usize,
     ) -> Result<IntervalSet, String> {
+        // The same bound as `eval_call`, here too: `eval` and `address` call
+        // each other, so neither can be the only one that counts.
+        if depth >= 8 {
+            return Err("evaluating this expression nests deeper than 8 levels".into());
+        }
         if let mulu_yul::Expr::Call { name, args, .. } = e {
             if name == "mload" && args.len() == 1 {
-                let Some(k) = self.address(&args[0], env, storage, memory) else {
+                let Some(k) = self.address(&args[0], env, storage, memory, depth) else {
                     return Err("`mload` of a computed address is outside the P1a fragment".into());
                 };
                 return memory
@@ -918,7 +998,7 @@ impl<'a> Walk<'a> {
                     .ok_or_else(|| format!("nothing is known about memory at {k}"));
             }
             if name == "sload" && args.len() == 1 {
-                let Some(v) = self.address(&args[0], env, storage, memory) else {
+                let Some(v) = self.address(&args[0], env, storage, memory, depth) else {
                     return Err("`sload` of a computed slot is outside the P1a fragment".into());
                 };
                 let Ok(i) = usize::try_from(v) else {
@@ -1008,7 +1088,40 @@ impl<'a> Walk<'a> {
             self.marked.insert(n);
         }
 
-        let entries = std::mem::take(&mut self.entries);
+        let mut entries = std::mem::take(&mut self.entries);
+
+        // One walk per entrypoint, per choice of region for each argument,
+        // per storage region. That product is a power of the arity, so a
+        // function of three arguments over a partition refined by a few
+        // guards can ask for more walks than the answer is worth. Refusing
+        // says so, and refusing the *contract* rather than walking a fraction
+        // of it: a model built from part of the product would be a search
+        // that did not finish, reported as one that found nothing.
+        const MAX_WALKS: usize = 4096;
+        let planned: usize = entries
+            .iter()
+            .map(|e| {
+                let per: usize = e
+                    .params
+                    .iter()
+                    .map(|p| {
+                        (0..self.arg_regions.len())
+                            .filter(|i| self.arg_regions[*i].subset_of(&p.domain))
+                            .count()
+                            .max(1)
+                    })
+                    .product();
+                per.saturating_mul(storage_regions.len())
+            })
+            .sum();
+        if planned > MAX_WALKS {
+            self.b.refuse(format!(
+                "the arguments and storage of this contract need {planned} walks and the limit \
+                 is {MAX_WALKS}; the model is not built rather than built from part of it"
+            ));
+            entries.clear();
+        }
+
         for e in &entries {
             for s in &storage_regions {
                 // One choice of region per parameter, so the walk covers
@@ -1227,6 +1340,19 @@ impl<'a> Walk<'a> {
             n += 1;
             if n > MAX_STEPS {
                 return Err("the abstract execution did not terminate within the step limit".into());
+            }
+            // Checked every 256 steps: often enough to stop, rarely enough
+            // not to be the cost itself.
+            if n % 256 == 0 && std::time::Instant::now() > self.deadline {
+                return Err("this contract exceeded the abstraction's time budget".into());
+            }
+            match self.budget.checked_sub(1) {
+                Some(left) => self.budget = left,
+                None => {
+                    return Err(
+                        "this contract's walks exhausted the abstraction's step budget".into()
+                    )
+                }
             }
             let depth = frames.len();
             let (func, block, index, env) = {
@@ -1803,16 +1929,18 @@ impl<'a> Walk<'a> {
         });
     }
 
+    /// The plant's half of [`Self::add`], and quadratic for the same reason
+    /// until it was not.
     fn plant_add(&mut self, from: &str, event: &str, to: &str) {
         self.plant_states.insert(from.to_string());
         self.plant_states.insert(to.to_string());
-        let t = Transition { from: from.to_string(), event: event.to_string(), to: to.to_string() };
-        if !self
-            .plant_transitions
-            .iter()
-            .any(|x| x.from == t.from && x.event == t.event && x.to == t.to)
-        {
-            self.plant_transitions.push(t);
+        let key = (from.to_string(), event.to_string(), to.to_string());
+        if self.plant_transition_keys.insert(key) {
+            self.plant_transitions.push(Transition {
+                from: from.to_string(),
+                event: event.to_string(),
+                to: to.to_string(),
+            });
         }
     }
 
