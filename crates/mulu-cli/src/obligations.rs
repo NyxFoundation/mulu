@@ -70,6 +70,15 @@ pub const ASSUME_COMPILERS: &str =
     "assumed: solc compiles Solidity as its documentation says. A project decision, not a \
      proof; no proof of solc exists.";
 
+/// The other decision: the adopted Yul semantics is the semantics of Yul.
+/// Made separately from [`ASSUME_COMPILERS`] because the evidence is
+/// different, and **withdrawn per contract** wherever the analysis measured
+/// this semantics getting that contract wrong.
+pub const ASSUME_SEMANTICS: &str =
+    "assumed: EvmYul is the semantics of Yul. A project decision, not a proof; its conformance \
+     runs against ethereum/tests are the evidence there is, and mulu's own probe records where \
+     it is wrong. Withdrawn for any contract that reaches one of those places.";
+
 fn mulu_bearer() -> String {
     "mulu".into()
 }
@@ -278,6 +287,13 @@ pub fn ledger(
     // Not a possibility any more, where a contract contains one of them: a
     // measured defect belongs on the obligation it defeats.
     adopted.raised_by.extend(hazards.iter().cloned());
+    // The decision holds only where nothing was measured against it. A
+    // contract that reaches a place this semantics gets wrong leaves the
+    // obligation open, which is the difference between assuming something
+    // unproved and assuming something known false.
+    if hazards.is_empty() {
+        adopted.assumed_by = Some(ASSUME_SEMANTICS.to_string());
+    }
     adopted.would_need = Some(
         "a proof that EvmYul agrees with the EVM. None exists for any EVM semantics. Its \
          conformance runs against ethereum/tests are the evidence there is."

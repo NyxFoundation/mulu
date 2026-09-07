@@ -1119,7 +1119,7 @@ fn verify(dir: &Path, tools: &ToolArgs) -> Result<i32> {
             let Some(by) = &o.assumed_by else { continue };
             // 1. Only the project's own decision, so a ledger cannot invent
             //    an assumption by writing a sentence of its own.
-            if by != obligations::ASSUME_COMPILERS {
+            if by != obligations::ASSUME_COMPILERS && by != obligations::ASSUME_SEMANTICS {
                 failures.push(format!(
                     "obligation {} is assumed by {by:?}, which is not the decision this project \
                      recorded",

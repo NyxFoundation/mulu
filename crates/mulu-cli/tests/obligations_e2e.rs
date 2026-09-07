@@ -459,10 +459,14 @@ fn assuming_a_compiler_correct_is_recorded_not_erased() {
         .collect();
     assert_eq!(
         assumed,
-        vec!["compilation:yul-corresponds-to-source", "compilation:optimised-bytecode"]
+        vec![
+            "semantics:evmyul-matches-the-evm",
+            "compilation:yul-corresponds-to-source",
+            "compilation:optimised-bytecode"
+        ]
     );
     for o in obs.iter().filter(|o| o["assumed_by"].is_string()) {
-        assert_eq!(o["bearer"], "solc", "only work this project did not do can be assumed");
+        assert_ne!(o["bearer"], "mulu", "only work this project did not do can be assumed");
         assert!(o["discharged_by"].is_null(), "assumed is not discharged");
         assert!(o["assumed_by"].as_str().unwrap().contains("not a proof"));
     }

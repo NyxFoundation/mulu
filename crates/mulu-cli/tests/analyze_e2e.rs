@@ -1018,3 +1018,55 @@ contract Sw {
     assert!(err.contains("non-empty `default`"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_semantics_is_assumed_right_except_where_it_was_measured_wrong() {
+    if !ready() {
+        return;
+    }
+    // Assuming an unproved thing is a decision. Assuming a thing you have a
+    // counterexample to is not, so the decision is withdrawn per contract:
+    // one that reaches a place EvmYul gets wrong leaves the obligation open.
+    let spec = root().join("examples/limits/Limits.spec.json");
+    let (_, ok_out) = analyze("assumed-ok", &["--spec", spec.to_str().unwrap()]);
+    let assumed = |dir: &Path| -> serde_json::Value {
+        json(&dir.join("obligations.json"))["obligations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "semantics:evmyul-matches-the-evm")
+            .unwrap()["assumed_by"]
+            .clone()
+    };
+    assert!(assumed(&ok_out).is_string(), "nothing here reaches a place it gets wrong");
+
+    // the same analysis of a contract with a non-empty `default`, which does
+    let dir = std::env::temp_dir().join(format!("mulu-hz-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Sw.sol"),
+        r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract Sw {
+    uint256 public v;
+    function pick(uint256 x) external {
+        assembly {
+            switch x
+            case 1 { sstore(0, 7) }
+            default { revert(0, 0) }
+        }
+    }
+}"#,
+    )
+    .unwrap();
+    let out = dir.join("out");
+    mulu()
+        .args(["analyze", dir.join("Sw.sol").to_str().unwrap()])
+        .args(["--contract", "Sw", "--out", out.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(assumed(&out).is_null(), "a measured counterexample is not settled by a decision");
+    let _ = std::fs::remove_dir_all(&ok_out);
+    let _ = std::fs::remove_dir_all(&dir);
+}

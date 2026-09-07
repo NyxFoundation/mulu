@@ -312,8 +312,14 @@ fn print_obligations(l: &crate::obligations::Ledger) {
         for o in &assumed {
             println!("    {:<40} {:<8} reaches {}", o.id, format!("({})", o.bearer), o.reaches);
         }
-        if let Some(o) = assumed.first() {
-            println!("    {}", o.assumed_by.as_deref().unwrap_or(""));
+        // Each decision once, not once per obligation it settles.
+        let mut said: Vec<&str> = vec![];
+        for o in &assumed {
+            let by = o.assumed_by.as_deref().unwrap_or("");
+            if !said.contains(&by) {
+                said.push(by);
+                println!("    {by}");
+            }
         }
     }
     if open.is_empty() {
