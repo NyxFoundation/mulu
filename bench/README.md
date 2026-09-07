@@ -49,7 +49,7 @@ them for it would flatter.
 ## `contracts-verification-benchmark` — is mulu right?
 
 The other corpus has an answer key. `fsainas/contracts-verification-benchmark`
-holds 47 contracts across 17 use cases (bank, vault, escrow, htlc, lottery,
+holds 47 contracts across 16 use cases (bank, vault, escrow, htlc, lottery,
 crowdfund, tinyamm and so on). `v1` conforms to the use case's specification
 and the later versions carry a seeded defect. Beside them, `ground-truth.csv`
 records for each of 365 (property, version) pairs whether the property holds,
