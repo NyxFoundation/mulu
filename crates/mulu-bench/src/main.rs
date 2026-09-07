@@ -41,6 +41,11 @@ struct Args {
     /// Stop after this many cases, for a quick look
     #[arg(long)]
     limit: Option<usize>,
+    /// Exit non-zero below this many modelled cases. What CI asserts: the
+    /// floor catches a coverage regression, and the run finishing at all
+    /// catches a return of the blowup that made a ten-line contract hang.
+    #[arg(long)]
+    min_modelled: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -282,5 +287,17 @@ fn main() -> Result<()> {
     });
     std::fs::write(&args.out, serde_json::to_string_pretty(&doc)?)?;
     println!("\nwrote {}", args.out.display());
+
+    if let Some(floor) = args.min_modelled {
+        if modelled < floor {
+            eprintln!(
+                "\n{modelled} case(s) reached a complete model and the floor is {floor}. \
+                 Either something regressed, or the floor is stale and this run is the new \
+                 number; both are worth looking at before it is moved."
+            );
+            std::process::exit(1);
+        }
+        println!("floor: {modelled} >= {floor}");
+    }
     Ok(())
 }

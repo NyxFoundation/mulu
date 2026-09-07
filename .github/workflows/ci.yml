@@ -30,6 +30,16 @@ jobs:
         run: make fixtures
       - name: Solidity end to end (analyze + verify, three examples)
         run: make analyze
+      # The corpus is the regression test for coverage, and for the class of
+      # blowup that made a ten-line contract never finish. The floor is the
+      # last measured number less a small margin, so a real regression fails
+      # and normal noise does not.
+      - name: Coverage against solc's own semantic tests
+        run: |
+          ./bench/fetch.sh
+          cargo run --release -p mulu-bench -- \
+            bench/corpus/solidity/test/libsolidity/semanticTests \
+            --out bench/results.json --jobs 4 --min-modelled 395
 
   # The correspondence side. Separate because EvmYul pulls mathlib: several
   # gigabytes and a network fetch, which the job above must not need. It is

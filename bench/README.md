@@ -18,6 +18,12 @@ cargo run --release -p mulu-bench -- \
   bench/corpus/solidity/test/libsolidity/semanticTests --out bench/results.json
 ```
 
+CI runs the same thing with `--min-modelled`, which fails the build below a
+floor. The floor is the last measured number less a small margin, so a real
+regression fails and normal noise does not. It also catches something a floor
+would not obviously catch: the run has to *finish*, and the worst defect this
+corpus found was a ten-line contract that never did.
+
 The number to read is not the percentage. It is the histogram of *why* mulu
 stops, because that is the list of things to implement, in the order the
 corpus says they matter. A percentage on its own would only say whether the
@@ -45,7 +51,8 @@ them for it would flatter.
 | | 25.6% | memory word 64, and a slot passed as a parameter |
 | | 27.0% | the helpers solc writes everything through are evaluated |
 | | 28.1% | **an exponential removed**: `and` evaluated each side twice |
-| | **28.2%** | a branch over a parameter refines the partition |
+| | 28.2% | a branch over a parameter refines the partition |
+| | **28.3%** | a call made for its value is followed when finding what is reachable |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every
