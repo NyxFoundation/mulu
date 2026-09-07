@@ -106,7 +106,10 @@ pub enum Term {
     /// A storage variable, by the label solc records in `storageLayout`.
     Storage(String),
     /// A mapping cell: the variable, and the key.
-    Cell { var: String, key: Box<Term> },
+    Cell {
+        var: String,
+        key: Box<Term>,
+    },
     /// Transaction or block context: `caller`, `callvalue`, `number`,
     /// `timestamp`, `origin`. `balance` is the contract's own ether balance,
     /// which solc reads as `balance(address())`.
@@ -117,23 +120,53 @@ pub enum Term {
     Uint256(String),
     /// Wrapping addition and subtraction, as the EVM does them. `request_time
     /// + wait_time` is a term a rule about a deadline needs.
-    Add { left: Box<Term>, right: Box<Term> },
-    Sub { left: Box<Term>, right: Box<Term> },
+    Add {
+        left: Box<Term>,
+        right: Box<Term>,
+    },
+    Sub {
+        left: Box<Term>,
+        right: Box<Term>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Condition {
     /// Unsigned <=, <, >=, >
-    Ule { left: Term, right: Term },
-    Ult { left: Term, right: Term },
-    Uge { left: Term, right: Term },
-    Ugt { left: Term, right: Term },
-    Eq { left: Term, right: Term },
-    Ne { left: Term, right: Term },
-    And { args: Vec<Condition> },
-    Or { args: Vec<Condition> },
-    Not { arg: Box<Condition> },
+    Ule {
+        left: Term,
+        right: Term,
+    },
+    Ult {
+        left: Term,
+        right: Term,
+    },
+    Uge {
+        left: Term,
+        right: Term,
+    },
+    Ugt {
+        left: Term,
+        right: Term,
+    },
+    Eq {
+        left: Term,
+        right: Term,
+    },
+    Ne {
+        left: Term,
+        right: Term,
+    },
+    And {
+        args: Vec<Condition>,
+    },
+    Or {
+        args: Vec<Condition>,
+    },
+    Not {
+        arg: Box<Condition>,
+    },
 }
 
 /// What a property came out as.
@@ -255,8 +288,15 @@ fn holds(op: Op, left: &Term, right: &Term, p: &PathSummary) -> Tri {
     // it carries have to settle it. Asking the closure both ways is what
     // makes `a < b` and `b < a` two sides of one question rather than two
     // unrelated keys.
-    let (Some(l), Some(r)) = (render(left, p), render(right, p)) else { return Tri::Unknown };
-    let key = Relation { op, left: l.clone(), right: r.clone() }.key();
+    let (Some(l), Some(r)) = (render(left, p), render(right, p)) else {
+        return Tri::Unknown;
+    };
+    let key = Relation {
+        op,
+        left: l.clone(),
+        right: r.clone(),
+    }
+    .key();
     if let Some(v) = p.assumed.get(&key) {
         return if *v { Tri::True } else { Tri::False };
     }
@@ -269,7 +309,9 @@ fn holds(op: Op, left: &Term, right: &Term, p: &PathSummary) -> Tri {
                 if !*v {
                     continue;
                 }
-                let Some(rest) = k.strip_prefix(&format!("{l} == ")) else { continue };
+                let Some(rest) = k.strip_prefix(&format!("{l} == ")) else {
+                    continue;
+                };
                 if rest != r && parse_decimal(rest).is_ok() {
                     return Tri::False;
                 }
@@ -279,8 +321,10 @@ fn holds(op: Op, left: &Term, right: &Term, p: &PathSummary) -> Tri {
     }
     // `a <= b` holds when adding `b < a` makes the path impossible, and fails
     // when adding `a <= b` does.
-    let base: Vec<(String, String, bool)> =
-        order_edges(p).into_iter().chain(interval_edges(p)).collect();
+    let base: Vec<(String, String, bool)> = order_edges(p)
+        .into_iter()
+        .chain(interval_edges(p))
+        .collect();
     let with = |e: (String, String, bool)| {
         let mut v = base.clone();
         v.push(e);
@@ -321,6 +365,18 @@ fn order_edges(p: &PathSummary) -> Vec<(String, String, bool)> {
             _ => continue,
         });
     }
+    // An equality is two orderings. A store records one, relating the slot
+    // after the write to the value written, and that is how a length after a
+    // push meets the length before it.
+    for (k, v) in &p.assumed {
+        if !*v {
+            continue;
+        }
+        if let Some((a, b)) = k.split_once(" == ") {
+            out.push((a.to_string(), b.to_string(), false));
+            out.push((b.to_string(), a.to_string(), false));
+        }
+    }
     out
 }
 
@@ -355,7 +411,9 @@ fn interval_edges(p: &PathSummary) -> Vec<(String, String, bool)> {
 fn order_edges_of(c: &Condition, p: &PathSummary) -> Vec<(String, String, bool)> {
     use Condition::*;
     let two = |l: &Term, r: &Term, strict: bool, swap: bool| {
-        let (Some(a), Some(b)) = (render(l, p), render(r, p)) else { return vec![] };
+        let (Some(a), Some(b)) = (render(l, p), render(r, p)) else {
+            return vec![];
+        };
         vec![if swap { (b, a, strict) } else { (a, b, strict) }]
     };
     match c {
@@ -376,7 +434,10 @@ fn split_top(inner: &str) -> Option<(String, String)> {
             '(' => depth += 1,
             ')' => depth -= 1,
             ',' if depth == 0 => {
-                return Some((inner[..i].trim().to_string(), inner[i + 1..].trim().to_string()))
+                return Some((
+                    inner[..i].trim().to_string(),
+                    inner[i + 1..].trim().to_string(),
+                ))
             }
             _ => {}
         }
@@ -391,6 +452,57 @@ fn split_top(inner: &str) -> Option<(String, String)> {
 /// what a supplied invariant does for a path: the path is one the walk
 /// produced and the contract cannot be on.
 fn contradictory(edges: &[(String, String, bool)]) -> bool {
+    // `t + k` for a positive literal `k` is strictly above `t`, as long as
+    // the addition cannot wrap. An upper bound on `t` that leaves room for
+    // `k` is what says it cannot: solc's own `push` guard, and the slot's
+    // own type, both bound an array's length below 2^64. Without this the
+    // length after a push was unrelated to the length before it.
+    //
+    // This runs here rather than where the edges are gathered, because the
+    // bound may come from the regions and the addition from the facts.
+    let edges = {
+        let mut out = edges.to_vec();
+        let mut upper: std::collections::BTreeMap<String, crate::interval::U256> =
+            std::collections::BTreeMap::new();
+        for (a, b, _) in &out {
+            if let Ok(v) = parse_decimal(b) {
+                let e = upper.entry(a.clone()).or_insert(v);
+                if v < *e {
+                    *e = v;
+                }
+            }
+        }
+        let terms: std::collections::BTreeSet<String> = out
+            .iter()
+            .flat_map(|(a, b, _)| [a.clone(), b.clone()])
+            .collect();
+        let mut strict = vec![];
+        for term in &terms {
+            let Some(inner) = term.strip_prefix("add(").and_then(|r| r.strip_suffix(")")) else {
+                continue;
+            };
+            let Some((x, k)) = split_top(inner) else {
+                continue;
+            };
+            // Either side may be the literal.
+            for (t, lit) in [(&x, &k), (&k, &x)] {
+                let Ok(k) = parse_decimal(lit) else { continue };
+                if k == crate::interval::U256::ZERO {
+                    continue;
+                }
+                let Some(b) = upper.get(t) else { continue };
+                if crate::interval::max_u256() - *b < k {
+                    continue;
+                }
+                strict.push((t.clone(), term.clone(), true));
+            }
+        }
+
+        out.extend(strict);
+        out
+    };
+    let edges = &edges[..];
+
     // `a - b` is at most `a` when `b <= a`, which is when it does not
     // underflow. The walk knows `b <= a` from the check solc puts there, and
     // without this the difference is an unrelated term: `balances -= amount
@@ -398,8 +510,10 @@ fn contradictory(edges: &[(String, String, bool)]) -> bool {
     // balances` both held.
     let mut edges = edges.to_vec();
     for _ in 0..2 {
-        let known: std::collections::BTreeSet<(String, String)> =
-            edges.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect();
+        let known: std::collections::BTreeSet<(String, String)> = edges
+            .iter()
+            .map(|(a, b, _)| (a.clone(), b.clone()))
+            .collect();
         let mut extra = vec![];
         for term in edges
             .iter()
@@ -409,8 +523,11 @@ fn contradictory(edges: &[(String, String, bool)]) -> bool {
             let Some(inner) = term.strip_prefix("sub(").and_then(|r| r.strip_suffix(")")) else {
                 continue;
             };
-            let Some((a, b)) = split_top(inner) else { continue };
-            if known.contains(&(b.clone(), a.clone())) && !known.contains(&(term.clone(), a.clone()))
+            let Some((a, b)) = split_top(inner) else {
+                continue;
+            };
+            if known.contains(&(b.clone(), a.clone()))
+                && !known.contains(&(term.clone(), a.clone()))
             {
                 extra.push((term.clone(), a, false));
             }
@@ -456,7 +573,9 @@ fn contradictory(edges: &[(String, String, bool)]) -> bool {
     // `reach[i][j]`: None if no path, Some(strict) otherwise.
     let mut reach = vec![vec![None::<bool>; n]; n];
     for (a, b, strict) in &edges {
-        let (Some(i), Some(j)) = (idx(a.as_str()), idx(b.as_str())) else { continue };
+        let (Some(i), Some(j)) = (idx(a.as_str()), idx(b.as_str())) else {
+            continue;
+        };
         let cur = reach[i][j];
         reach[i][j] = Some(cur.unwrap_or(false) || *strict);
     }
@@ -482,8 +601,12 @@ fn evaluate(c: &Condition, p: &PathSummary) -> Tri {
         Ugt { left, right } => holds(Op::Lt, right, left, p),
         Eq { left, right } => holds(Op::Eq, left, right, p),
         Ne { left, right } => holds(Op::Eq, left, right, p).not(),
-        And { args } => args.iter().fold(Tri::True, |acc, a| acc.and(evaluate(a, p))),
-        Or { args } => args.iter().fold(Tri::False, |acc, a| acc.or(evaluate(a, p))),
+        And { args } => args
+            .iter()
+            .fold(Tri::True, |acc, a| acc.and(evaluate(a, p))),
+        Or { args } => args
+            .iter()
+            .fold(Tri::False, |acc, a| acc.or(evaluate(a, p))),
         Not { arg } => evaluate(arg, p).not(),
     }
 }
@@ -498,11 +621,7 @@ pub fn check(prop: &CallProperty, paths: &[PathSummary]) -> Answer {
 
 /// The same, with invariants the contract is claimed to satisfy. A path that
 /// contradicts one is not a path the contract can be on.
-pub fn check_with(
-    prop: &CallProperty,
-    invariants: &[Invariant],
-    paths: &[PathSummary],
-) -> Answer {
+pub fn check_with(prop: &CallProperty, invariants: &[Invariant], paths: &[PathSummary]) -> Answer {
     let mut considered = 0;
     let mut worst: Option<Answer> = None;
     for r in &prop.rules {
@@ -513,7 +632,10 @@ pub fn check_with(
             Verdict::Undecided => 1,
             Verdict::Holds => 0,
         };
-        if worst.as_ref().is_none_or(|w| rank(a.verdict) > rank(w.verdict)) {
+        if worst
+            .as_ref()
+            .is_none_or(|w| rank(a.verdict) > rank(w.verdict))
+        {
             worst = Some(a);
         }
     }
@@ -534,14 +656,11 @@ pub fn check_with(
     }
 }
 
-fn check_rule(
-    id: &str,
-    prop: &Rule,
-    invariants: &[Invariant],
-    paths: &[PathSummary],
-) -> Answer {
-    let mine: Vec<&PathSummary> =
-        paths.iter().filter(|p| p.entrypoint == prop.entrypoint).collect();
+fn check_rule(id: &str, prop: &Rule, invariants: &[Invariant], paths: &[PathSummary]) -> Answer {
+    let mine: Vec<&PathSummary> = paths
+        .iter()
+        .filter(|p| p.entrypoint == prop.entrypoint)
+        .collect();
     if mine.is_empty() {
         return Answer {
             id: id.to_string(),
@@ -561,7 +680,10 @@ fn check_rule(
         .filter(|p| {
             // An invariant rules a path out either by being false on it, or
             // by contradicting what it assumed.
-            if invariants.iter().any(|i| evaluate(&i.holds, p) == Tri::False) {
+            if invariants
+                .iter()
+                .any(|i| evaluate(&i.holds, p) == Tri::False)
+            {
                 return false;
             }
             let mut edges = order_edges(p);
@@ -594,7 +716,11 @@ fn check_rule(
             "{}: a request on a path that {} matches: arguments {}, assuming {}",
             prop.entrypoint,
             if p.reverts { "reverts" } else { "returns" },
-            p.arguments.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "),
+            p.arguments
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
             if p.assumed.is_empty() {
                 "nothing".to_string()
             } else {
@@ -605,7 +731,10 @@ fn check_rule(
                     .join(" and ")
             }
         ),
-        _ => format!("no path of {} can carry a matching request", prop.entrypoint),
+        _ => format!(
+            "no path of {} can carry a matching request",
+            prop.entrypoint
+        ),
     };
     Answer {
         id: id.to_string(),
@@ -646,23 +775,23 @@ mod tests {
             id: "withdraw-revert".into(),
             from: String::new(),
             rules: vec![Rule {
-            entrypoint: "withdraw(uint256)".into(),
-            given: Some(Condition::Or {
-                args: vec![
-                    Condition::Eq {
-                        left: Term::Argument(0),
-                        right: Term::Uint256("0".into()),
-                    },
-                    Condition::Ugt {
-                        left: Term::Argument(0),
-                        right: Term::Cell {
-                            var: "balances".into(),
-                            key: Box::new(Term::Env("caller".into())),
+                entrypoint: "withdraw(uint256)".into(),
+                given: Some(Condition::Or {
+                    args: vec![
+                        Condition::Eq {
+                            left: Term::Argument(0),
+                            right: Term::Uint256("0".into()),
                         },
-                    },
-                ],
-            }),
-            outcome: Outcome::Reverts,
+                        Condition::Ugt {
+                            left: Term::Argument(0),
+                            right: Term::Cell {
+                                var: "balances".into(),
+                                key: Box::new(Term::Env("caller".into())),
+                            },
+                        },
+                    ],
+                }),
+                outcome: Outcome::Reverts,
             }],
         }
     }
@@ -708,21 +837,25 @@ mod tests {
             id: "withdraw-not-revert".into(),
             from: String::new(),
             rules: vec![Rule {
-            entrypoint: "withdraw(uint256)".into(),
-            given: Some(Condition::Ule {
-                left: Term::Argument(0),
-                right: Term::Cell {
-                    var: "balances".into(),
-                    key: Box::new(Term::Env("caller".into())),
-                },
-            }),
-            outcome: Outcome::DoesNotRevert,
+                entrypoint: "withdraw(uint256)".into(),
+                given: Some(Condition::Ule {
+                    left: Term::Argument(0),
+                    right: Term::Cell {
+                        var: "balances".into(),
+                        key: Box::new(Term::Env("caller".into())),
+                    },
+                }),
+                outcome: Outcome::DoesNotRevert,
             }],
         };
         let paths = vec![
             path(false, IntervalSet::ge(u(1)), &[(LE_BAL, true)]),
             // the `require(success)` on the external call
-            path(true, IntervalSet::ge(u(1)), &[(LE_BAL, true), ("var_success_46", false)]),
+            path(
+                true,
+                IntervalSet::ge(u(1)),
+                &[(LE_BAL, true), ("var_success_46", false)],
+            ),
         ];
         let a = check(&not_revert, &paths);
         assert_eq!(a.verdict, Verdict::Fails, "{}", a.because);
@@ -784,6 +917,37 @@ mod tests {
         assert!(contradictory(&edges), "with the invariant it does not");
     }
 
+    /// A `push` stores `length + 1` at the array's slot and then checks that
+    /// the old length is below the new one. Deciding that needs three things
+    /// together: the equality the store records, the bound the slot's type
+    /// gives, and the closure over the two.
+    #[test]
+    fn a_length_after_a_push_is_above_the_length_before_it() {
+        let p = PathSummary {
+            entrypoint: "enter()".into(),
+            parameters: vec![],
+            arguments: vec![],
+            storage: [("players".to_string(), IntervalSet::le(u(18446744073709551614)))]
+                .into_iter()
+                .collect(),
+            assumed: [
+                ("storage(players@1) == add(storage(players), 1)".to_string(), true),
+                // the side of the fork that says the push did not grow it
+                ("storage(players) < storage(players@1)".to_string(), false),
+            ]
+            .into_iter()
+            .collect(),
+            reverts: true,
+        };
+        let mut edges = order_edges(&p);
+        edges.extend(interval_edges(&p));
+        assert!(contradictory(&edges), "a length cannot fail to grow by one");
+
+        // and without the bound it is not settled: `t + 1` could wrap
+        let unbounded = PathSummary { storage: BTreeMap::new(), ..p };
+        assert!(!contradictory(&order_edges(&unbounded)));
+    }
+
     /// A property naming something no path mentions is not answered "holds"
     /// by default. Nothing is ruled out, so every path counts, and a
     /// disagreement among them is a failure rather than a pass.
@@ -793,12 +957,12 @@ mod tests {
             id: "x".into(),
             from: String::new(),
             rules: vec![Rule {
-            entrypoint: "withdraw(uint256)".into(),
-            given: Some(Condition::Ugt {
-                left: Term::Env("number".into()),
-                right: Term::Storage("deadline".into()),
-            }),
-            outcome: Outcome::Reverts,
+                entrypoint: "withdraw(uint256)".into(),
+                given: Some(Condition::Ugt {
+                    left: Term::Env("number".into()),
+                    right: Term::Storage("deadline".into()),
+                }),
+                outcome: Outcome::Reverts,
             }],
         };
         let paths = vec![path(false, IntervalSet::full(), &[])];

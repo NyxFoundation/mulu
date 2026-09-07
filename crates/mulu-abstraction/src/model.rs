@@ -141,8 +141,12 @@ impl Entry {
 
 /// The ABI parameter types of a signature: `setLimit(uint256)` -> `[uint256]`.
 pub fn signature_params(sig: &str) -> Vec<String> {
-    let Some(open) = sig.find('(') else { return vec![] };
-    let Some(close) = sig.rfind(')') else { return vec![] };
+    let Some(open) = sig.find('(') else {
+        return vec![];
+    };
+    let Some(close) = sig.rfind(')') else {
+        return vec![];
+    };
     if close <= open + 1 {
         return vec![];
     }
@@ -266,7 +270,9 @@ impl<'a> Builder<'a> {
             if !seen.insert(name.clone()) {
                 continue;
             }
-            let Some(f) = self.ir.function(&name) else { continue };
+            let Some(f) = self.ir.function(&name) else {
+                continue;
+            };
             for b in &f.blocks {
                 for ins in &b.instructions {
                     // Only statement calls; a guard helper is a check, and a
@@ -285,7 +291,12 @@ impl<'a> Builder<'a> {
                         }
                     }
                     if let Some((callee, _)) = statement_call(ins) {
-                        if self.ir.checks.iter().any(|c| c.helper.as_deref() == Some(callee.as_str())) {
+                        if self
+                            .ir
+                            .checks
+                            .iter()
+                            .any(|c| c.helper.as_deref() == Some(callee.as_str()))
+                        {
                             continue;
                         }
                         if self.ir.function(&callee).is_some() {
@@ -360,7 +371,11 @@ impl<'a> Builder<'a> {
                         if let Some(n) = note {
                             self.note(n);
                         }
-                        params.push(Param { name: name.clone(), ty: ty.clone(), domain })
+                        params.push(Param {
+                            name: name.clone(),
+                            ty: ty.clone(),
+                            domain,
+                        })
                     }
                     Err(why) => {
                         self.refuse(format!("entrypoint {}: {why}", e.signature));
@@ -373,10 +388,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
             out.push(Entry {
-                solidity_name: f
-                    .solidity_name
-                    .clone()
-                    .unwrap_or_else(|| f.id.clone()),
+                solidity_name: f.solidity_name.clone().unwrap_or_else(|| f.id.clone()),
                 signature: e.signature.clone(),
                 func: f.id.clone(),
                 params,
@@ -521,7 +533,8 @@ impl<'a> Builder<'a> {
             );
             let (regions, infeasible) = Self::partition_within(&universe, &sets);
             for i in infeasible {
-                self.discharged.push(format!("storage {}: {i} is unsatisfiable", v.label));
+                self.discharged
+                    .push(format!("storage {}: {i} is unsatisfiable", v.label));
             }
             per_slot.push((v.label.clone(), regions));
         }
@@ -533,7 +546,9 @@ impl<'a> Builder<'a> {
         let mut guards_by_func: BTreeMap<String, BTreeMap<String, Predicate>> = BTreeMap::new();
         for e in &entries {
             for fname in self.reachable(&e.func) {
-                let Some(f) = self.ir.function(&fname) else { continue };
+                let Some(f) = self.ir.function(&fname) else {
+                    continue;
+                };
                 let f = f.clone();
                 let g = self.guards(&f, &e.widest());
                 for (id, p) in &g {
@@ -567,7 +582,9 @@ impl<'a> Builder<'a> {
                 // only a condition over one of this function's own parameters
                 // partitions the argument space.
                 for b in &f.blocks {
-                    let Terminator::Branch { cond, .. } = &b.terminator else { continue };
+                    let Terminator::Branch { cond, .. } = &b.terminator else {
+                        continue;
+                    };
                     let Ok(pred) = crate::predicate::translate_in(cond, &f.parameters, &e.widest())
                     else {
                         continue;
@@ -578,7 +595,8 @@ impl<'a> Builder<'a> {
                     }
                     let set = pred.set();
                     let id = format!("branch:{fname}#{}", b.id);
-                    if !set.is_full() && !set.is_empty() && !arg_sets.iter().any(|(n, _)| *n == id) {
+                    if !set.is_full() && !set.is_empty() && !arg_sets.iter().any(|(n, _)| *n == id)
+                    {
                         arg_preds.push(PredicateInfo {
                             id: id.clone(),
                             source: format!("a branch in {fname} reached from {}", e.solidity_name),
@@ -592,7 +610,9 @@ impl<'a> Builder<'a> {
                 // pull the spec back through `slot := argument`
                 for b in &f.blocks {
                     for ins in &b.instructions {
-                        let Some(w) = &ins.storage_write else { continue };
+                        let Some(w) = &ins.storage_write else {
+                            continue;
+                        };
                         // the write carries this function's own parameter,
                         // directly or through a cleanup
                         let mut reads = Vec::new();
@@ -600,8 +620,14 @@ impl<'a> Builder<'a> {
                         if !reads.iter().any(|r| f.parameters.contains(r)) {
                             continue;
                         }
-                        let Some(label) = self.slot_label(&w.slot_text) else { continue };
-                        for p in self.props.iter().filter(|p| p.var.as_deref() == Some(label.as_str())) {
+                        let Some(label) = self.slot_label(&w.slot_text) else {
+                            continue;
+                        };
+                        for p in self
+                            .props
+                            .iter()
+                            .filter(|p| p.var.as_deref() == Some(label.as_str()))
+                        {
                             let id = format!("spec:{}", p.id);
                             if !arg_sets.iter().any(|(n, _)| *n == id) {
                                 arg_preds.push(PredicateInfo {
@@ -655,7 +681,8 @@ impl<'a> Builder<'a> {
         }
         let (arg_regions, infeasible) = Self::partition(&arg_sets);
         for i in infeasible {
-            self.discharged.push(format!("argument: {i} is unsatisfiable"));
+            self.discharged
+                .push(format!("argument: {i} is unsatisfiable"));
         }
 
         self.note(format!(
@@ -681,8 +708,16 @@ impl<'a> Builder<'a> {
              calls rather than the whole machine word",
         );
 
-        Walk::new(self, entries, guards_by_func, arg_regions, arg_preds, storage_preds, per_slot)
-            .run()
+        Walk::new(
+            self,
+            entries,
+            guards_by_func,
+            arg_regions,
+            arg_preds,
+            storage_preds,
+            per_slot,
+        )
+        .run()
     }
 
     fn slot_label(&self, slot_text: &str) -> Option<String> {
@@ -748,8 +783,17 @@ struct Walk<'a> {
 
 /// One position of an abstract execution along the path where guards pass.
 enum Step {
-    Check { id: String, text: String, passes: bool, depends_on: Vec<String> },
-    Store { slot: usize, label: String, to: usize },
+    Check {
+        id: String,
+        text: String,
+        passes: bool,
+        depends_on: Vec<String>,
+    },
+    Store {
+        slot: usize,
+        label: String,
+        to: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -811,20 +855,19 @@ impl<'a> Walk<'a> {
         // Worked out once, from the whole contract, before `b` is moved.
         const MAX_BODY: usize = 32;
         let with_checks: BTreeSet<&str> = b.ir.checks.iter().map(|c| c.function.as_str()).collect();
-        let pure_helpers: BTreeSet<String> = b
-            .ir
-            .functions
-            .iter()
-            .filter(|f| {
-                !f.effects.writes_storage
-                    && !f.effects.can_revert
-                    && !with_checks.contains(f.id.as_str())
-                    && f.blocks.len() == 1
-                    && f.blocks[0].instructions.len() <= MAX_BODY
-                    && !f.returns.is_empty()
-            })
-            .map(|f| f.id.clone())
-            .collect();
+        let pure_helpers: BTreeSet<String> =
+            b.ir.functions
+                .iter()
+                .filter(|f| {
+                    !f.effects.writes_storage
+                        && !f.effects.can_revert
+                        && !with_checks.contains(f.id.as_str())
+                        && f.blocks.len() == 1
+                        && f.blocks[0].instructions.len() <= MAX_BODY
+                        && !f.returns.is_empty()
+                })
+                .map(|f| f.id.clone())
+                .collect();
         drop(with_checks);
         Self {
             b,
@@ -889,13 +932,15 @@ impl<'a> Walk<'a> {
     }
 
     fn event(&mut self, id: &str, description: &str) -> String {
-        self.events.entry(id.to_string()).or_insert_with(|| EventDecl {
-            id: id.to_string(),
-            // Nothing here can be forbidden by a supervisor: requests arrive,
-            // and guard results follow from the code (docs/11 §4).
-            control: Control::Uncontrollable,
-            description: Some(description.to_string()),
-        });
+        self.events
+            .entry(id.to_string())
+            .or_insert_with(|| EventDecl {
+                id: id.to_string(),
+                // Nothing here can be forbidden by a supervisor: requests arrive,
+                // and guard results follow from the code (docs/11 §4).
+                control: Control::Uncontrollable,
+                description: Some(description.to_string()),
+            });
         id.to_string()
     }
 
@@ -948,12 +993,14 @@ impl<'a> Walk<'a> {
             let slot = mulu_yul::fold::fold_fixpoint(&w.slot);
             let value = mulu_yul::fold::fold_fixpoint(&w.value);
             let Some(slot) = crate::value::constant(&slot) else {
-                out.reasons.push(format!("the slot in `{}` is not a constant", w.slot_text));
+                out.reasons
+                    .push(format!("the slot in `{}` is not a constant", w.slot_text));
                 out.every_slot_unknown = true;
                 continue;
             };
             let Ok(slot) = usize::try_from(slot) else {
-                out.reasons.push(format!("slot {slot} is beyond the layout this models"));
+                out.reasons
+                    .push(format!("slot {slot} is beyond the layout this models"));
                 out.every_slot_unknown = true;
                 continue;
             };
@@ -1087,7 +1134,9 @@ impl<'a> Walk<'a> {
         // and evaluates the same helper many times over.
         const MAX_DEPTH: usize = 4;
         if depth >= MAX_DEPTH {
-            return Err(format!("evaluating {callee} nests deeper than {MAX_DEPTH} calls"));
+            return Err(format!(
+                "evaluating {callee} nests deeper than {MAX_DEPTH} calls"
+            ));
         }
         // A helper with an effect or a check is *not* evaluated: the walk
         // must enter one of those so its revert path reaches the model, and
@@ -1108,9 +1157,15 @@ impl<'a> Walk<'a> {
         }
         for i in &g.blocks[0].instructions {
             let (targets, value) = match &i.op {
-                mulu_yul::ir::Op::Let { targets, value: Some(v) } => (targets, v),
+                mulu_yul::ir::Op::Let {
+                    targets,
+                    value: Some(v),
+                } => (targets, v),
                 mulu_yul::ir::Op::Assign { targets, value } => (targets, value),
-                mulu_yul::ir::Op::Let { targets, value: None } => {
+                mulu_yul::ir::Op::Let {
+                    targets,
+                    value: None,
+                } => {
                     for t in targets {
                         inner.insert(t.clone(), IntervalSet::point(U256::ZERO));
                     }
@@ -1266,7 +1321,12 @@ impl<'a> Walk<'a> {
         // The head of a `for` decides whether to go round again; its other
         // side is where the loop ends. A back edge to anything else is a
         // shape this does not recognise.
-        let Terminator::Branch { then_block, else_block, .. } = &hb.terminator else {
+        let Terminator::Branch {
+            then_block,
+            else_block,
+            ..
+        } = &hb.terminator
+        else {
             return Err(format!(
                 "the loop at block {head} of {} does not end in a condition, so where it \
                  leaves off is not determined",
@@ -1274,7 +1334,11 @@ impl<'a> Walk<'a> {
             )
             .into());
         };
-        let exit = if body.contains(then_block) { *else_block } else { *then_block };
+        let exit = if body.contains(then_block) {
+            *else_block
+        } else {
+            *then_block
+        };
         if body.contains(&exit) {
             return Err(format!("the loop at block {head} of {} has no way out", f.id).into());
         }
@@ -1311,7 +1375,12 @@ impl<'a> Walk<'a> {
                 }
             }
         }
-        Ok(LoopEffect { exit, writes, defines, can_revert })
+        Ok(LoopEffect {
+            exit,
+            writes,
+            defines,
+            can_revert,
+        })
     }
 
     /// Does every check inside this expression's helpers pass, given what the
@@ -1345,8 +1414,14 @@ impl<'a> Walk<'a> {
             if !g.effects.can_revert {
                 continue;
             }
-            let checks: Vec<_> =
-                self.b.ir.checks.iter().filter(|c| c.function == name).cloned().collect();
+            let checks: Vec<_> = self
+                .b
+                .ir
+                .checks
+                .iter()
+                .filter(|c| c.function == name)
+                .cloned()
+                .collect();
             if checks.is_empty() {
                 return false;
             }
@@ -1355,8 +1430,12 @@ impl<'a> Walk<'a> {
             // not: `cleanup_t_enum(state)` is the case that matters.
             let mut inner = crate::value::Env::new();
             for (i, a) in args.iter().enumerate() {
-                let Some(param) = g.parameters.get(i) else { break };
-                let Ok(set) = self.eval(a, env, storage, memory) else { return false };
+                let Some(param) = g.parameters.get(i) else {
+                    break;
+                };
+                let Ok(set) = self.eval(a, env, storage, memory) else {
+                    return false;
+                };
                 inner.insert(param.clone(), set);
             }
             for c in &checks {
@@ -1370,7 +1449,10 @@ impl<'a> Walk<'a> {
 
     /// Which region of `slot` a value known to lie in `values` falls into.
     fn region_of(&self, slot: usize, values: &IntervalSet) -> Option<usize> {
-        self.per_slot[slot].1.iter().position(|r| values.subset_of(r))
+        self.per_slot[slot]
+            .1
+            .iter()
+            .position(|r| values.subset_of(r))
     }
 
     fn run(mut self) -> Abstraction {
@@ -1439,19 +1521,20 @@ impl<'a> Walk<'a> {
                 reasons.join("; ")
             ));
         }
-        let initial_storage: Vec<StorageRegion> = per_slot_initial
-            .iter()
-            .fold(vec![Vec::new()], |acc: Vec<StorageRegion>, choices| {
-                acc.iter()
-                    .flat_map(|prefix| {
-                        choices.iter().map(move |c| {
-                            let mut v = prefix.clone();
-                            v.push(*c);
-                            v
+        let initial_storage: Vec<StorageRegion> =
+            per_slot_initial
+                .iter()
+                .fold(vec![Vec::new()], |acc: Vec<StorageRegion>, choices| {
+                    acc.iter()
+                        .flat_map(|prefix| {
+                            choices.iter().map(move |c| {
+                                let mut v = prefix.clone();
+                                v.push(*c);
+                                v
+                            })
                         })
-                    })
-                    .collect()
-            });
+                        .collect()
+                });
 
         // idle states, one per storage region
         for s in &storage_regions {
@@ -1544,7 +1627,10 @@ impl<'a> Walk<'a> {
                                         .iter()
                                         .enumerate()
                                         .map(|(i, r)| {
-                                            (self.per_slot[i].0.clone(), self.per_slot[i].1[*r].clone())
+                                            (
+                                                self.per_slot[i].0.clone(),
+                                                self.per_slot[i].1[*r].clone(),
+                                            )
                                         })
                                         .collect(),
                                     assumed: t.assumed.clone(),
@@ -1590,7 +1676,11 @@ impl<'a> Walk<'a> {
             }
         }
 
-        let bad = if self.bad_used { vec!["bad".to_string()] } else { vec![] };
+        let bad = if self.bad_used {
+            vec!["bad".to_string()]
+        } else {
+            vec![]
+        };
         if self.bad_used {
             self.states.insert("bad".into());
         }
@@ -1607,8 +1697,10 @@ impl<'a> Walk<'a> {
 
         // Names the plant shares with the implementation, taken before any
         // field of `self` is moved out below.
-        let idle_names: Vec<String> =
-            storage_regions.iter().map(|s| format!("idle_{}", self.storage_name(s))).collect();
+        let idle_names: Vec<String> = storage_regions
+            .iter()
+            .map(|s| format!("idle_{}", self.storage_name(s)))
+            .collect();
 
         let mut states: Vec<String> = self.states.into_iter().collect();
         states.sort();
@@ -1663,7 +1755,11 @@ impl<'a> Walk<'a> {
                 initial: initial_of(&initial_names),
                 marked: pmarked,
                 accepting: Some(paccepting),
-                bad: if plant_bad { vec!["bad".to_string()] } else { vec![] },
+                bad: if plant_bad {
+                    vec!["bad".to_string()]
+                } else {
+                    vec![]
+                },
                 events: pevents,
                 transitions: self.plant_transitions,
                 sites,
@@ -1731,7 +1827,11 @@ impl<'a> Walk<'a> {
             assumptions: self.b.assumptions,
             unsupported: self.b.unsupported,
         };
-        Abstraction { model, report, paths: self.paths }
+        Abstraction {
+            model,
+            report,
+            paths: self.paths,
+        }
     }
 
     /// One abstract execution along the path where every guard passes.
@@ -1804,13 +1904,11 @@ impl<'a> Walk<'a> {
         // specification talks about the state the call started in.
         let mut versions: BTreeMap<String, u32> = BTreeMap::new();
         let mut cell_version: u32 = 0;
-        let names = |versions: &BTreeMap<String, u32>, cell_version: u32| {
-            crate::relation::Names {
-                slots: slots.clone(),
-                immutables: immutables.clone(),
-                versions: versions.clone(),
-                cell_version,
-            }
+        let names = |versions: &BTreeMap<String, u32>, cell_version: u32| crate::relation::Names {
+            slots: slots.clone(),
+            immutables: immutables.clone(),
+            versions: versions.clone(),
+            cell_version,
         };
         let mut frames: Vec<Frame> = vec![Frame {
             func: e.func.clone(),
@@ -1828,7 +1926,10 @@ impl<'a> Walk<'a> {
                 .map(|p| {
                     (
                         p.name.clone(),
-                        mulu_yul::Expr::Ident { name: p.name.clone(), src: None },
+                        mulu_yul::Expr::Ident {
+                            name: p.name.clone(),
+                            src: None,
+                        },
                     )
                 })
                 .collect(),
@@ -1840,7 +1941,9 @@ impl<'a> Walk<'a> {
         loop {
             n += 1;
             if n > MAX_STEPS {
-                return Err("the abstract execution did not terminate within the step limit".into());
+                return Err(
+                    "the abstract execution did not terminate within the step limit".into(),
+                );
             }
             // Checked every 256 steps: often enough to stop, rarely enough
             // not to be the cost itself.
@@ -1851,14 +1954,20 @@ impl<'a> Walk<'a> {
                 Some(left) => self.budget = left,
                 None => {
                     return Err(
-                        "this contract's walks exhausted the abstraction's step budget".into()
+                        "this contract's walks exhausted the abstraction's step budget".into(),
                     )
                 }
             }
             let depth = frames.len();
             let (func, block, index, env, terms) = {
                 let fr = frames.last().expect("a frame");
-                (fr.func.clone(), fr.block, fr.index, fr.env.clone(), fr.terms.clone())
+                (
+                    fr.func.clone(),
+                    fr.block,
+                    fr.index,
+                    fr.env.clone(),
+                    fr.terms.clone(),
+                )
             };
             let f = self.b.ir.function(&func).ok_or("no such function")?.clone();
             let blk = f.block(block).clone();
@@ -1907,7 +2016,15 @@ impl<'a> Walk<'a> {
                     // It moves nothing in the state, under the assumption
                     // recorded once for the contract: a keccak-derived slot
                     // does not collide with a small declared one.
-                    let Ok((slot_idx, slot_label)) = self.slot_of(&w.slot_text) else {
+                    // Through the helper's parameters: `array_push(array, v)`
+                    // stores at `array`, and what `array` is comes from the
+                    // call site. Without substituting it the length write of
+                    // every `push` looked like a write to a slot the model
+                    // does not track.
+                    let slot_text = canon(&w.slot, &terms)
+                        .map(|t| crate::relation::normalise(&t, &|_: U256| None).render())
+                        .unwrap_or_else(|| w.slot_text.clone());
+                    let Ok((slot_idx, slot_label)) = self.slot_of(&slot_text) else {
                         self.b.note(
                             "cells-do-not-alias: a write to a computed slot is a mapping or \
                              array cell and moves no declared variable. keccak256 not \
@@ -1947,9 +2064,46 @@ impl<'a> Walk<'a> {
                             }
                         }
                     };
+                    // What the slot now holds, named. The value is written in
+                    // the terms of *before* the write, and the slot after it
+                    // is a new version, so the two are an equality the rest of
+                    // the path can use: `players@1 == add(players, 1)` is how
+                    // a length after a push relates to the length before.
+                    let written = canon(&w.value, &terms)
+                        .map(|t| crate::relation::normalise(&t, &names(&versions, cell_version)));
                     storage[slot_idx] = to;
                     *versions.entry(slot_label.clone()).or_default() += 1;
-                    steps.push(Step::Store { slot: slot_idx, label: slot_label, to });
+                    if let Some(written) = written {
+                        let after = crate::relation::normalise(
+                            &mulu_yul::Expr::Call {
+                                name: "sload".into(),
+                                args: vec![mulu_yul::Expr::Literal {
+                                    text: self
+                                        .b
+                                        .storage
+                                        .iter()
+                                        .find(|v| v.label == slot_label)
+                                        .map(|v| v.slot.clone())
+                                        .unwrap_or_default(),
+                                    src: None,
+                                }],
+                                src: None,
+                            },
+                            &names(&versions, cell_version),
+                        );
+                        let key = crate::relation::Relation {
+                            op: crate::relation::Op::Eq,
+                            left: after.render(),
+                            right: written.render(),
+                        }
+                        .key();
+                        facts.insert(key, true);
+                    }
+                    steps.push(Step::Store {
+                        slot: slot_idx,
+                        label: slot_label,
+                        to,
+                    });
                     continue;
                 }
 
@@ -1981,8 +2135,9 @@ impl<'a> Walk<'a> {
                     memory.clear();
                 }
 
-                if let mulu_yul::ir::Op::Effect { call: mulu_yul::Expr::Call { name, args, .. } } =
-                    &ins.op
+                if let mulu_yul::ir::Op::Effect {
+                    call: mulu_yul::Expr::Call { name, args, .. },
+                } = &ins.op
                 {
                     if name == "mstore" && args.len() == 2 {
                         let at = mulu_yul::fold::fold_fixpoint(&args[0]);
@@ -2002,12 +2157,19 @@ impl<'a> Walk<'a> {
                 }
 
                 match &ins.op {
-                    mulu_yul::ir::Op::Let { targets, value: Some(v) }
+                    mulu_yul::ir::Op::Let {
+                        targets,
+                        value: Some(v),
+                    }
                     | mulu_yul::ir::Op::Assign { targets, value: v }
                         if only_computes && targets.len() == 1 =>
                     {
                         if let Ok(set) = self.eval(v, &env, &storage, &memory) {
-                            frames.last_mut().unwrap().env.insert(targets[0].clone(), set);
+                            frames
+                                .last_mut()
+                                .unwrap()
+                                .env
+                                .insert(targets[0].clone(), set);
                         } else {
                             // Not knowing a local's *value* is not an error.
                             // A guard that needs it forks later, by name.
@@ -2020,8 +2182,9 @@ impl<'a> Walk<'a> {
                         // a local defined from a slot read before a write to
                         // that slot holds the value from before it, and must
                         // not read as the value from after.
-                        let stamped = canon(v, &terms)
-                            .map(|t| crate::relation::normalise(&t, &names(&versions, cell_version)));
+                        let stamped = canon(v, &terms).map(|t| {
+                            crate::relation::normalise(&t, &names(&versions, cell_version))
+                        });
                         let fr = frames.last_mut().unwrap();
                         match stamped {
                             Some(t) => {
@@ -2033,14 +2196,20 @@ impl<'a> Walk<'a> {
                         }
                         continue;
                     }
-                    mulu_yul::ir::Op::Let { targets, value: None } if only_computes => {
+                    mulu_yul::ir::Op::Let {
+                        targets,
+                        value: None,
+                    } if only_computes => {
                         // `let a, b` is zero until assigned.
                         for t in targets {
                             let fr = frames.last_mut().unwrap();
                             fr.env.insert(t.clone(), IntervalSet::point(U256::ZERO));
                             fr.terms.insert(
                                 t.clone(),
-                                mulu_yul::Expr::Literal { text: "0".into(), src: None },
+                                mulu_yul::Expr::Literal {
+                                    text: "0".into(),
+                                    src: None,
+                                },
                             );
                         }
                         continue;
@@ -2139,26 +2308,31 @@ impl<'a> Walk<'a> {
                         mulu_yul::ir::Op::Effect { call } => Some(call.clone()),
                         _ => None,
                     };
-                    let settled_safe = value_expr.as_ref().is_some_and(|v| {
-                        self.every_inner_check_passes(v, &env, &storage, &memory)
-                    });
+                    let settled_safe = value_expr
+                        .as_ref()
+                        .is_some_and(|v| self.every_inner_check_passes(v, &env, &storage, &memory));
                     let reverts = if settled_safe {
                         false
                     } else {
                         decide_or_split(
-                        &mulu_yul::Expr::Ident {
-                            name: format!("panic-in:{func}#{block}#{index}"),
-                            src: None,
-                        },
-                        &terms,
-                        &names(&versions, cell_version),
-                        &mut facts,
-                        &mut splits,
-                        || format!("a panic inside an instruction in {func}"),
-                    )?
+                            &mulu_yul::Expr::Ident {
+                                name: format!("panic-in:{func}#{block}#{index}"),
+                                src: None,
+                            },
+                            &terms,
+                            &names(&versions, cell_version),
+                            &mut facts,
+                            &mut splits,
+                            || format!("a panic inside an instruction in {func}"),
+                        )?
                     };
                     if reverts {
-                        return Ok(Trace { steps, ending: Ending::Revert, assumed: reverted_at.unwrap_or(facts), reverts: true });
+                        return Ok(Trace {
+                            steps,
+                            ending: Ending::Revert,
+                            assumed: reverted_at.unwrap_or(facts),
+                            reverts: true,
+                        });
                     }
                     // It computes. Its *value* stays unknown, which is what
                     // the arms above would have left had it not been able to
@@ -2166,12 +2340,16 @@ impl<'a> Walk<'a> {
                     // was what turned `state == States.IDLE` into a bare
                     // local nothing could be said about.
                     match &ins.op {
-                        mulu_yul::ir::Op::Let { targets, value: Some(v) }
+                        mulu_yul::ir::Op::Let {
+                            targets,
+                            value: Some(v),
+                        }
                         | mulu_yul::ir::Op::Assign { targets, value: v }
                             if targets.len() == 1 =>
                         {
-                            let t = canon(v, &terms)
-                                .map(|t| crate::relation::normalise(&t, &names(&versions, cell_version)));
+                            let t = canon(v, &terms).map(|t| {
+                                crate::relation::normalise(&t, &names(&versions, cell_version))
+                            });
                             let fr = frames.last_mut().unwrap();
                             fr.env.remove(&targets[0]);
                             match t {
@@ -2200,9 +2378,18 @@ impl<'a> Walk<'a> {
                     return Err(format!(
                         "an instruction in {func} carries effects the model does not represent \
                          ({}{}); P1a cannot skip it",
-                        if ins.effects.writes_storage { "writes storage" } else { "" },
-                        if ins.effects.can_revert { " can revert" } else { "" },
-                    ).into());
+                        if ins.effects.writes_storage {
+                            "writes storage"
+                        } else {
+                            ""
+                        },
+                        if ins.effects.can_revert {
+                            " can revert"
+                        } else {
+                            ""
+                        },
+                    )
+                    .into());
                 }
                 continue;
             }
@@ -2288,7 +2475,11 @@ impl<'a> Walk<'a> {
                     fr.block = *target;
                     fr.index = 0;
                 }
-                Terminator::Branch { cond, then_block, else_block } => {
+                Terminator::Branch {
+                    cond,
+                    then_block,
+                    else_block,
+                } => {
                     // A guard written as `if (..) revert()` sits on the
                     // terminator rather than on a helper call. Treating it as
                     // an ordinary branch would leave it out of both models:
@@ -2330,7 +2521,10 @@ impl<'a> Walk<'a> {
                         };
                         let fr = frames.last_mut().unwrap();
                         if !fr.visited.insert((target, 0)) {
-                            return Err("the abstract execution revisits a block; P1a does not model loops".into());
+                            return Err(
+                                "the abstract execution revisits a block; P1a does not model loops"
+                                    .into(),
+                            );
                         }
                         fr.block = target;
                         fr.index = 0;
@@ -2338,36 +2532,60 @@ impl<'a> Walk<'a> {
                     }
                     // A branch on a mapping cell is the same situation as a
                     // guard on one, and takes the same two-sided treatment.
-                    let taken = match crate::predicate::translate_in(cond, &f.parameters, &e.widest())
-                        .ok()
-                        .and_then(|p| p.decide(&env))
-                        .or_else(|| self.decide_cond(cond, &env, &storage, &memory))
-                    {
-                        Some(v) => v,
-                        None => decide_or_split(cond, &terms, &names(&versions, cell_version), &mut facts, &mut splits, || {
-                            format!("a branch in {func}")
-                        })?,
-                    };
+                    let taken =
+                        match crate::predicate::translate_in(cond, &f.parameters, &e.widest())
+                            .ok()
+                            .and_then(|p| p.decide(&env))
+                            .or_else(|| self.decide_cond(cond, &env, &storage, &memory))
+                        {
+                            Some(v) => v,
+                            None => decide_or_split(
+                                cond,
+                                &terms,
+                                &names(&versions, cell_version),
+                                &mut facts,
+                                &mut splits,
+                                || format!("a branch in {func}"),
+                            )?,
+                        };
                     let target = if taken { *then_block } else { *else_block };
                     let fr = frames.last_mut().unwrap();
                     if !fr.visited.insert((target, 0)) {
-                        return Err("the abstract execution revisits a block; P1a does not model loops".into());
+                        return Err(
+                            "the abstract execution revisits a block; P1a does not model loops"
+                                .into(),
+                        );
                     }
                     fr.block = target;
                     fr.index = 0;
                 }
                 Terminator::Revert { .. } => {
-                    return Ok(Trace { steps, ending: Ending::Revert, assumed: reverted_at.unwrap_or(facts), reverts: true })
+                    return Ok(Trace {
+                        steps,
+                        ending: Ending::Revert,
+                        assumed: reverted_at.unwrap_or(facts),
+                        reverts: true,
+                    })
                 }
                 Terminator::Return { .. } | Terminator::Stop => {
-                    return Ok(Trace { steps, ending: Ending::Return, assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()), reverts: reverted_at.is_some() })
+                    return Ok(Trace {
+                        steps,
+                        ending: Ending::Return,
+                        assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()),
+                        reverts: reverted_at.is_some(),
+                    })
                 }
                 Terminator::Leave => {
                     // Bind what the call produced, by the callee's own return
                     // names, before the frame that knew them goes away.
                     let done = frames.pop().expect("a frame");
                     if frames.is_empty() {
-                        return Ok(Trace { steps, ending: Ending::Return, assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()), reverts: reverted_at.is_some() });
+                        return Ok(Trace {
+                            steps,
+                            ending: Ending::Return,
+                            assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()),
+                            reverts: reverted_at.is_some(),
+                        });
                     }
                     if !done.returns_to.is_empty() {
                         let rets = self
@@ -2415,7 +2633,11 @@ impl<'a> Walk<'a> {
                 // is what the walk already does for a branch. Refusing it
                 // left out the dispatcher's own shape and any hand-written
                 // `switch` in a body.
-                Terminator::Switch { value, cases, default } => {
+                Terminator::Switch {
+                    value,
+                    cases,
+                    default,
+                } => {
                     // A switch on a value the walk does not know goes every
                     // way the switch has: one per case, plus one for the
                     // default. `returndatasize` after an external call is the
@@ -2456,7 +2678,14 @@ impl<'a> Walk<'a> {
                             None => {
                                 frames.pop();
                                 if frames.is_empty() {
-                                    return Ok(Trace { steps, ending: Ending::Return, assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()), reverts: reverted_at.is_some() });
+                                    return Ok(Trace {
+                                        steps,
+                                        ending: Ending::Return,
+                                        assumed: reverted_at
+                                            .clone()
+                                            .unwrap_or_else(|| facts.clone()),
+                                        reverts: reverted_at.is_some(),
+                                    });
                                 }
                                 continue;
                             }
@@ -2507,7 +2736,12 @@ impl<'a> Walk<'a> {
                             // Nothing matched and there is no default.
                             frames.pop();
                             if frames.is_empty() {
-                                return Ok(Trace { steps, ending: Ending::Return, assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()), reverts: reverted_at.is_some() });
+                                return Ok(Trace {
+                                    steps,
+                                    ending: Ending::Return,
+                                    assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()),
+                                    reverts: reverted_at.is_some(),
+                                });
                             }
                             continue;
                         }
@@ -2524,7 +2758,12 @@ impl<'a> Walk<'a> {
                             // the switch does nothing and the function ends.
                             frames.pop();
                             if frames.is_empty() {
-                                return Ok(Trace { steps, ending: Ending::Return, assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()), reverts: reverted_at.is_some() });
+                                return Ok(Trace {
+                                    steps,
+                                    ending: Ending::Return,
+                                    assumed: reverted_at.clone().unwrap_or_else(|| facts.clone()),
+                                    reverts: reverted_at.is_some(),
+                                });
                             }
                             continue;
                         }
@@ -2546,13 +2785,7 @@ impl<'a> Walk<'a> {
 
     /// The implementation model: guard results follow from the code, so the
     /// walk stops at the first one the region makes fail.
-    fn emit_impl(
-        &mut self,
-        e: &Entry,
-        arg: &[usize],
-        entry_storage: &StorageRegion,
-        t: &Trace,
-    ) {
+    fn emit_impl(&mut self, e: &Entry, arg: &[usize], entry_storage: &StorageRegion, t: &Trace) {
         let suffix = self.suffix(e, arg, entry_storage);
         let call_event = self.call_event(e, arg);
         let from = format!("idle_{}", self.storage_name(entry_storage));
@@ -2564,7 +2797,13 @@ impl<'a> Walk<'a> {
         // and the core reports it as unreachable; leaving it undeclared would
         // instead leave the plant's site pointing at nothing.
         for step in &t.steps {
-            if let Step::Check { id, text, depends_on, .. } = step {
+            if let Step::Check {
+                id,
+                text,
+                depends_on,
+                ..
+            } = step
+            {
                 let pass = self.event(&format!("{id}_pass"), &format!("GuardResult({id}, true)"));
                 let fail = self.event(&format!("{id}_fail"), &format!("GuardResult({id}, false)"));
                 self.checks.entry(id.clone()).or_insert_with(|| CheckDecl {
@@ -2599,8 +2838,10 @@ impl<'a> Walk<'a> {
                 }
                 Step::Store { slot, label, to } => {
                     storage[*slot] = *to;
-                    let ev = self
-                        .event(&format!("store_{label}"), &format!("InternalStep(store {label})"));
+                    let ev = self.event(
+                        &format!("store_{label}"),
+                        &format!("InternalStep(store {label})"),
+                    );
                     self.add(&cur.clone(), &ev, &next);
                 }
             }
@@ -2614,7 +2855,11 @@ impl<'a> Walk<'a> {
                 self.finish_return(&ret, &storage);
             }
             Ending::Revert => {
-                let rev = format!("{}#rev_{}", e.solidity_name, self.storage_name(entry_storage));
+                let rev = format!(
+                    "{}#rev_{}",
+                    e.solidity_name,
+                    self.storage_name(entry_storage)
+                );
                 let ev = self.event("revert", "TxRevert");
                 self.add(&cur.clone(), &ev, &rev);
                 self.finish_revert(&rev, entry_storage);
@@ -2626,18 +2871,16 @@ impl<'a> Walk<'a> {
     /// the supervisor may forbid continuing, and rejecting stays possible
     /// whatever it decides. The guard's own condition plays no part here,
     /// which is exactly what "parameterised out" means.
-    fn emit_plant(
-        &mut self,
-        e: &Entry,
-        arg: &[usize],
-        entry_storage: &StorageRegion,
-        t: &Trace,
-    ) {
+    fn emit_plant(&mut self, e: &Entry, arg: &[usize], entry_storage: &StorageRegion, t: &Trace) {
         let suffix = self.suffix(e, arg, entry_storage);
         let call_event = self.call_event(e, arg);
         self.plant_event(&call_event, "CallRequest", Control::Uncontrollable);
         let from = format!("idle_{}", self.storage_name(entry_storage));
-        let rev = format!("{}@rev_{}", e.solidity_name, self.storage_name(entry_storage));
+        let rev = format!(
+            "{}@rev_{}",
+            e.solidity_name,
+            self.storage_name(entry_storage)
+        );
         let mut cur = format!("{}@0_{suffix}", e.solidity_name);
         self.plant_add(&from, &call_event, &cur);
 
@@ -2675,7 +2918,11 @@ impl<'a> Walk<'a> {
                 Step::Check { id, passes, .. } => {
                     let cont = format!("cont_{id}");
                     let rej = format!("rej_{id}");
-                    self.plant_event(&cont, &format!("Continue(site {id})"), Control::Controllable);
+                    self.plant_event(
+                        &cont,
+                        &format!("Continue(site {id})"),
+                        Control::Controllable,
+                    );
                     // docs/11 §4: rejection stays available whatever the
                     // supervisor allows, which is what makes this plant
                     // conservative rather than the exact implementation.
@@ -2691,7 +2938,10 @@ impl<'a> Walk<'a> {
                         pairs: vec![],
                     });
                     if reached && !entry.pairs.iter().any(|p| p.plant_state == cur) {
-                        entry.pairs.push(SitePair { plant_state: cur.clone(), impl_state });
+                        entry.pairs.push(SitePair {
+                            plant_state: cur.clone(),
+                            impl_state,
+                        });
                     }
                     if !*passes {
                         impl_reaches = false;
@@ -2700,7 +2950,11 @@ impl<'a> Walk<'a> {
                 Step::Store { slot, label, to } => {
                     storage[*slot] = *to;
                     let ev = format!("store_{label}");
-                    self.plant_event(&ev, &format!("InternalStep(store {label})"), Control::Uncontrollable);
+                    self.plant_event(
+                        &ev,
+                        &format!("InternalStep(store {label})"),
+                        Control::Uncontrollable,
+                    );
                     self.plant_add(&cur.clone(), &ev, &next);
                 }
             }
@@ -2759,11 +3013,13 @@ impl<'a> Walk<'a> {
     }
 
     fn plant_event(&mut self, id: &str, description: &str, control: Control) {
-        self.plant_events.entry(id.to_string()).or_insert_with(|| EventDecl {
-            id: id.to_string(),
-            control,
-            description: Some(description.to_string()),
-        });
+        self.plant_events
+            .entry(id.to_string())
+            .or_insert_with(|| EventDecl {
+                id: id.to_string(),
+                control,
+                description: Some(description.to_string()),
+            });
     }
 
     /// The plant's half of [`Self::add`], and quadratic for the same reason
@@ -2789,7 +3045,11 @@ impl<'a> Walk<'a> {
         if accepting {
             self.plant_accepting.insert(state.to_string());
         }
-        self.plant_event("next_tx", "the transaction boundary", Control::Uncontrollable);
+        self.plant_event(
+            "next_tx",
+            "the transaction boundary",
+            Control::Uncontrollable,
+        );
         // The plant carries the same monitor as the implementation. Without
         // it nothing is unsafe, the envelope forbids nothing, and every
         // rejection looks like an overrestriction.
@@ -2871,7 +3131,10 @@ impl<'a> Walk<'a> {
     /// call started from.
     fn finish_revert(&mut self, rev: &str, entry_storage: &StorageRegion) {
         self.marked.insert(rev.to_string());
-        let ev = self.event("next_tx", "the transaction boundary: begin the next transaction");
+        let ev = self.event(
+            "next_tx",
+            "the transaction boundary: begin the next transaction",
+        );
         let idle = format!("idle_{}", self.storage_name(entry_storage));
         self.add(rev, &ev, &idle);
     }
@@ -2881,7 +3144,10 @@ impl<'a> Walk<'a> {
     fn finish_return(&mut self, ret: &str, storage: &StorageRegion) {
         self.marked.insert(ret.to_string());
         let violated = self.violates_spec(storage);
-        let ev = self.event("next_tx", "the transaction boundary: begin the next transaction");
+        let ev = self.event(
+            "next_tx",
+            "the transaction boundary: begin the next transaction",
+        );
         if violated {
             self.bad_used = true;
             self.add(ret, &ev, "bad");
@@ -2903,7 +3169,9 @@ impl<'a> Walk<'a> {
                 }
                 continue;
             };
-            let Some(slot) = self.per_slot.iter().position(|(l, _)| l == var) else { continue };
+            let Some(slot) = self.per_slot.iter().position(|(l, _)| l == var) else {
+                continue;
+            };
             let region = &self.per_slot[slot].1[storage[slot]];
             if region.disjoint_from(&p.predicate.set()) {
                 return true;
@@ -2999,7 +3267,10 @@ fn defining_call(
     ins: &mulu_yul::ir::Instruction,
 ) -> Option<(Vec<String>, String, Vec<mulu_yul::Expr>)> {
     let (targets, value) = match &ins.op {
-        mulu_yul::ir::Op::Let { targets, value: Some(v) } => (targets, v),
+        mulu_yul::ir::Op::Let {
+            targets,
+            value: Some(v),
+        } => (targets, v),
         mulu_yul::ir::Op::Assign { targets, value } => (targets, value),
         _ => return None,
     };
@@ -3014,9 +3285,9 @@ fn defining_call(
 /// A call written as a statement, with its arguments.
 fn statement_call(ins: &mulu_yul::ir::Instruction) -> Option<(String, Vec<mulu_yul::Expr>)> {
     match &ins.op {
-        mulu_yul::ir::Op::Effect { call: mulu_yul::Expr::Call { name, args, .. } } => {
-            Some((name.clone(), args.clone()))
-        }
+        mulu_yul::ir::Op::Effect {
+            call: mulu_yul::Expr::Call { name, args, .. },
+        } => Some((name.clone(), args.clone())),
         _ => None,
     }
 }
@@ -3043,7 +3314,9 @@ fn bind_arguments(
 ) -> Result<crate::value::Env, String> {
     let mut env = crate::value::Env::new();
     for (i, a) in args.iter().enumerate() {
-        let Some(param) = callee.parameters.get(i) else { break };
+        let Some(param) = callee.parameters.get(i) else {
+            break;
+        };
         if let Ok(set) = crate::value::value_set(a, caller) {
             env.insert(param.clone(), set);
         }
@@ -3084,7 +3357,10 @@ fn decide_or_split(
             return Ok(if sense { *known } else { !*known });
         }
     }
-    let side = splits.next().ok_or_else(|| TraceStop::Undecided { ways: 2, what: what() })? == 1;
+    let side = splits.next().ok_or_else(|| TraceStop::Undecided {
+        ways: 2,
+        what: what(),
+    })? == 1;
     if let Some(k) = key {
         facts.insert(k, if sense { side } else { !side });
     }
@@ -3099,7 +3375,9 @@ fn bind_terms(
 ) -> BTreeMap<String, mulu_yul::Expr> {
     let mut out = BTreeMap::new();
     for (i, a) in args.iter().enumerate() {
-        let Some(param) = callee.parameters.get(i) else { break };
+        let Some(param) = callee.parameters.get(i) else {
+            break;
+        };
         if let Some(t) = canon(a, caller) {
             out.insert(param.clone(), t);
         }
@@ -3133,10 +3411,16 @@ struct LoopEffect {
 /// the loop whose head it is.
 fn loop_body(f: &Function, head: usize) -> BTreeSet<usize> {
     let succs = |b: usize| -> Vec<usize> {
-        let Some(blk) = f.blocks.iter().find(|x| x.id == b) else { return vec![] };
+        let Some(blk) = f.blocks.iter().find(|x| x.id == b) else {
+            return vec![];
+        };
         match &blk.terminator {
             Terminator::Jump { target } => vec![*target],
-            Terminator::Branch { then_block, else_block, .. } => vec![*then_block, *else_block],
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => vec![*then_block, *else_block],
             Terminator::Switch { cases, default, .. } => {
                 cases.iter().map(|(_, b)| *b).chain(*default).collect()
             }
@@ -3276,7 +3560,11 @@ mod tests {
             entry("set", "set(uint256)", "0x60fe47b1"),
             entry("set", "set(uint8)", "0x24b8ba5f"),
             entry("set_uint256", "set_uint256(uint256)", "0xcccccccc"),
-            entry("set_uint256_60fe47b1", "set_uint256_60fe47b1(uint256)", "0xdddddddd"),
+            entry(
+                "set_uint256_60fe47b1",
+                "set_uint256_60fe47b1(uint256)",
+                "0xdddddddd",
+            ),
             entry("fn_60fe47b1", "fn_60fe47b1(uint256)", "0xeeeeeeee"),
         ];
         disambiguate(&mut v);
@@ -3284,7 +3572,11 @@ mod tests {
         let mut sorted = got.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), got.len(), "names must be injective, got {got:?}");
+        assert_eq!(
+            sorted.len(),
+            got.len(),
+            "names must be injective, got {got:?}"
+        );
     }
 
     #[test]
@@ -3301,8 +3593,15 @@ mod tests {
         let mut sorted = got.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), got.len(), "names must be injective, got {got:?}");
-        assert_eq!(got[1], "set_uint8", "the readable form is kept where it is free");
+        assert_eq!(
+            sorted.len(),
+            got.len(),
+            "names must be injective, got {got:?}"
+        );
+        assert_eq!(
+            got[1], "set_uint8",
+            "the readable form is kept where it is free"
+        );
     }
 
     #[test]

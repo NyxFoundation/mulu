@@ -68,9 +68,7 @@ pub fn value_set(e: &Expr, env: &Env) -> Result<IntervalSet, String> {
                             (_, Some(m)) => (a, m),
                             (Some(m), _) => (b, m),
                             (None, None) => {
-                                return Err(
-                                    "`and` of two ranges is outside the P1a fragment".into()
-                                )
+                                return Err("`and` of two ranges is outside the P1a fragment".into())
                             }
                         }
                     }
@@ -103,8 +101,9 @@ pub fn value_set(e: &Expr, env: &Env) -> Result<IntervalSet, String> {
             // `not(k)` for a literal is a constant. solc writes the
             // round-down mask that way: `and(x, not(31))`.
             ("not", 1) => {
-                let v = mask_of(&args[0])
-                    .ok_or_else(|| "`not` of a non-literal is outside the P1a fragment".to_string())?;
+                let v = mask_of(&args[0]).ok_or_else(|| {
+                    "`not` of a non-literal is outside the P1a fragment".to_string()
+                })?;
                 Ok(IntervalSet::point(!v))
             }
             ("add", 2) | ("sub", 2) | ("mul", 2) => {
@@ -159,7 +158,9 @@ mod tests {
     fn e(text: &str) -> Expr {
         let src = format!("object \"T\" {{ code {{ let c := {text} }} }}");
         let p = parse_object(&src).unwrap();
-        let mulu_yul::Stmt::Let { value: Some(v), .. } = &p.object.code.stmts[0] else { panic!() };
+        let mulu_yul::Stmt::Let { value: Some(v), .. } = &p.object.code.stmts[0] else {
+            panic!()
+        };
         v.clone()
     }
     fn u(n: u64) -> U256 {
@@ -174,7 +175,10 @@ mod tests {
         assert_eq!(got, dom);
         // a narrower region survives too
         let narrow = IntervalSet::le(u(100));
-        assert_eq!(value_set(&e("and(var_x, 0xff)"), &env_of("var_x", &narrow)).unwrap(), narrow);
+        assert_eq!(
+            value_set(&e("and(var_x, 0xff)"), &env_of("var_x", &narrow)).unwrap(),
+            narrow
+        );
     }
 
     #[test]
@@ -189,8 +193,14 @@ mod tests {
     fn literals_and_the_bare_argument() {
         let r = IntervalSet::range(u(10), u(20));
         assert_eq!(value_set(&e("var_x"), &env_of("var_x", &r)).unwrap(), r);
-        assert_eq!(value_set(&e("0x2a"), &env_of("var_x", &r)).unwrap(), IntervalSet::point(u(42)));
-        assert_eq!(value_set(&e("42"), &Env::new()).unwrap(), IntervalSet::point(u(42)));
+        assert_eq!(
+            value_set(&e("0x2a"), &env_of("var_x", &r)).unwrap(),
+            IntervalSet::point(u(42))
+        );
+        assert_eq!(
+            value_set(&e("42"), &Env::new()).unwrap(),
+            IntervalSet::point(u(42))
+        );
         assert!(value_set(&e("other"), &env_of("var_x", &r)).is_err());
     }
 
@@ -203,7 +213,11 @@ mod tests {
         // the full word mask covers everything
         let full = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
         assert_eq!(
-            value_set(&e(&format!("and(var_x, {full})")), &env_of("var_x", &IntervalSet::full())).unwrap(),
+            value_set(
+                &e(&format!("and(var_x, {full})")),
+                &env_of("var_x", &IntervalSet::full())
+            )
+            .unwrap(),
             IntervalSet::full()
         );
     }
@@ -222,7 +236,12 @@ mod tests {
         // These are still outside: a storage read needs the walk's current
         // region, and a shift is not modelled at all.
         let r = IntervalSet::le(u(100));
-        for expr in ["sload(0)", "shr(1, var_x)", "div(var_x, 2)", "keccak256(var_x, 32)"] {
+        for expr in [
+            "sload(0)",
+            "shr(1, var_x)",
+            "div(var_x, 2)",
+            "keccak256(var_x, 32)",
+        ] {
             assert!(value_set(&e(expr), &env_of("var_x", &r)).is_err(), "{expr}");
         }
     }
@@ -279,16 +298,28 @@ mod arith_tests {
     fn arithmetic_is_exact_where_it_cannot_wrap() {
         let a = IntervalSet::range(u(10), u(20));
         let b = IntervalSet::range(u(1), u(2));
-        assert_eq!(arith("add", &a, &b).unwrap(), IntervalSet::range(u(11), u(22)));
-        assert_eq!(arith("sub", &a, &b).unwrap(), IntervalSet::range(u(8), u(19)));
-        assert_eq!(arith("mul", &a, &b).unwrap(), IntervalSet::range(u(10), u(40)));
+        assert_eq!(
+            arith("add", &a, &b).unwrap(),
+            IntervalSet::range(u(11), u(22))
+        );
+        assert_eq!(
+            arith("sub", &a, &b).unwrap(),
+            IntervalSet::range(u(8), u(19))
+        );
+        assert_eq!(
+            arith("mul", &a, &b).unwrap(),
+            IntervalSet::range(u(10), u(40))
+        );
     }
 
     #[test]
     fn arithmetic_that_can_wrap_is_refused_not_approximated() {
         // A wrapped result is a different value, and putting it in an
         // interval anyway would place a number in a region it is not in.
-        let big = IntervalSet::range(crate::interval::max_u256() - u(1), crate::interval::max_u256());
+        let big = IntervalSet::range(
+            crate::interval::max_u256() - u(1),
+            crate::interval::max_u256(),
+        );
         let one = IntervalSet::point(u(2));
         assert!(arith("add", &big, &one).is_err());
         assert!(arith("mul", &big, &one).is_err());
@@ -308,7 +339,10 @@ mod arith_tests {
             v.clone()
         };
         let env = env_of("x", &IntervalSet::range(u(0), u(99)));
-        assert_eq!(value_set(&e("add(x, 1)"), &env).unwrap(), IntervalSet::range(u(1), u(100)));
+        assert_eq!(
+            value_set(&e("add(x, 1)"), &env).unwrap(),
+            IntervalSet::range(u(1), u(100))
+        );
     }
 }
 
@@ -327,7 +361,11 @@ mod mask_tests {
         // multiple of 32. The operation is monotone, so the ends map to the
         // ends and the result is exact rather than approximated.
         assert_eq!(clears_low_bits(!u(31)), Some(5));
-        assert_eq!(clears_low_bits(u(31)), None, "a low-bit mask is the other case");
+        assert_eq!(
+            clears_low_bits(u(31)),
+            None,
+            "a low-bit mask is the other case"
+        );
         assert_eq!(clears_low_bits(U256::ZERO), None);
 
         let env = env_of("x", &IntervalSet::range(u(33), u(70)));

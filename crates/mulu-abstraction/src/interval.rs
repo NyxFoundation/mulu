@@ -37,7 +37,9 @@ impl IntervalSet {
     }
 
     pub fn full() -> Self {
-        Self { ranges: vec![(ZERO, U256::MAX)] }
+        Self {
+            ranges: vec![(ZERO, U256::MAX)],
+        }
     }
 
     /// `[lo, hi]`, empty when `lo > hi`.
@@ -45,7 +47,9 @@ impl IntervalSet {
         if lo > hi {
             Self::empty()
         } else {
-            Self { ranges: vec![(lo, hi)] }
+            Self {
+                ranges: vec![(lo, hi)],
+            }
         }
     }
 
@@ -120,8 +124,7 @@ impl IntervalSet {
             match out.last_mut() {
                 // overlapping, or adjacent with no gap: extend
                 Some((_, prev_hi))
-                    if lo <= *prev_hi
-                        || prev_hi.checked_add(U256::from(1u8)) == Some(lo) =>
+                    if lo <= *prev_hi || prev_hi.checked_add(U256::from(1u8)) == Some(lo) =>
                 {
                     if hi > *prev_hi {
                         *prev_hi = hi;
@@ -212,8 +215,11 @@ impl IntervalSet {
 
 impl Serialize for IntervalSet {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let as_text: Vec<[String; 2]> =
-            self.ranges.iter().map(|(lo, hi)| [lo.to_string(), hi.to_string()]).collect();
+        let as_text: Vec<[String; 2]> = self
+            .ranges
+            .iter()
+            .map(|(lo, hi)| [lo.to_string(), hi.to_string()])
+            .collect();
         as_text.serialize(s)
     }
 }
@@ -256,7 +262,13 @@ impl fmt::Debug for IntervalSet {
         let parts: Vec<String> = self
             .ranges
             .iter()
-            .map(|(lo, hi)| if lo == hi { format!("{lo}") } else { format!("[{lo}, {hi}]") })
+            .map(|(lo, hi)| {
+                if lo == hi {
+                    format!("{lo}")
+                } else {
+                    format!("[{lo}, {hi}]")
+                }
+            })
             .collect();
         write!(f, "{{{}}}", parts.join(" ∪ "))
     }
@@ -296,10 +308,16 @@ mod tests {
     #[test]
     fn boundaries_do_not_wrap() {
         assert!(IntervalSet::lt(ZERO).is_empty(), "x < 0 has no solution");
-        assert!(IntervalSet::gt(U256::MAX).is_empty(), "x > MAX has no solution");
+        assert!(
+            IntervalSet::gt(U256::MAX).is_empty(),
+            "x > MAX has no solution"
+        );
         assert!(IntervalSet::ge(ZERO).is_full());
         assert!(IntervalSet::le(U256::MAX).is_full());
-        assert_eq!(IntervalSet::point(U256::MAX).complement(), IntervalSet::le(U256::MAX - u(1)));
+        assert_eq!(
+            IntervalSet::point(U256::MAX).complement(),
+            IntervalSet::le(U256::MAX - u(1))
+        );
         assert_eq!(IntervalSet::point(ZERO).complement(), IntervalSet::ge(u(1)));
     }
 
@@ -307,8 +325,14 @@ mod tests {
     fn complement_is_an_involution_and_partitions() {
         for s in samples() {
             assert_eq!(s.complement().complement(), s, "double complement of {s:?}");
-            assert!(s.intersect(&s.complement()).is_empty(), "{s:?} meets its complement");
-            assert!(s.union(&s.complement()).is_full(), "{s:?} plus complement is not everything");
+            assert!(
+                s.intersect(&s.complement()).is_empty(),
+                "{s:?} meets its complement"
+            );
+            assert!(
+                s.union(&s.complement()).is_full(),
+                "{s:?} plus complement is not everything"
+            );
         }
     }
 
@@ -361,10 +385,19 @@ mod tests {
                     assert_eq!(a.union(&b).contains(x), a.contains(x) || b.contains(x));
                     assert_eq!(a.intersect(&b).contains(x), a.contains(x) && b.contains(x));
                     assert_eq!(a.complement().contains(x), !a.contains(x));
-                    assert_eq!(a.difference(&b).contains(x), a.contains(x) && !b.contains(x));
+                    assert_eq!(
+                        a.difference(&b).contains(x),
+                        a.contains(x) && !b.contains(x)
+                    );
                 }
-                assert_eq!(a.subset_of(&b), (0..64u64).all(|v| !a.contains(u(v)) || b.contains(u(v))));
-                assert_eq!(a.disjoint_from(&b), (0..64u64).all(|v| !(a.contains(u(v)) && b.contains(u(v)))));
+                assert_eq!(
+                    a.subset_of(&b),
+                    (0..64u64).all(|v| !a.contains(u(v)) || b.contains(u(v)))
+                );
+                assert_eq!(
+                    a.disjoint_from(&b),
+                    (0..64u64).all(|v| !(a.contains(u(v)) && b.contains(u(v))))
+                );
             }
         }
     }
@@ -379,7 +412,10 @@ mod tests {
         let x2 = p1.complement().intersect(&p2.complement());
 
         // p1 true and p2 false is infeasible: x <= 100 implies x <= 1000
-        assert!(p1.intersect(&p2.complement()).is_empty(), "p1 and not p2 must be unsatisfiable");
+        assert!(
+            p1.intersect(&p2.complement()).is_empty(),
+            "p1 and not p2 must be unsatisfiable"
+        );
         assert!(p1.subset_of(&p2), "A implies B, which is why B never fails");
 
         // the three regions cover uint256 and are pairwise disjoint

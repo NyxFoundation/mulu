@@ -145,7 +145,11 @@ pub fn strip(e: &Expr) -> Expr {
                     }
                 }
             }
-            Expr::Call { name: name.clone(), args: args.iter().map(strip).collect(), src: *src }
+            Expr::Call {
+                name: name.clone(),
+                args: args.iter().map(strip).collect(),
+                src: *src,
+            }
         }
         other => other.clone(),
     }
@@ -153,7 +157,9 @@ pub fn strip(e: &Expr) -> Expr {
 
 /// `2^k - 1` as a width in bits, when the literal is one.
 fn low_bit_mask(e: &Expr) -> Option<u32> {
-    let Expr::Literal { text, .. } = e else { return None };
+    let Expr::Literal { text, .. } = e else {
+        return None;
+    };
     let v = crate::interval::parse_decimal(text).ok()?;
     let bits = 256 - v.leading_zeros() as u32;
     let all_ones = if bits >= 256 {
@@ -193,11 +199,16 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
     // base solc wrote it in.
     if let Expr::Literal { text, src } = e {
         return match crate::interval::parse_decimal(text) {
-            Ok(v) => Expr::Literal { text: v.to_string(), src: *src },
+            Ok(v) => Expr::Literal {
+                text: v.to_string(),
+                src: *src,
+            },
             Err(_) => e.clone(),
         };
     }
-    let Expr::Call { name, args, src } = e else { return e.clone() };
+    let Expr::Call { name, args, src } = e else {
+        return e.clone();
+    };
     let args: Vec<Expr> = args.iter().map(|a| normalise(a, layout)).collect();
 
     if (name.starts_with("read_from_storage") || name == "sload") && args.len() == 1 {
@@ -205,13 +216,18 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
             lit @ Expr::Literal { .. } => slot_of(lit)
                 .and_then(|s| layout.label_at(s))
                 .map(|l| call("storage", vec![Expr::Ident { name: l, src: None }])),
-            Expr::Call { name: m, args: ma, .. } if m == "mapping" && ma.len() == 2 => {
+            Expr::Call {
+                name: m, args: ma, ..
+            } if m == "mapping" && ma.len() == 2 => {
                 slot_of(&ma[0]).and_then(|s| layout.label_at(s)).map(|l| {
                     let l = match layout.cell_generation() {
                         0 => l,
                         n => format!("{l}@{n}"),
                     };
-                    call("cell", vec![Expr::Ident { name: l, src: None }, ma[1].clone()])
+                    call(
+                        "cell",
+                        vec![Expr::Ident { name: l, src: None }, ma[1].clone()],
+                    )
                 })
             }
             _ => None,
@@ -220,6 +236,16 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
     }
     if name.starts_with("mapping_index_access") && args.len() == 2 {
         return call("mapping", args);
+    }
+    // A dynamic array's length is the word at its slot, which is also what
+    // `sload` of that slot reads. Two names for one value meant the walk
+    // could not see that a length read after a push is the length read
+    // before it, plus one.
+    if name.starts_with("array_length") && args.len() == 1 {
+        return normalise(&call("sload", args), layout);
+    }
+    if name.starts_with("convert_array") && args.len() == 1 {
+        return args.into_iter().next().expect("one argument");
     }
     // `loadimmutable("13")` is a read of the immutable declared at AST node
     // 13. The id is solc's and changes with the source; the name does not.
@@ -231,7 +257,11 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
             }
         }
     }
-    Expr::Call { name: name.clone(), args, src: *src }
+    Expr::Call {
+        name: name.clone(),
+        args,
+        src: *src,
+    }
 }
 
 /// The condition as a relation, with every local replaced by its term.
@@ -266,11 +296,17 @@ fn rel(e: &Expr, negated: bool) -> Option<(Relation, bool)> {
     // the same key a specification writing `isCommitted == false` produces.
     let as_nonzero = |e: &Expr| {
         Some((
-            Relation { op: Op::Eq, left: e.render(), right: "0".to_string() },
+            Relation {
+                op: Op::Eq,
+                left: e.render(),
+                right: "0".to_string(),
+            },
             negated,
         ))
     };
-    let Expr::Call { name, args, .. } = e else { return as_nonzero(e) };
+    let Expr::Call { name, args, .. } = e else {
+        return as_nonzero(e);
+    };
     if name == "iszero" && args.len() == 1 {
         return rel(&args[0], !negated);
     }
@@ -284,13 +320,39 @@ fn rel(e: &Expr, negated: bool) -> Option<(Relation, bool)> {
     // `sub(a, b) <= a` is solc's underflow check, and it says exactly
     // `b <= a`. Leaving it in the arithmetic hid a relation the rest of the
     // walk already had, so the same fact was assumed twice, once each way.
-    if let (Expr::Call { name: sub, args: sa, .. }, b) = (&strip(&args[0]), &strip(&args[1])) {
+    if let (
+        Expr::Call {
+            name: sub,
+            args: sa,
+            ..
+        },
+        b,
+    ) = (&strip(&args[0]), &strip(&args[1]))
+    {
         if sub == "sub" && sa.len() == 2 && strip(&sa[0]).render() == b.render() {
             let (x, y) = (strip(&sa[0]).render(), strip(&sa[1]).render());
             match (name.as_str(), negated) {
                 // gt(sub(a, b), a) negated is sub(a, b) <= a, i.e. b <= a
-                ("gt", true) => return Some((Relation { op: Op::Le, left: y, right: x }, true)),
-                ("gt", false) => return Some((Relation { op: Op::Lt, left: x, right: y }, true)),
+                ("gt", true) => {
+                    return Some((
+                        Relation {
+                            op: Op::Le,
+                            left: y,
+                            right: x,
+                        },
+                        true,
+                    ))
+                }
+                ("gt", false) => {
+                    return Some((
+                        Relation {
+                            op: Op::Lt,
+                            left: x,
+                            right: y,
+                        },
+                        true,
+                    ))
+                }
                 _ => {}
             }
         }
@@ -318,9 +380,15 @@ mod tests {
         let src = src.trim();
         let Some(open) = src.find('(') else {
             return if crate::interval::parse_decimal(src).is_ok() {
-                Expr::Literal { text: src.to_string(), src: None }
+                Expr::Literal {
+                    text: src.to_string(),
+                    src: None,
+                }
             } else {
-                Expr::Ident { name: src.to_string(), src: None }
+                Expr::Ident {
+                    name: src.to_string(),
+                    src: None,
+                }
             };
         };
         let name = src[..open].to_string();
@@ -341,7 +409,11 @@ mod tests {
         if !inner.trim().is_empty() {
             args.push(parse(&inner[start..]));
         }
-        Expr::Call { name, args, src: None }
+        Expr::Call {
+            name,
+            args,
+            src: None,
+        }
     }
 
     #[test]
@@ -358,10 +430,16 @@ mod tests {
     #[test]
     fn the_same_question_asked_three_ways_has_one_key() {
         let t = BTreeMap::new();
-        let from_guard = of(&parse("iszero(gt(cleanup_t_uint256(a), cleanup_t_uint256(b)))"), &t);
+        let from_guard = of(
+            &parse("iszero(gt(cleanup_t_uint256(a), cleanup_t_uint256(b)))"),
+            &t,
+        );
         let from_lt = of(&parse("iszero(lt(b, a))"), &t);
         let from_spec = of(&parse("iszero(gt(a, b))"), &t);
-        assert_eq!(from_guard.as_ref().map(Relation::key).as_deref(), Some("a <= b"));
+        assert_eq!(
+            from_guard.as_ref().map(Relation::key).as_deref(),
+            Some("a <= b")
+        );
         assert_eq!(from_lt, from_guard);
         assert_eq!(from_spec, from_guard);
     }
@@ -370,9 +448,15 @@ mod tests {
     fn a_local_stands_for_what_defines_it() {
         let mut t = BTreeMap::new();
         t.insert("expr_30".to_string(), parse("var_amount_20"));
-        t.insert("expr_34".to_string(), parse("sload(mapping_index_access(0x00, caller()))"));
-        let r = of(&parse("iszero(gt(cleanup_t_uint256(expr_30), cleanup_t_uint256(expr_34)))"), &t)
-            .expect("a relation");
+        t.insert(
+            "expr_34".to_string(),
+            parse("sload(mapping_index_access(0x00, caller()))"),
+        );
+        let r = of(
+            &parse("iszero(gt(cleanup_t_uint256(expr_30), cleanup_t_uint256(expr_34)))"),
+            &t,
+        )
+        .expect("a relation");
         assert_eq!(r.key(), "var_amount_20 <= sload(mapping(0, caller()))");
     }
 
@@ -383,7 +467,8 @@ mod tests {
     fn the_mask_solc_puts_on_a_typed_value_is_not_part_of_the_question() {
         let m = "1461501637330902918203684832716283019655932542975";
         let t = BTreeMap::new();
-        let r = of(&parse(&format!("eq(and(caller(), {m}), and(o, {m}))")), &t).expect("a relation");
+        let r =
+            of(&parse(&format!("eq(and(caller(), {m}), and(o, {m}))")), &t).expect("a relation");
         assert_eq!(r.key(), "caller() == o");
         // and a mask that is not `2^k - 1` is arithmetic, and stays
         let keep = parse("and(add(size, 31), 115792089237316195423570985008687907853269984665640564039457584007913129639904)");
@@ -394,9 +479,7 @@ mod tests {
     /// line a specification would write reach the same key.
     #[test]
     fn a_mapping_cell_is_named_the_way_a_specification_would_name_it() {
-        let layout = |slot: crate::interval::U256| {
-            slot.is_zero().then(|| "balances".to_string())
-        };
+        let layout = |slot: crate::interval::U256| slot.is_zero().then(|| "balances".to_string());
         let mut t = BTreeMap::new();
         t.insert("expr_30".to_string(), parse("var_amount_20"));
         t.insert(
@@ -406,13 +489,22 @@ mod tests {
                  mapping_index_access_t_mapping$_t_address_$_t_uint256_$_of_t_address(0x00, caller()))",
             ),
         );
-        let from_code =
-            of_in(&parse("iszero(gt(cleanup_t_uint256(expr_30), cleanup_t_uint256(expr_34)))"), &t, &layout)
-                .expect("a relation");
-        assert_eq!(from_code.0.key(), "var_amount_20 <= cell(balances, caller())");
+        let from_code = of_in(
+            &parse("iszero(gt(cleanup_t_uint256(expr_30), cleanup_t_uint256(expr_34)))"),
+            &t,
+            &layout,
+        )
+        .expect("a relation");
+        assert_eq!(
+            from_code.0.key(),
+            "var_amount_20 <= cell(balances, caller())"
+        );
 
         // and a plain slot is named by its variable
-        t.insert("g".to_string(), parse("read_from_storage_split_offset_0_t_uint256(0x00)"));
+        t.insert(
+            "g".to_string(),
+            parse("read_from_storage_split_offset_0_t_uint256(0x00)"),
+        );
         let r = of_in(&parse("lt(g, x)"), &t, &layout).expect("a relation");
         assert_eq!(r.0.key(), "storage(balances) < x");
     }

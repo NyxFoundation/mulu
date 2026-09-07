@@ -17,8 +17,14 @@ fn build() -> (ProgramIr, Abstraction) {
         "Limits.sol",
         "0.8.28+commit.7893614a.Linux.g++",
         include_str!("../../mulu-yul/tests/fixtures/Limits.yul"),
-        &serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Limits.abi.json")).unwrap(),
-        serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Limits.storage.json")).unwrap(),
+        &serde_json::from_str(include_str!(
+            "../../mulu-yul/tests/fixtures/Limits.abi.json"
+        ))
+        .unwrap(),
+        serde_json::from_str(include_str!(
+            "../../mulu-yul/tests/fixtures/Limits.storage.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     let props = Spec::parse(include_str!("../../../examples/limits/Limits.spec.json"))
@@ -50,7 +56,11 @@ fn continuing_is_controllable_and_rejecting_is_not() {
     assert!(p.events.iter().any(|e| e.id.starts_with("rej_")));
     for site in &p.sites {
         let rej = site.continue_event.replacen("cont_", "rej_", 1);
-        assert!(p.events.iter().any(|e| e.id == rej), "no rejection at site {}", site.id);
+        assert!(
+            p.events.iter().any(|e| e.id == rej),
+            "no rejection at site {}",
+            site.id
+        );
     }
 }
 
@@ -108,7 +118,10 @@ fn the_plant_carries_the_same_monitor_as_the_implementation() {
     assert!(p.transitions.iter().any(|t| t.to == "bad"));
     assert!(p.accepting.as_ref().is_some_and(|acc| !acc.is_empty()));
     for s in p.accepting.as_ref().unwrap() {
-        assert!(p.marked.contains(s), "an accepting state must be marked: {s}");
+        assert!(
+            p.marked.contains(s),
+            "an accepting state must be marked: {s}"
+        );
     }
 }
 

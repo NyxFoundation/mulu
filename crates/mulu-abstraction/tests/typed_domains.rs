@@ -16,8 +16,12 @@ fn build() -> (ProgramIr, Abstraction) {
         "Meter.sol",
         "0.8.28+commit.7893614a.Linux.g++",
         include_str!("../../mulu-yul/tests/fixtures/Meter.yul"),
-        &serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Meter.abi.json")).unwrap(),
-        serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Meter.storage.json")).unwrap(),
+        &serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Meter.abi.json"))
+            .unwrap(),
+        serde_json::from_str(include_str!(
+            "../../mulu-yul/tests/fixtures/Meter.storage.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     let props = Spec::parse(include_str!("../../../examples/typed/Meter.spec.json"))
@@ -36,15 +40,25 @@ fn u(n: u64) -> U256 {
 fn signature_types_are_read_off_the_abi() {
     assert_eq!(signature_params("record(uint8)"), vec!["uint8"]);
     assert_eq!(signature_params("reading()"), Vec::<String>::new());
-    assert_eq!(signature_params("f(uint256,address)"), vec!["uint256", "address"]);
+    assert_eq!(
+        signature_params("f(uint256,address)"),
+        vec!["uint256", "address"]
+    );
     // nested commas do not split
-    assert_eq!(signature_params("g((uint8,bool),uint256[])"), vec!["(uint8,bool)", "uint256[]"]);
+    assert_eq!(
+        signature_params("g((uint8,bool),uint256[])"),
+        vec!["(uint8,bool)", "uint256[]"]
+    );
 }
 
 #[test]
 fn a_uint8_argument_never_leaves_its_type() {
     let (_, a) = build();
-    assert!(a.report.complete(), "unsupported: {:?}", a.report.unsupported);
+    assert!(
+        a.report.complete(),
+        "unsupported: {:?}",
+        a.report.unsupported
+    );
 
     // every state record can be called in carries an argument region inside
     // [0, 255]; nothing above it exists for that entrypoint
@@ -70,8 +84,13 @@ fn a_uint8_argument_never_leaves_its_type() {
 fn the_narrow_entrypoint_cannot_break_a_bound_it_has_no_room_for() {
     let (_, a) = build();
     // reading <= 1000 and a uint8 tops out at 255, so record cannot violate it
-    let to_bad: Vec<&str> =
-        a.model.transitions.iter().filter(|t| t.to == "bad").map(|t| t.from.as_str()).collect();
+    let to_bad: Vec<&str> = a
+        .model
+        .transitions
+        .iter()
+        .filter(|t| t.to == "bad")
+        .map(|t| t.from.as_str())
+        .collect();
     assert!(!to_bad.is_empty(), "force can still violate it");
     assert!(
         !to_bad.iter().any(|s| s.starts_with("record")),
@@ -92,7 +111,11 @@ fn the_narrow_entrypoint_cannot_break_a_bound_it_has_no_room_for() {
 fn the_wide_entrypoint_still_can() {
     let (_, a) = build();
     let goes = |from: &str, ev: &str| -> Option<String> {
-        a.model.transitions.iter().find(|t| t.from == from && t.event == ev).map(|t| t.to.clone())
+        a.model
+            .transitions
+            .iter()
+            .find(|t| t.from == from && t.event == ev)
+            .map(|t| t.to.clone())
     };
     // the last region is the one above the bound
     let last = a.report.argument_regions.len() - 1;

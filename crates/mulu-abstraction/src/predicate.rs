@@ -29,7 +29,11 @@ pub enum Predicate {
     /// storage rather than given. Deciding it needs both sides bound, which
     /// is what the walk's environment supplies, and the form is closed under
     /// negation: `!(a < b)` is `b <= a`.
-    Less { left: String, right: String, strict: bool },
+    Less {
+        left: String,
+        right: String,
+        strict: bool,
+    },
 }
 
 impl Predicate {
@@ -37,14 +41,16 @@ impl Predicate {
         match self {
             Predicate::True => Predicate::False,
             Predicate::False => Predicate::True,
-            Predicate::Less { left, right, strict } => Predicate::Less {
+            Predicate::Less {
+                left,
+                right,
+                strict,
+            } => Predicate::Less {
                 left: right.clone(),
                 right: left.clone(),
                 strict: !strict,
             },
-            Predicate::Over { var, set } => {
-                Predicate::normalise(var.clone(), set.complement())
-            }
+            Predicate::Over { var, set } => Predicate::normalise(var.clone(), set.complement()),
         }
     }
 
@@ -137,7 +143,11 @@ impl Predicate {
             Predicate::False => Some(false),
             // Two sets in the order they must be in. Only the ends matter:
             // everything between is covered by the order itself.
-            Predicate::Less { left, right, strict } => {
+            Predicate::Less {
+                left,
+                right,
+                strict,
+            } => {
                 let (l, r) = (env.get(left)?, env.get(right)?);
                 let ((_, lhi), (rlo, _)) = (l.bounds()?, r.bounds()?);
                 let ((llo, _), (_, rhi)) = (l.bounds()?, r.bounds()?);
@@ -152,7 +162,9 @@ impl Predicate {
                 }
             }
             Predicate::Over { var: v, set } => {
-                let Some(region) = env.get(v) else { return None };
+                let Some(region) = env.get(v) else {
+                    return None;
+                };
                 if region.subset_of(set) {
                     Some(true)
                 } else if region.disjoint_from(set) {
@@ -171,7 +183,11 @@ impl fmt::Display for Predicate {
             Predicate::True => write!(f, "true"),
             Predicate::False => write!(f, "false"),
             Predicate::Over { var, set } => write!(f, "{var} ∈ {set}"),
-            Predicate::Less { left, right, strict } => {
+            Predicate::Less {
+                left,
+                right,
+                strict,
+            } => {
                 write!(f, "{left} {} {right}", if *strict { "<" } else { "≤" })
             }
         }
@@ -188,7 +204,9 @@ enum Operand {
 /// variable's declared type keeps it inside the mask. A `uint8` argument
 /// compared with `x <= 100` reaches here as `and(x, 0xff)`.
 fn strip_cleanup(e: &Expr, domain: &IntervalSet) -> Expr {
-    let Expr::Call { name, args, .. } = e else { return e.clone() };
+    let Expr::Call { name, args, .. } = e else {
+        return e.clone();
+    };
     if name != "and" || args.len() != 2 {
         return e.clone();
     }
@@ -217,12 +235,12 @@ fn operand(e: &Expr, vars: &[String]) -> Result<Operand, String> {
         // Any name is a variable; whether it is *known* is the walk's
         // question, not this one's.
         Expr::Ident { name, .. } => Ok(Operand::Var(name.clone())),
-        Expr::Literal { text, .. } => {
-            parse_decimal(text).map(Operand::Lit).map_err(|e| e.to_string())
-        }
-        Expr::Call { name, .. } => {
-            Err(format!("`{name}(...)` in a comparison is outside the P1a fragment"))
-        }
+        Expr::Literal { text, .. } => parse_decimal(text)
+            .map(Operand::Lit)
+            .map_err(|e| e.to_string()),
+        Expr::Call { name, .. } => Err(format!(
+            "`{name}(...)` in a comparison is outside the P1a fragment"
+        )),
     }
 }
 
@@ -252,8 +270,16 @@ fn compare(
         // Both sides variables. There is no set to be over, so it stays
         // relational and is decided where both are bound.
         (Operand::Var(a), Operand::Var(b)) => match relation {
-            Some(Relation::Less) => Ok(Predicate::Less { left: a, right: b, strict: true }),
-            Some(Relation::Greater) => Ok(Predicate::Less { left: b, right: a, strict: true }),
+            Some(Relation::Less) => Ok(Predicate::Less {
+                left: a,
+                right: b,
+                strict: true,
+            }),
+            Some(Relation::Greater) => Ok(Predicate::Less {
+                left: b,
+                right: a,
+                strict: true,
+            }),
             None => Err(
                 "a comparison of two variables that is not an ordering is outside the P1a \
                  fragment"
@@ -275,7 +301,11 @@ pub fn translate_in(e: &Expr, vars: &[String], domain: &IntervalSet) -> Result<P
     match e {
         Expr::Literal { text, .. } => {
             let v = parse_decimal(text).map_err(|e| e.to_string())?;
-            Ok(if v.is_zero() { Predicate::False } else { Predicate::True })
+            Ok(if v.is_zero() {
+                Predicate::False
+            } else {
+                Predicate::True
+            })
         }
         // A bare variable used as a condition means "non-zero".
         // Any name may be a variable. Restricting them to the function's
@@ -285,7 +315,10 @@ pub fn translate_in(e: &Expr, vars: &[String], domain: &IntervalSet) -> Result<P
         // parameter".
         Expr::Ident { name, .. } => {
             let _ = vars;
-            Ok(Predicate::Over { var: name.clone(), set: IntervalSet::ne_to(U256::ZERO) })
+            Ok(Predicate::Over {
+                var: name.clone(),
+                set: IntervalSet::ne_to(U256::ZERO),
+            })
         }
         Expr::Call { name, args, .. } => {
             let arity = |n: usize| -> Result<(), String> {
@@ -303,19 +336,42 @@ pub fn translate_in(e: &Expr, vars: &[String], domain: &IntervalSet) -> Result<P
                 // Unsigned comparisons.
                 "gt" => {
                     arity(2)?;
-                    let (l, r) = (strip_cleanup(&args[0], domain), strip_cleanup(&args[1], domain));
-                    compare(&l, &r, vars, Some(Relation::Greater), IntervalSet::gt, IntervalSet::lt)
+                    let (l, r) = (
+                        strip_cleanup(&args[0], domain),
+                        strip_cleanup(&args[1], domain),
+                    );
+                    compare(
+                        &l,
+                        &r,
+                        vars,
+                        Some(Relation::Greater),
+                        IntervalSet::gt,
+                        IntervalSet::lt,
+                    )
                 }
                 "lt" => {
                     arity(2)?;
-                    let (l, r) = (strip_cleanup(&args[0], domain), strip_cleanup(&args[1], domain));
-                    compare(&l, &r, vars, Some(Relation::Less), IntervalSet::lt, IntervalSet::gt)
+                    let (l, r) = (
+                        strip_cleanup(&args[0], domain),
+                        strip_cleanup(&args[1], domain),
+                    );
+                    compare(
+                        &l,
+                        &r,
+                        vars,
+                        Some(Relation::Less),
+                        IntervalSet::lt,
+                        IntervalSet::gt,
+                    )
                 }
                 "eq" => {
                     arity(2)?;
                     // `eq(e, e)` is true whatever `e` is, which is how the
                     // uint256 ABI validator collapses.
-                    let (l, r) = (strip_cleanup(&args[0], domain), strip_cleanup(&args[1], domain));
+                    let (l, r) = (
+                        strip_cleanup(&args[0], domain),
+                        strip_cleanup(&args[1], domain),
+                    );
                     if l.render() == r.render() {
                         return Ok(Predicate::True);
                     }
@@ -331,8 +387,7 @@ pub fn translate_in(e: &Expr, vars: &[String], domain: &IntervalSet) -> Result<P
                 }
                 "or" => {
                     arity(2)?;
-                    translate_in(&args[0], vars, domain)?
-                        .or(&translate_in(&args[1], vars, domain)?)
+                    translate_in(&args[0], vars, domain)?.or(&translate_in(&args[1], vars, domain)?)
                 }
                 "slt" | "sgt" => Err(format!(
                     "`{name}` is a signed comparison; P1a models unsigned uint256 only"
@@ -367,31 +422,61 @@ mod tests {
     fn the_two_limits_guards() {
         // A: iszero(gt(x, 100)) is x <= 100
         let a = tr("iszero(gt(x, 100))", &["x"]).unwrap();
-        assert_eq!(a, Predicate::Over { var: "x".into(), set: IntervalSet::le(u(100)) });
+        assert_eq!(
+            a,
+            Predicate::Over {
+                var: "x".into(),
+                set: IntervalSet::le(u(100))
+            }
+        );
         // B: iszero(gt(x, 1000)) is x <= 1000
         let b = tr("iszero(gt(x, 1000))", &["x"]).unwrap();
-        assert_eq!(b, Predicate::Over { var: "x".into(), set: IntervalSet::le(u(1000)) });
+        assert_eq!(
+            b,
+            Predicate::Over {
+                var: "x".into(),
+                set: IntervalSet::le(u(1000))
+            }
+        );
         // and A implies B, which is exactly why B never fails after A
         assert!(a.set().subset_of(&b.set()));
     }
 
     #[test]
     fn hex_and_decimal_literals_agree() {
-        assert_eq!(tr("gt(x, 0x64)", &["x"]).unwrap(), tr("gt(x, 100)", &["x"]).unwrap());
-        assert_eq!(tr("gt(x, 0x03e8)", &["x"]).unwrap(), tr("gt(x, 1000)", &["x"]).unwrap());
+        assert_eq!(
+            tr("gt(x, 0x64)", &["x"]).unwrap(),
+            tr("gt(x, 100)", &["x"]).unwrap()
+        );
+        assert_eq!(
+            tr("gt(x, 0x03e8)", &["x"]).unwrap(),
+            tr("gt(x, 1000)", &["x"]).unwrap()
+        );
     }
 
     #[test]
     fn the_variable_may_sit_on_either_side() {
         // 100 < x is the same as x > 100
-        assert_eq!(tr("lt(100, x)", &["x"]).unwrap(), tr("gt(x, 100)", &["x"]).unwrap());
-        assert_eq!(tr("gt(100, x)", &["x"]).unwrap(), tr("lt(x, 100)", &["x"]).unwrap());
+        assert_eq!(
+            tr("lt(100, x)", &["x"]).unwrap(),
+            tr("gt(x, 100)", &["x"]).unwrap()
+        );
+        assert_eq!(
+            tr("gt(100, x)", &["x"]).unwrap(),
+            tr("lt(x, 100)", &["x"]).unwrap()
+        );
     }
 
     #[test]
     fn boolean_combination() {
         let both = tr("and(iszero(lt(x, 10)), iszero(gt(x, 20)))", &["x"]).unwrap();
-        assert_eq!(both, Predicate::Over { var: "x".into(), set: IntervalSet::range(u(10), u(20)) });
+        assert_eq!(
+            both,
+            Predicate::Over {
+                var: "x".into(),
+                set: IntervalSet::range(u(10), u(20))
+            }
+        );
         let either = tr("or(lt(x, 10), gt(x, 20))", &["x"]).unwrap();
         assert_eq!(either, both.negate());
     }
@@ -400,18 +485,25 @@ mod tests {
     fn a_trivially_true_comparison_collapses() {
         // the uint256 ABI validator reduces to eq(v, v)
         assert_eq!(tr("eq(value, value)", &["value"]).unwrap(), Predicate::True);
-        assert_eq!(tr("iszero(gt(x, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff))", &["x"]).unwrap(), Predicate::True);
+        assert_eq!(
+            tr(
+                "iszero(gt(x, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff))",
+                &["x"]
+            )
+            .unwrap(),
+            Predicate::True
+        );
         assert_eq!(tr("lt(x, 0)", &["x"]).unwrap(), Predicate::False);
     }
 
     #[test]
     fn what_is_outside_the_fragment_is_refused_not_guessed() {
         for (expr, vars) in [
-            ("slt(x, 100)", &["x"][..]),          // signed
-            ("gt(sub(a, b), 32)", &["a", "b"]),   // arithmetic
-            ("gt(calldatasize(), 4)", &["x"]),    // environment read
-            ("callvalue()", &["x"]),              // not a comparison
-            ("slt(x, 1)", &["x"]),                // signed
+            ("slt(x, 100)", &["x"][..]),        // signed
+            ("gt(sub(a, b), 32)", &["a", "b"]), // arithmetic
+            ("gt(calldatasize(), 4)", &["x"]),  // environment read
+            ("callvalue()", &["x"]),            // not a comparison
+            ("slt(x, 1)", &["x"]),              // signed
         ] {
             let vars: Vec<String> = vars.iter().map(|s| s.to_string()).collect();
             let src = format!("object \"T\" {{ code {{ let c := {expr} }} }}");
@@ -419,7 +511,10 @@ mod tests {
             let mulu_yul::Stmt::Let { value: Some(e), .. } = &p.object.code.stmts[0] else {
                 panic!()
             };
-            assert!(translate(e, &vars).is_err(), "{expr} must be refused, not guessed");
+            assert!(
+                translate(e, &vars).is_err(),
+                "{expr} must be refused, not guessed"
+            );
         }
     }
 
@@ -464,10 +559,14 @@ mod tests {
             Some(false)
         );
         // overlapping: neither, and the walk must not be told either
-        assert_eq!(pred.decide(&env(IntervalSet::le(u(9)), IntervalSet::le(u(9)))), None);
+        assert_eq!(
+            pred.decide(&env(IntervalSet::le(u(9)), IntervalSet::le(u(9)))),
+            None
+        );
         // and the negation is the other order, which is what a check reads
         assert_eq!(
-            pred.negate().decide(&env(IntervalSet::le(u(4)), IntervalSet::eq_to(u(5)))),
+            pred.negate()
+                .decide(&env(IntervalSet::le(u(4)), IntervalSet::eq_to(u(5)))),
             Some(false)
         );
     }
@@ -478,10 +577,18 @@ mod tests {
         // a uint8 argument reaches a comparison through and(x, 0xff)
         let src = "object \"T\" { code { let c := iszero(gt(and(x, 0xff), 100)) } }";
         let p = parse_object(src).unwrap();
-        let mulu_yul::Stmt::Let { value: Some(e), .. } = &p.object.code.stmts[0] else { panic!() };
+        let mulu_yul::Stmt::Let { value: Some(e), .. } = &p.object.code.stmts[0] else {
+            panic!()
+        };
         let vars = vec!["x".to_string()];
         let got = translate_in(e, &vars, &byte).unwrap();
-        assert_eq!(got, Predicate::Over { var: "x".into(), set: IntervalSet::le(u(100)) });
+        assert_eq!(
+            got,
+            Predicate::Over {
+                var: "x".into(),
+                set: IntervalSet::le(u(100))
+            }
+        );
 
         // without the type the mask could truncate, so it is not dropped
         assert!(translate_in(e, &vars, &IntervalSet::full()).is_err());
@@ -490,17 +597,37 @@ mod tests {
     #[test]
     fn deciding_a_predicate_on_a_region() {
         let a = tr("iszero(gt(x, 100))", &["x"]).unwrap();
-        assert_eq!(a.decide(&crate::value::env_of("x", &IntervalSet::le(u(100)))), Some(true));
-        assert_eq!(a.decide(&crate::value::env_of("x", &IntervalSet::range(u(101), u(1000)))), Some(false));
+        assert_eq!(
+            a.decide(&crate::value::env_of("x", &IntervalSet::le(u(100)))),
+            Some(true)
+        );
+        assert_eq!(
+            a.decide(&crate::value::env_of(
+                "x",
+                &IntervalSet::range(u(101), u(1000))
+            )),
+            Some(false)
+        );
         // straddling the boundary is undecided, never a guess
-        assert_eq!(a.decide(&crate::value::env_of("x", &IntervalSet::le(u(200)))), None);
+        assert_eq!(
+            a.decide(&crate::value::env_of("x", &IntervalSet::le(u(200)))),
+            None
+        );
         // a predicate over another variable says nothing about this one
-        assert_eq!(a.decide(&crate::value::env_of("y", &IntervalSet::le(u(100)))), None);
+        assert_eq!(
+            a.decide(&crate::value::env_of("y", &IntervalSet::le(u(100)))),
+            None
+        );
     }
 
     #[test]
     fn negation_round_trips() {
-        for e in ["iszero(gt(x, 100))", "lt(x, 7)", "eq(x, 3)", "or(lt(x, 2), gt(x, 9))"] {
+        for e in [
+            "iszero(gt(x, 100))",
+            "lt(x, 7)",
+            "eq(x, 3)",
+            "or(lt(x, 2), gt(x, 9))",
+        ] {
             let p = tr(e, &["x"]).unwrap();
             assert_eq!(p.negate().negate(), p, "{e}");
             assert!(p.set().intersect(&p.negate().set()).is_empty());

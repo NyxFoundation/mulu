@@ -42,18 +42,42 @@ pub struct Property {
 #[serde(tag = "op", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Assertion {
     /// Unsigned <=
-    Ule { left: Operand, right: Operand },
+    Ule {
+        left: Operand,
+        right: Operand,
+    },
     /// Unsigned <
-    Ult { left: Operand, right: Operand },
+    Ult {
+        left: Operand,
+        right: Operand,
+    },
     /// Unsigned >=
-    Uge { left: Operand, right: Operand },
+    Uge {
+        left: Operand,
+        right: Operand,
+    },
     /// Unsigned >
-    Ugt { left: Operand, right: Operand },
-    Eq { left: Operand, right: Operand },
-    Ne { left: Operand, right: Operand },
-    And { args: Vec<Assertion> },
-    Or { args: Vec<Assertion> },
-    Not { arg: Box<Assertion> },
+    Ugt {
+        left: Operand,
+        right: Operand,
+    },
+    Eq {
+        left: Operand,
+        right: Operand,
+    },
+    Ne {
+        left: Operand,
+        right: Operand,
+    },
+    And {
+        args: Vec<Assertion>,
+    },
+    Or {
+        args: Vec<Assertion>,
+    },
+    Not {
+        arg: Box<Assertion>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,7 +179,9 @@ fn operand_side(o: &Operand, vars: &[StorageVar]) -> Result<Side, String> {
             }
             Ok(Side::Var(name.clone()))
         }
-        Operand::Uint256(text) => parse_decimal(text).map(Side::Lit).map_err(|e| e.to_string()),
+        Operand::Uint256(text) => parse_decimal(text)
+            .map(Side::Lit)
+            .map_err(|e| e.to_string()),
     }
 }
 
@@ -174,9 +200,11 @@ fn compile_assertion(a: &Assertion, vars: &[StorageVar]) -> Result<Predicate, St
         match (operand_side(left, vars)?, operand_side(right, vars)?) {
             (Side::Var(v), Side::Lit(k)) => Ok(predicate_over(v, on_left(k))),
             (Side::Lit(k), Side::Var(v)) => Ok(predicate_over(v, on_right(k))),
-            (Side::Lit(a), Side::Lit(b)) => {
-                Ok(if on_left(b).contains(a) { Predicate::True } else { Predicate::False })
-            }
+            (Side::Lit(a), Side::Lit(b)) => Ok(if on_left(b).contains(a) {
+                Predicate::True
+            } else {
+                Predicate::False
+            }),
             (Side::Var(_), Side::Var(_)) => {
                 Err("a comparison of two storage variables is outside the P1a fragment".into())
             }
@@ -230,8 +258,14 @@ fn render(a: &Assertion) -> String {
         Ugt { left, right } => format!("{} > {}", side(left), side(right)),
         Eq { left, right } => format!("{} == {}", side(left), side(right)),
         Ne { left, right } => format!("{} != {}", side(left), side(right)),
-        And { args } => format!("({})", args.iter().map(render).collect::<Vec<_>>().join(" and ")),
-        Or { args } => format!("({})", args.iter().map(render).collect::<Vec<_>>().join(" or ")),
+        And { args } => format!(
+            "({})",
+            args.iter().map(render).collect::<Vec<_>>().join(" and ")
+        ),
+        Or { args } => format!(
+            "({})",
+            args.iter().map(render).collect::<Vec<_>>().join(" or ")
+        ),
         Not { arg } => format!("not {}", render(arg)),
     }
 }
@@ -254,8 +288,11 @@ impl Spec {
         let vars = storage_vars(layout);
         let mut out = Vec::new();
         for p in self.properties.iter().filter(|p| p.contract == contract) {
-            let predicate = compile_assertion(&p.assertion, &vars)
-                .map_err(|message| SpecError::Property { id: p.id.clone(), message })?;
+            let predicate =
+                compile_assertion(&p.assertion, &vars).map_err(|message| SpecError::Property {
+                    id: p.id.clone(),
+                    message,
+                })?;
             out.push(CompiledProperty {
                 id: p.id.clone(),
                 when: p.when,
@@ -359,7 +396,10 @@ mod tests {
 
         let owner = vars.iter().find(|v| v.label == "owner").unwrap();
         assert_eq!(owner.bytes, Some(20));
-        assert!(!owner.whole_slot(), "20 bytes leaves room for something else");
+        assert!(
+            !owner.whole_slot(),
+            "20 bytes leaves room for something else"
+        );
 
         let packed = vars.iter().find(|v| v.label == "packed").unwrap();
         assert_eq!(packed.offset, 20);
@@ -372,7 +412,10 @@ mod tests {
         let json = format!(
             r#"{{"schema_version":1,"properties":[{{"id":"p","contract":"Limits","when":"successful-transaction-end","assert":{{"op":"ult","left":{{"storage":"limit"}},"right":{{"uint256":"{big}"}}}}}}]}}"#
         );
-        let c = Spec::parse(&json).unwrap().compile("Limits", &layout()).unwrap();
+        let c = Spec::parse(&json)
+            .unwrap()
+            .compile("Limits", &layout())
+            .unwrap();
         // limit < MAX excludes exactly one value
         assert_eq!(c[0].predicate.negate().set().count(), Some(1));
     }
@@ -383,7 +426,10 @@ mod tests {
             "assert":{"op":"and","args":[
                 {"op":"uge","left":{"storage":"limit"},"right":{"uint256":"10"}},
                 {"op":"ule","left":{"storage":"limit"},"right":{"uint256":"20"}}]}}]}"#;
-        let c = Spec::parse(json).unwrap().compile("Limits", &layout()).unwrap();
+        let c = Spec::parse(json)
+            .unwrap()
+            .compile("Limits", &layout())
+            .unwrap();
         assert_eq!(c[0].predicate.set().count(), Some(11));
         assert_eq!(c[0].text, "(limit >= 10 and limit <= 20)");
     }

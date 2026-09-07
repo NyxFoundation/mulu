@@ -30,7 +30,10 @@ fn limits() -> ProgramIr {
 }
 
 fn build(ir: &ProgramIr, spec: &str, contract: &str) -> Abstraction {
-    let props = Spec::parse(spec).unwrap().compile(contract, &ir.storage_layout).unwrap();
+    let props = Spec::parse(spec)
+        .unwrap()
+        .compile(contract, &ir.storage_layout)
+        .unwrap();
     Builder::new(ir, &props).build()
 }
 
@@ -48,7 +51,11 @@ fn a_specification_that_permits_nothing_forbids_every_success() {
 
     assert_eq!(a.model.bad, vec!["bad".to_string()], "nothing may succeed");
     let plant = a.model.control_plant.as_ref().unwrap();
-    assert_eq!(plant.bad, vec!["bad".to_string()], "the plant carries the same monitor");
+    assert_eq!(
+        plant.bad,
+        vec!["bad".to_string()],
+        "the plant carries the same monitor"
+    );
     assert!(a.model.transitions.iter().any(|t| t.to == "bad"));
     assert!(plant.transitions.iter().any(|t| t.to == "bad"));
 }
@@ -77,8 +84,16 @@ fn a_guard_written_as_if_revert_is_still_a_guard() {
         include_str!("../../mulu-yul/tests/fixtures/Gate.abi.json"),
         include_str!("../../mulu-yul/tests/fixtures/Gate.storage.json"),
     );
-    let a = build(&ir, include_str!("../../../examples/guards/Gate.spec.json"), "Gate");
-    assert!(a.report.complete(), "unsupported: {:?}", a.report.unsupported);
+    let a = build(
+        &ir,
+        include_str!("../../../examples/guards/Gate.spec.json"),
+        "Gate",
+    );
+    assert!(
+        a.report.complete(),
+        "unsupported: {:?}",
+        a.report.unsupported
+    );
 
     // It is a first-class check and it splits the argument domain at 100.
     // The id is `gen:...` here because this lowering has no AST; giving an
@@ -92,19 +107,30 @@ fn a_guard_written_as_if_revert_is_still_a_guard() {
 
     // and the plant has a site for it, so an overrestriction can be seen
     let plant = a.model.control_plant.as_ref().unwrap();
-    let site = plant.sites.iter().find(|s| s.check.as_deref() == Some(&id)).expect("a site for it");
+    let site = plant
+        .sites
+        .iter()
+        .find(|s| s.check.as_deref() == Some(&id))
+        .expect("a site for it");
     assert!(!site.pairs.is_empty());
     assert_eq!(site.continue_event, format!("cont_{id}"));
 
     // the guard rejects above 100 and lets the store through below it
     let goes = |from: &str, ev: &str| -> Option<String> {
-        a.model.transitions.iter().find(|t| t.from == from && t.event == ev).map(|t| t.to.clone())
+        a.model
+            .transitions
+            .iter()
+            .find(|t| t.from == from && t.event == ev)
+            .map(|t| t.to.clone())
     };
     let s0 = goes("idle_LIM0", "call_setLimit#X0").unwrap();
     let s1 = goes(&s0, &format!("{id}_pass")).expect("the guard passes below 100");
     assert!(goes(&s1, "store_limit").is_some());
     let r0 = goes("idle_LIM0", "call_setLimit#X1").unwrap();
-    assert!(goes(&r0, &format!("{id}_fail")).is_some(), "and rejects above it");
+    assert!(
+        goes(&r0, &format!("{id}_fail")).is_some(),
+        "and rejects above it"
+    );
 }
 
 /// A guard no region reaches is dead code. The plant walks past it, so it
@@ -125,7 +151,11 @@ fn a_guard_no_execution_reaches_is_declared_and_called_unreachable() {
     let a = build(&ir, spec, "Three");
 
     let ids: Vec<&str> = a.model.checks.iter().map(|c| c.id.as_str()).collect();
-    assert_eq!(ids, vec!["A", "B", "C"], "every guard on the path is declared");
+    assert_eq!(
+        ids,
+        vec!["A", "B", "C"],
+        "every guard on the path is declared"
+    );
 
     // C is declared but nothing is labelled with either of its events: that
     // is what makes the core call it unreachable rather than never-failing.
@@ -137,7 +167,11 @@ fn a_guard_no_execution_reaches_is_declared_and_called_unreachable() {
     let plant = a.model.control_plant.as_ref().unwrap();
     for s in &plant.sites {
         if let Some(check) = &s.check {
-            assert!(ids.contains(&check.as_str()), "site {} names an undeclared check", s.id);
+            assert!(
+                ids.contains(&check.as_str()),
+                "site {} names an undeclared check",
+                s.id
+            );
         }
     }
     let text = serde_json::to_string(&a.model).unwrap();
@@ -161,24 +195,42 @@ fn two_requires_sharing_a_helper_stay_two_checks() {
         "when":"successful-transaction-end",
         "assert":{"op":"ule","left":{"storage":"limit"},"right":{"uint256":"1000"}}}]}"#;
     let a = build(&ir, spec, "Dup");
-    assert!(a.report.complete(), "unsupported: {:?}", a.report.unsupported);
+    assert!(
+        a.report.complete(),
+        "unsupported: {:?}",
+        a.report.unsupported
+    );
 
     let ids: Vec<&str> = a.model.checks.iter().map(|c| c.id.as_str()).collect();
-    assert_eq!(ids, vec!["A", "B"], "one id for two guards substitutes one condition for the other");
+    assert_eq!(
+        ids,
+        vec!["A", "B"],
+        "one id for two guards substitutes one condition for the other"
+    );
 
     // `require(x < 10)` then `require(x > 20)` cannot both hold, so nothing is
     // ever stored. Under the old matching, x = 5 passed both and stored.
     assert!(
-        !a.model.transitions.iter().any(|t| t.event.starts_with("store_")),
+        !a.model
+            .transitions
+            .iter()
+            .any(|t| t.event.starts_with("store_")),
         "contradictory guards must leave no path to a store"
     );
     // the first region is below 10, where A passes and B must fail
     let goes = |from: &str, ev: &str| -> Option<String> {
-        a.model.transitions.iter().find(|t| t.from == from && t.event == ev).map(|t| t.to.clone())
+        a.model
+            .transitions
+            .iter()
+            .find(|t| t.from == from && t.event == ev)
+            .map(|t| t.to.clone())
     };
     let s0 = goes("idle_LIM0", "call_f#X0").unwrap();
     let s1 = goes(&s0, "A_pass").expect("A passes below 10");
-    assert!(goes(&s1, "B_fail").is_some(), "B must reject the same value");
+    assert!(
+        goes(&s1, "B_fail").is_some(),
+        "B must reject the same value"
+    );
 }
 
 /// A `require` with no message uses a helper named exactly `require_helper`.
@@ -197,8 +249,18 @@ fn a_require_without_a_message_is_still_a_require() {
         .iter()
         .filter(|c| c.origin == mulu_yul::CheckOrigin::Require)
         .collect();
-    assert_eq!(source.len(), 2, "both requires, {:?}", ir.checks.iter().map(|c| (&c.id, c.origin)).collect::<Vec<_>>());
-    assert!(source.iter().all(|c| c.helper.as_deref() == Some("require_helper")));
+    assert_eq!(
+        source.len(),
+        2,
+        "both requires, {:?}",
+        ir.checks
+            .iter()
+            .map(|c| (&c.id, c.origin))
+            .collect::<Vec<_>>()
+    );
+    assert!(source
+        .iter()
+        .all(|c| c.helper.as_deref() == Some("require_helper")));
     let ids: Vec<&str> = source.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, vec!["A", "B"]);
 }
@@ -221,12 +283,21 @@ fn a_function_named_like_a_region_does_not_share_its_call_event() {
     let a = build(&ir, spec, "Clash");
 
     // both entrypoints are modelled, and their request events differ
-    let calls: Vec<&str> =
-        a.model.events.iter().map(|e| e.id.as_str()).filter(|e| e.starts_with("call_")).collect();
+    let calls: Vec<&str> = a
+        .model
+        .events
+        .iter()
+        .map(|e| e.id.as_str())
+        .filter(|e| e.starts_with("call_"))
+        .collect();
     let mut uniq = calls.clone();
     uniq.sort();
     uniq.dedup();
-    assert_eq!(uniq.len(), calls.len(), "two entrypoints share a request event: {calls:?}");
+    assert_eq!(
+        uniq.len(),
+        calls.len(),
+        "two entrypoints share a request event: {calls:?}"
+    );
 
     // and both graphs stay partially deterministic
     let text = serde_json::to_string(&a.model).unwrap();
@@ -234,4 +305,3 @@ fn a_function_named_like_a_region_does_not_share_its_call_event() {
         .expect("the model and its plant must satisfy finite-product v1");
     assert!(parsed.control_plant.is_some());
 }
-

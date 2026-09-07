@@ -18,23 +18,38 @@ fn build() -> (ProgramIr, Abstraction) {
         "Vault.sol",
         "0.8.28+commit.7893614a.Linux.g++",
         include_str!("../../mulu-yul/tests/fixtures/Vault.yul"),
-        &serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Vault.abi.json")).unwrap(),
-        serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Vault.storage.json")).unwrap(),
+        &serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Vault.abi.json"))
+            .unwrap(),
+        serde_json::from_str(include_str!(
+            "../../mulu-yul/tests/fixtures/Vault.storage.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
-    let props = Spec::parse(SPEC).unwrap().compile("Vault", &ir.storage_layout).unwrap();
+    let props = Spec::parse(SPEC)
+        .unwrap()
+        .compile("Vault", &ir.storage_layout)
+        .unwrap();
     let a = Builder::new(&ir, &props).build();
     (ir, a)
 }
 
 fn goes<'a>(a: &'a Abstraction, from: &str, event: &str) -> Option<&'a str> {
-    a.model.transitions.iter().find(|t| t.from == from && t.event == event).map(|t| t.to.as_str())
+    a.model
+        .transitions
+        .iter()
+        .find(|t| t.from == from && t.event == event)
+        .map(|t| t.to.as_str())
 }
 
 #[test]
 fn the_modifier_guard_reaches_the_model() {
     let (_, a) = build();
-    assert!(a.report.complete(), "unsupported: {:?}", a.report.unsupported);
+    assert!(
+        a.report.complete(),
+        "unsupported: {:?}",
+        a.report.unsupported
+    );
 
     // Two source-level checks, and B is only reached once A passed, even
     // though A is written in another contract in another file.
@@ -42,7 +57,10 @@ fn the_modifier_guard_reaches_the_model() {
     assert_eq!(ids, vec!["A", "B"]);
     let b = a.model.checks.iter().find(|c| c.id == "B").unwrap();
     assert_eq!(b.depends_on, vec!["A".to_string()]);
-    assert!(!a.model.transitions.iter().any(|t| t.event == b.fail_event), "B must never fail");
+    assert!(
+        !a.model.transitions.iter().any(|t| t.event == b.fail_event),
+        "B must never fail"
+    );
 }
 
 #[test]
@@ -71,7 +89,10 @@ fn the_partition_is_refined_by_the_guard_in_the_imported_modifier() {
     assert_eq!(*sets[0], IntervalSet::le(U256::from(100u64)));
     assert_eq!(sets.len(), 3);
     assert!(
-        a.report.argument_predicates.iter().any(|p| p.id == "A" && p.source.contains("reached from")),
+        a.report
+            .argument_predicates
+            .iter()
+            .any(|p| p.id == "A" && p.source.contains("reached from")),
         "{:?}",
         a.report.argument_predicates
     );
@@ -96,8 +117,14 @@ fn the_two_examples_agree_on_the_shape_of_the_finding() {
         "Limits.sol",
         "0.8.28",
         include_str!("../../mulu-yul/tests/fixtures/Limits.yul"),
-        &serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Limits.abi.json")).unwrap(),
-        serde_json::from_str(include_str!("../../mulu-yul/tests/fixtures/Limits.storage.json")).unwrap(),
+        &serde_json::from_str(include_str!(
+            "../../mulu-yul/tests/fixtures/Limits.abi.json"
+        ))
+        .unwrap(),
+        serde_json::from_str(include_str!(
+            "../../mulu-yul/tests/fixtures/Limits.storage.json"
+        ))
+        .unwrap(),
     )
     .unwrap();
     let props = Spec::parse(include_str!("../../../examples/limits/Limits.spec.json"))
@@ -107,9 +134,16 @@ fn the_two_examples_agree_on_the_shape_of_the_finding() {
     let limits = Builder::new(&limits_ir, &props).build();
 
     let regions = |a: &Abstraction| -> Vec<IntervalSet> {
-        a.report.argument_regions.iter().map(|r| r.set.clone()).collect()
+        a.report
+            .argument_regions
+            .iter()
+            .map(|r| r.set.clone())
+            .collect()
     };
     assert_eq!(regions(&vault), regions(&limits));
     assert_eq!(vault.model.states.len(), limits.model.states.len());
-    assert_eq!(vault.model.transitions.len(), limits.model.transitions.len());
+    assert_eq!(
+        vault.model.transitions.len(),
+        limits.model.transitions.len()
+    );
 }

@@ -26,6 +26,15 @@ pub fn domain_in(
     ty: &str,
     enums: &std::collections::BTreeMap<String, u64>,
 ) -> Result<IntervalSet, String> {
+    // The slot of a dynamic array holds its length, and solc guards every
+    // `push` with `oldLen < 0xffffffffffffffff`, so no reachable length is
+    // above that. Without it the model kept a path where an array is full,
+    // which no chain reaches and which put a revert on every push.
+    if ty.trim().ends_with("[]") {
+        return Ok(IntervalSet::le(
+            (U256::from(1u8) << 64usize) - U256::from(2u8),
+        ));
+    }
     if let Some(name) = ty.trim().strip_prefix("enum ") {
         if let Some(n) = enums.get(name.trim()) {
             if *n > 0 {
@@ -47,7 +56,11 @@ pub fn domain_of(ty: &str) -> Result<IntervalSet, String> {
         return Ok(unsigned_bits(160));
     }
     if let Some(rest) = t.strip_prefix("uint") {
-        let bits: u32 = if rest.is_empty() { 256 } else { rest.parse().map_err(|_| bad(t))? };
+        let bits: u32 = if rest.is_empty() {
+            256
+        } else {
+            rest.parse().map_err(|_| bad(t))?
+        };
         if bits == 0 || bits > 256 || bits % 8 != 0 {
             return Err(bad(t));
         }
@@ -139,8 +152,12 @@ mod tests {
         assert!(domain_of("uint").unwrap().is_full());
         // 2^160 - 1 is the largest address
         let addr = domain_of("address").unwrap();
-        assert!(addr.contains(U256::from_str_radix("ffffffffffffffffffffffffffffffffffffffff", 16).unwrap()));
-        assert!(!addr.contains(U256::from_str_radix("10000000000000000000000000000000000000000", 16).unwrap()));
+        assert!(addr.contains(
+            U256::from_str_radix("ffffffffffffffffffffffffffffffffffffffff", 16).unwrap()
+        ));
+        assert!(!addr.contains(
+            U256::from_str_radix("10000000000000000000000000000000000000000", 16).unwrap()
+        ));
         assert_eq!(domain_of("address payable").unwrap(), addr);
     }
 
@@ -154,7 +171,23 @@ mod tests {
         assert_eq!(d, IntervalSet::le(u(4)));
         // an enum the table does not have falls back to the plain answer
         assert!(domain_in("enum Other.Thing", &enums).is_err());
-        assert_eq!(domain_in("uint8", &enums).unwrap(), domain_of("uint8").unwrap());
+        assert_eq!(
+            domain_in("uint8", &enums).unwrap(),
+            domain_of("uint8").unwrap()
+        );
+    }
+
+    /// solc guards every `push`, so a dynamic array's length is below
+    /// `0xffffffffffffffff` in every state the code can reach.
+    #[test]
+    fn a_dynamic_array_slot_holds_a_length_solc_keeps_bounded() {
+        let enums = std::collections::BTreeMap::new();
+        let d = domain_in("address[]", &enums).unwrap();
+        assert!(d.contains(u(1_000_000)));
+        assert!(!d.contains(U256::from(u64::MAX)));
+        assert_eq!(domain_in("uint256[]", &enums).unwrap(), d);
+        // a fixed-size array is not this: its slot holds an element
+        assert!(domain_in("uint8[4]", &enums).is_err());
     }
 
     #[test]
@@ -166,7 +199,9 @@ mod tests {
 
     #[test]
     fn what_p1a_cannot_model_is_refused() {
-        for t in ["int256", "int8", "bytes", "string", "uint7", "uint0", "uint512", "mapping", "MyStruct"] {
+        for t in [
+            "int256", "int8", "bytes", "string", "uint7", "uint0", "uint512", "mapping", "MyStruct",
+        ] {
             assert!(domain_of(t).is_err(), "{t} must be refused an exact domain");
         }
         // and the message says why, rather than being generic
@@ -215,10 +250,16 @@ mod tests {
             "t_uint8": {"label": "uint8", "numberOfBytes": "1", "encoding": "inplace"},
             "t_address": {"label": "address", "numberOfBytes": "20", "encoding": "inplace"}
         });
-        assert_eq!(label_of_type_id("t_uint8", &types).as_deref(), Some("uint8"));
+        assert_eq!(
+            label_of_type_id("t_uint8", &types).as_deref(),
+            Some("uint8")
+        );
         assert_eq!(bytes_of_type_id("t_address", &types), Some(20));
         // an id the table does not mention falls back to the id's own shape
-        assert_eq!(label_of_type_id("t_uint256", &types).as_deref(), Some("uint256"));
+        assert_eq!(
+            label_of_type_id("t_uint256", &types).as_deref(),
+            Some("uint256")
+        );
         assert_eq!(bytes_of_type_id("t_uint256", &types), None);
     }
 }

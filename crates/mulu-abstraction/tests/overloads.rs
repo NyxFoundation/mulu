@@ -32,7 +32,12 @@ fn ir_with_table() -> ProgramIr {
         YUL,
         &serde_json::from_str(ABI).unwrap(),
         serde_json::from_str(LAYOUT).unwrap(),
-        SolcFacts { origins: None, selectors: selectors(), immutables: Default::default(), enums: Default::default() },
+        SolcFacts {
+            origins: None,
+            selectors: selectors(),
+            immutables: Default::default(),
+            enums: Default::default(),
+        },
     )
     .unwrap()
 }
@@ -48,8 +53,11 @@ fn build(ir: &ProgramIr) -> Abstraction {
 #[test]
 fn the_compilers_table_decides_which_overload_a_selector_is() {
     let ir = ir_with_table();
-    let mut got: Vec<(&str, &str)> =
-        ir.entrypoints.iter().map(|e| (e.selector.as_str(), e.signature.as_str())).collect();
+    let mut got: Vec<(&str, &str)> = ir
+        .entrypoints
+        .iter()
+        .map(|e| (e.selector.as_str(), e.signature.as_str()))
+        .collect();
     got.sort();
     assert_eq!(
         got,
@@ -78,7 +86,11 @@ fn without_the_table_an_overload_is_reported_as_ambiguous_not_guessed() {
         .filter(|e| e.signature.contains("?overloaded"))
         .map(|e| e.selector.as_str())
         .collect();
-    assert_eq!(ambiguous.len(), 2, "both `set` selectors are ambiguous by name alone");
+    assert_eq!(
+        ambiguous.len(),
+        2,
+        "both `set` selectors are ambiguous by name alone"
+    );
     // the unambiguous one still resolves
     assert!(ir.entrypoints.iter().any(|e| e.signature == "limit()"));
 }
@@ -87,7 +99,11 @@ fn without_the_table_an_overload_is_reported_as_ambiguous_not_guessed() {
 fn each_overload_gets_the_domain_of_its_own_argument() {
     let ir = ir_with_table();
     let a = build(&ir);
-    assert!(a.report.complete(), "unsupported: {:?}", a.report.unsupported);
+    assert!(
+        a.report.complete(),
+        "unsupported: {:?}",
+        a.report.unsupported
+    );
 
     let byte = domain_of("uint8").unwrap();
     let calls: Vec<&str> = a
@@ -97,10 +113,19 @@ fn each_overload_gets_the_domain_of_its_own_argument() {
         .map(|e| e.id.as_str())
         .filter(|e| e.starts_with("call_set"))
         .collect();
-    let narrow: Vec<&&str> = calls.iter().filter(|c| c.starts_with("call_set_uint8#")).collect();
-    let wide: Vec<&&str> = calls.iter().filter(|c| c.starts_with("call_set_uint256#")).collect();
+    let narrow: Vec<&&str> = calls
+        .iter()
+        .filter(|c| c.starts_with("call_set_uint8#"))
+        .collect();
+    let wide: Vec<&&str> = calls
+        .iter()
+        .filter(|c| c.starts_with("call_set_uint256#"))
+        .collect();
     assert!(!narrow.is_empty() && !wide.is_empty());
-    assert!(wide.len() > narrow.len(), "the uint256 overload reaches more regions");
+    assert!(
+        wide.len() > narrow.len(),
+        "the uint256 overload reaches more regions"
+    );
 
     for c in &narrow {
         let idx: usize = c.rsplit("#X").next().unwrap().parse().unwrap();
@@ -160,7 +185,10 @@ fn the_guard_belongs_only_to_the_overload_that_declares_it() {
         .filter(|t| t.to == "bad" && t.from.starts_with("set"))
         .map(|t| t.from.as_str())
         .collect();
-    assert!(from_a_setter.is_empty(), "a setter reached bad: {from_a_setter:?}");
+    assert!(
+        from_a_setter.is_empty(),
+        "a setter reached bad: {from_a_setter:?}"
+    );
     assert_eq!(
         a.report.argument_regions[0].set,
         IntervalSet::le(U256::from(100u64))

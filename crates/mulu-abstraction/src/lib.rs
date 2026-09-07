@@ -1,8 +1,8 @@
-pub mod interval;
 pub mod call_property;
+pub mod interval;
 pub mod model;
-pub mod relation;
 pub mod predicate;
+pub mod relation;
 pub mod spec;
 pub mod types;
 pub mod value;
