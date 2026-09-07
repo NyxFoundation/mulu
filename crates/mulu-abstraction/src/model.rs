@@ -633,6 +633,46 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// The storage the deployment leaves, when every constructor write
+    /// resolves to a constant slot and a constant value. `Err` names the
+    /// first write that does not, because "the constructor writes storage"
+    /// told a reader nothing about which write or why.
+    fn constructor_storage(
+        &self,
+        writes: &[&mulu_yul::ir::Instruction],
+    ) -> Result<BTreeMap<usize, U256>, String> {
+        let mut out = BTreeMap::new();
+        for i in writes {
+            let Some(w) = &i.storage_write else {
+                return Err(
+                    "an instruction writes storage in a way the front end did not recognise as \
+                     a slot and a value"
+                        .to_string(),
+                );
+            };
+            let slot = mulu_yul::fold::fold_fixpoint(&w.slot);
+            let value = mulu_yul::fold::fold_fixpoint(&w.value);
+            let Some(slot) = crate::value::constant(&slot) else {
+                return Err(format!("the slot in `{}` is not a constant", w.slot_text));
+            };
+            let Some(value) = crate::value::constant(&value) else {
+                return Err(format!(
+                    "the value written to slot {slot} is `{}`, which is not a constant",
+                    w.value_text
+                ));
+            };
+            let Ok(slot) = usize::try_from(slot) else {
+                return Err(format!("slot {slot} is beyond the layout this models"));
+            };
+            if slot >= self.per_slot.len() {
+                return Err(format!("slot {slot} is not in the contract's storage layout"));
+            }
+            // A later write wins, which is the order the constructor runs in.
+            out.insert(slot, value);
+        }
+        Ok(out)
+    }
+
     /// Which region of `slot` a value known to lie in `values` falls into.
     fn region_of(&self, slot: usize, values: &IntervalSet) -> Option<usize> {
         self.per_slot[slot].1.iter().position(|r| values.subset_of(r))
@@ -653,21 +693,37 @@ impl<'a> Walk<'a> {
             .flat_map(|f| f.blocks.iter().flat_map(|bl| bl.instructions.iter()))
             .filter(|i| i.effects.writes_storage)
             .collect();
-        let initial_storage: StorageRegion = if ctor_writes.is_empty() {
-            self.b.note(
-                "initial-state: the constructor writes no storage, so every slot starts at zero",
-            );
-            (0..self.per_slot.len())
-                .map(|i| {
-                    self.region_of(i, &IntervalSet::point(U256::ZERO)).unwrap_or(0)
-                })
-                .collect()
-        } else {
-            self.b.refuse(
-                "the constructor writes storage; P1a resolves only a constructor that leaves \
-                 every slot at zero",
-            );
-            (0..self.per_slot.len()).map(|_| 0).collect()
+        // A constructor that writes constants is as determined as one that
+        // writes nothing: `x = 5` leaves slot 0 at 5, and refusing it threw
+        // away every contract with an initialiser. What is refused is a
+        // constructor whose writes depend on something the model does not
+        // have, such as `owner = msg.sender`.
+        let initial_storage: StorageRegion = match self.constructor_storage(&ctor_writes) {
+            Ok(values) => {
+                if ctor_writes.is_empty() {
+                    self.b.note(
+                        "initial-state: the constructor writes no storage, so every slot starts \
+                         at zero",
+                    );
+                } else {
+                    self.b.note(
+                        "initial-state: every constructor write resolved to a constant, so the \
+                         model starts where the deployment leaves the contract",
+                    );
+                }
+                (0..self.per_slot.len())
+                    .map(|i| {
+                        let v = values.get(&i).copied().unwrap_or(U256::ZERO);
+                        self.region_of(i, &IntervalSet::point(v)).unwrap_or(0)
+                    })
+                    .collect()
+            }
+            Err(why) => {
+                self.b.refuse(&format!(
+                    "the constructor's effect on storage is not determined: {why}"
+                ));
+                (0..self.per_slot.len()).map(|_| 0).collect()
+            }
         };
 
         // idle states, one per storage region

@@ -152,3 +152,12 @@ mod tests {
         }
     }
 }
+
+/// The value of an expression that is already a literal, after folding.
+/// `None` for anything that still depends on something.
+pub fn constant(e: &Expr) -> Option<U256> {
+    match e {
+        Expr::Literal { text, .. } => crate::interval::parse_decimal(text).ok(),
+        _ => None,
+    }
+}
