@@ -15,9 +15,16 @@ pub enum ParseError {
     Message { line: usize, message: String },
 }
 
+/// Reserved inside Yul code, so never an identifier.
+///
+/// `object`, `code` and `data` are **not** here. They introduce the object
+/// language that wraps the code, and inside the code they are ordinary names:
+/// solc generates `function array_dataslot_…(ptr) -> data`, and treating
+/// `data` as reserved rejected every contract with an array, a struct or a
+/// mapping. The object parser matches them positionally instead.
 const KEYWORDS: &[&str] = &[
-    "object", "code", "data", "function", "let", "if", "switch", "case", "default", "for", "break",
-    "continue", "leave", "true", "false",
+    "function", "let", "if", "switch", "case", "default", "for", "break", "continue", "leave",
+    "true", "false",
 ];
 
 #[derive(Debug)]
@@ -351,6 +358,48 @@ pub fn parse_object(input: &str) -> Result<Parsed, ParseError> {
         });
     }
     Ok(Parsed { object, use_src: lexed.use_src })
+}
+
+
+#[cfg(test)]
+mod object_word_tests {
+    use super::*;
+
+    #[test]
+    fn data_is_a_name_inside_code_and_a_keyword_outside_it() {
+        // solc generates `-> data` for every array, struct and mapping
+        // helper. Treating `data` as reserved everywhere rejected all of them.
+        let p = parse_object(
+            r#"object "C" {
+                code {
+                    function array_dataslot_t_array$_t_uint256_$dyn_memory_ptr(ptr) -> data {
+                        data := add(ptr, 0x20)
+                    }
+                }
+                data "meta" hex"01"
+            }"#,
+        )
+        .expect("both uses of `data` in one object");
+        let f = p.object.functions();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].returns, vec!["data"]);
+        assert!(f[0].name.contains('$'), "a `$` belongs in a Yul identifier");
+    }
+
+    #[test]
+    fn object_and_code_are_names_inside_code_too() {
+        let p = parse_object(
+            r#"object "C" { code { function f(object, code) -> data { data := add(object, code) } } }"#,
+        )
+        .expect("the object words are ordinary names in code");
+        assert_eq!(p.object.functions()[0].params, vec!["object", "code"]);
+    }
+
+    #[test]
+    fn a_real_keyword_is_still_refused_as_a_name() {
+        assert!(parse_object(r#"object "C" { code { let function := 1 } }"#).is_err());
+        assert!(parse_object(r#"object "C" { code { let leave := 1 } }"#).is_err());
+    }
 }
 
 #[cfg(test)]

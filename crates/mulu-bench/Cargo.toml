@@ -1,0 +1,19 @@
+[package]
+name = "mulu-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mulu-bench"
+path = "src/main.rs"
+
+[dependencies]
+mulu-abstraction = { path = "../mulu-abstraction" }
+mulu-solc = { path = "../mulu-solc" }
+mulu-yul = { path = "../mulu-yul" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true

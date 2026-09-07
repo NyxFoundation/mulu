@@ -5,3 +5,5 @@
 /semantics/lake-manifest.json
 /analysis*/
 *.log
+/bench/corpus
+/bench/results*.json

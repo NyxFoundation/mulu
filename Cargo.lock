@@ -1760,6 +1760,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mulu-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "mulu-abstraction",
+ "mulu-solc",
+ "mulu-yul",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mulu-cli"
 version = "0.1.0"
 dependencies = [
