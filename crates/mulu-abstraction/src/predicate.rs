@@ -20,6 +20,16 @@ pub enum Predicate {
     False,
     /// Holds exactly when `var` takes a value in `set`.
     Over { var: String, set: IntervalSet },
+    /// Holds exactly when `left < right`, or `left <= right` when `strict` is
+    /// false. Both sides are variables.
+    ///
+    /// A comparison of two variables has no set to be over, so it could not
+    /// be an `Over` and was refused. It is how every array bounds check is
+    /// written: `lt(index, arrayLength)`, where the length is read from
+    /// storage rather than given. Deciding it needs both sides bound, which
+    /// is what the walk's environment supplies, and the form is closed under
+    /// negation: `!(a < b)` is `b <= a`.
+    Less { left: String, right: String, strict: bool },
 }
 
 impl Predicate {
@@ -27,6 +37,11 @@ impl Predicate {
         match self {
             Predicate::True => Predicate::False,
             Predicate::False => Predicate::True,
+            Predicate::Less { left, right, strict } => Predicate::Less {
+                left: right.clone(),
+                right: left.clone(),
+                strict: !strict,
+            },
             Predicate::Over { var, set } => {
                 Predicate::normalise(var.clone(), set.complement())
             }
@@ -55,6 +70,15 @@ impl Predicate {
                 }
                 Ok(Predicate::normalise(a.clone(), s.intersect(t)))
             }
+            // A relational comparison has no set to combine with. Refusing is
+            // what keeps the interval representation exact: a conjunction
+            // this could not represent would have to be approximated, and an
+            // approximated guard is the thing the whole design refuses.
+            (Predicate::Less { .. }, _) | (_, Predicate::Less { .. }) => Err(
+                "combining a comparison of two variables with another guard is outside the P1a \
+                 fragment"
+                    .into(),
+            ),
         }
     }
 
@@ -70,6 +94,15 @@ impl Predicate {
                 }
                 Ok(Predicate::normalise(a.clone(), s.union(t)))
             }
+            // A relational comparison has no set to combine with. Refusing is
+            // what keeps the interval representation exact: a conjunction
+            // this could not represent would have to be approximated, and an
+            // approximated guard is the thing the whole design refuses.
+            (Predicate::Less { .. }, _) | (_, Predicate::Less { .. }) => Err(
+                "combining a comparison of two variables with another guard is outside the P1a \
+                 fragment"
+                    .into(),
+            ),
         }
     }
 
@@ -82,11 +115,16 @@ impl Predicate {
     }
 
     /// The values of the variable that satisfy it (everything, for `True`).
+    ///
+    /// A relational comparison constrains no single variable, so it reports
+    /// the full set: it refines no partition, and it is decided at the walk
+    /// instead, where both sides are bound.
     pub fn set(&self) -> IntervalSet {
         match self {
             Predicate::True => IntervalSet::full(),
             Predicate::False => IntervalSet::empty(),
             Predicate::Over { set, .. } => set.clone(),
+            Predicate::Less { .. } => IntervalSet::full(),
         }
     }
 
@@ -97,6 +135,22 @@ impl Predicate {
         match self {
             Predicate::True => Some(true),
             Predicate::False => Some(false),
+            // Two sets in the order they must be in. Only the ends matter:
+            // everything between is covered by the order itself.
+            Predicate::Less { left, right, strict } => {
+                let (l, r) = (env.get(left)?, env.get(right)?);
+                let ((_, lhi), (rlo, _)) = (l.bounds()?, r.bounds()?);
+                let ((llo, _), (_, rhi)) = (l.bounds()?, r.bounds()?);
+                let holds = if *strict { lhi < rlo } else { lhi <= rlo };
+                let fails = if *strict { llo >= rhi } else { llo > rhi };
+                if holds {
+                    Some(true)
+                } else if fails {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
             Predicate::Over { var: v, set } => {
                 let Some(region) = env.get(v) else { return None };
                 if region.subset_of(set) {
@@ -117,6 +171,9 @@ impl fmt::Display for Predicate {
             Predicate::True => write!(f, "true"),
             Predicate::False => write!(f, "false"),
             Predicate::Over { var, set } => write!(f, "{var} ∈ {set}"),
+            Predicate::Less { left, right, strict } => {
+                write!(f, "{left} {} {right}", if *strict { "<" } else { "≤" })
+            }
         }
     }
 }
@@ -155,14 +212,11 @@ fn literal_of(e: &Expr) -> Option<U256> {
 }
 
 fn operand(e: &Expr, vars: &[String]) -> Result<Operand, String> {
+    let _ = vars;
     match e {
-        Expr::Ident { name, .. } => {
-            if vars.iter().any(|v| v == name) {
-                Ok(Operand::Var(name.clone()))
-            } else {
-                Err(format!("`{name}` is not one of this function's parameters"))
-            }
-        }
+        // Any name is a variable; whether it is *known* is the walk's
+        // question, not this one's.
+        Expr::Ident { name, .. } => Ok(Operand::Var(name.clone())),
         Expr::Literal { text, .. } => {
             parse_decimal(text).map(Operand::Lit).map_err(|e| e.to_string())
         }
@@ -174,10 +228,18 @@ fn operand(e: &Expr, vars: &[String]) -> Result<Operand, String> {
 
 /// `a op b` where exactly one side is a variable. `flip` gives the comparison
 /// to use when the variable is on the right.
+/// Which way an ordering runs, for the case where both sides are variables.
+#[derive(Clone, Copy)]
+enum Relation {
+    Less,
+    Greater,
+}
+
 fn compare(
     a: &Expr,
     b: &Expr,
     vars: &[String],
+    relation: Option<Relation>,
     on_left: impl Fn(U256) -> IntervalSet,
     on_right: impl Fn(U256) -> IntervalSet,
 ) -> Result<Predicate, String> {
@@ -187,9 +249,17 @@ fn compare(
         (Operand::Lit(_), Operand::Lit(_)) => {
             Err("a comparison of two literals should have been folded away".into())
         }
-        (Operand::Var(_), Operand::Var(_)) => {
-            Err("a comparison of two variables is outside the P1a fragment".into())
-        }
+        // Both sides variables. There is no set to be over, so it stays
+        // relational and is decided where both are bound.
+        (Operand::Var(a), Operand::Var(b)) => match relation {
+            Some(Relation::Less) => Ok(Predicate::Less { left: a, right: b, strict: true }),
+            Some(Relation::Greater) => Ok(Predicate::Less { left: b, right: a, strict: true }),
+            None => Err(
+                "a comparison of two variables that is not an ordering is outside the P1a \
+                 fragment"
+                    .into(),
+            ),
+        },
     }
 }
 
@@ -208,12 +278,14 @@ pub fn translate_in(e: &Expr, vars: &[String], domain: &IntervalSet) -> Result<P
             Ok(if v.is_zero() { Predicate::False } else { Predicate::True })
         }
         // A bare variable used as a condition means "non-zero".
+        // Any name may be a variable. Restricting them to the function's
+        // parameters refused a guard over a local even when the walk knew
+        // exactly what that local held; an unbound name is decided at the
+        // walk, where the answer is "not decided here" rather than "not a
+        // parameter".
         Expr::Ident { name, .. } => {
-            if vars.iter().any(|v| v == name) {
-                Ok(Predicate::Over { var: name.clone(), set: IntervalSet::ne_to(U256::ZERO) })
-            } else {
-                Err(format!("`{name}` is not one of this function's parameters"))
-            }
+            let _ = vars;
+            Ok(Predicate::Over { var: name.clone(), set: IntervalSet::ne_to(U256::ZERO) })
         }
         Expr::Call { name, args, .. } => {
             let arity = |n: usize| -> Result<(), String> {
@@ -232,12 +304,12 @@ pub fn translate_in(e: &Expr, vars: &[String], domain: &IntervalSet) -> Result<P
                 "gt" => {
                     arity(2)?;
                     let (l, r) = (strip_cleanup(&args[0], domain), strip_cleanup(&args[1], domain));
-                    compare(&l, &r, vars, IntervalSet::gt, IntervalSet::lt)
+                    compare(&l, &r, vars, Some(Relation::Greater), IntervalSet::gt, IntervalSet::lt)
                 }
                 "lt" => {
                     arity(2)?;
                     let (l, r) = (strip_cleanup(&args[0], domain), strip_cleanup(&args[1], domain));
-                    compare(&l, &r, vars, IntervalSet::lt, IntervalSet::gt)
+                    compare(&l, &r, vars, Some(Relation::Less), IntervalSet::lt, IntervalSet::gt)
                 }
                 "eq" => {
                     arity(2)?;
@@ -247,7 +319,7 @@ pub fn translate_in(e: &Expr, vars: &[String], domain: &IntervalSet) -> Result<P
                     if l.render() == r.render() {
                         return Ok(Predicate::True);
                     }
-                    compare(&l, &r, vars, IntervalSet::eq_to, IntervalSet::eq_to)
+                    compare(&l, &r, vars, None, IntervalSet::eq_to, IntervalSet::eq_to)
                 }
                 // Boolean combination. Yul's `and`/`or` are bitwise, so this is
                 // only valid when both sides are 0/1, which holds for the
@@ -337,10 +409,9 @@ mod tests {
         for (expr, vars) in [
             ("slt(x, 100)", &["x"][..]),          // signed
             ("gt(sub(a, b), 32)", &["a", "b"]),   // arithmetic
-            ("gt(x, y)", &["x", "y"]),            // two variables
             ("gt(calldatasize(), 4)", &["x"]),    // environment read
             ("callvalue()", &["x"]),              // not a comparison
-            ("gt(unknown_var, 1)", &["x"]),       // unresolved name
+            ("slt(x, 1)", &["x"]),                // signed
         ] {
             let vars: Vec<String> = vars.iter().map(|s| s.to_string()).collect();
             let src = format!("object \"T\" {{ code {{ let c := {expr} }} }}");
@@ -350,6 +421,55 @@ mod tests {
             };
             assert!(translate(e, &vars).is_err(), "{expr} must be refused, not guessed");
         }
+    }
+
+    #[test]
+    fn a_name_the_walk_does_not_know_is_undecided_never_true() {
+        // Two variables and an unresolved name used to be refused here.
+        // They are translated now, because whether a name is *known* is the
+        // walk's question and it has the environment to answer it. The
+        // guarantee that matters is unchanged and is stated where it belongs:
+        // an unbound name is never decided, and in particular never true.
+        for expr in ["gt(x, y)", "lt(x, y)", "gt(unknown_var, 1)", "unknown_var"] {
+            let src = format!("object \"T\" {{ code {{ let c := {expr} }} }}");
+            let p = parse_object(&src).unwrap();
+            let mulu_yul::Stmt::Let { value: Some(e), .. } = &p.object.code.stmts[0] else {
+                panic!()
+            };
+            let pred = translate(e, &["x".to_string(), "y".to_string()]).expect(expr);
+            assert_eq!(pred.decide(&crate::value::Env::new()), None, "{expr}");
+        }
+    }
+
+    #[test]
+    fn a_bounds_check_is_decided_by_the_two_regions() {
+        // `lt(index, arrayLength)`, which is how solc writes every one.
+        let src = "object \"T\" { code { let c := lt(index, len) } }";
+        let p = parse_object(src).unwrap();
+        let mulu_yul::Stmt::Let { value: Some(e), .. } = &p.object.code.stmts[0] else {
+            panic!()
+        };
+        let pred = translate(e, &[]).unwrap();
+        let env = |i: IntervalSet, l: IntervalSet| {
+            crate::value::Env::from([("index".to_string(), i), ("len".to_string(), l)])
+        };
+        // index in [0,4] and len in [5,5]: in bounds, whatever the index is
+        assert_eq!(
+            pred.decide(&env(IntervalSet::le(u(4)), IntervalSet::eq_to(u(5)))),
+            Some(true)
+        );
+        // index in [5,9] and len in [0,5]: out of bounds, whatever it is
+        assert_eq!(
+            pred.decide(&env(IntervalSet::range(u(5), u(9)), IntervalSet::le(u(5)))),
+            Some(false)
+        );
+        // overlapping: neither, and the walk must not be told either
+        assert_eq!(pred.decide(&env(IntervalSet::le(u(9)), IntervalSet::le(u(9)))), None);
+        // and the negation is the other order, which is what a check reads
+        assert_eq!(
+            pred.negate().decide(&env(IntervalSet::le(u(4)), IntervalSet::eq_to(u(5)))),
+            Some(false)
+        );
     }
 
     #[test]

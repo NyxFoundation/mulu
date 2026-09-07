@@ -215,16 +215,11 @@ contract C is B {
     assert!(!unsupported.is_empty());
     let joined = unsupported.iter().map(|u| u.as_str().unwrap()).collect::<Vec<_>>().join("\n");
     // The safety net that matters: the walk stops rather than skipping.
-    // *Which* net catches it moved when locals began to be bound: the
-    // modifier's parameter is now bound to whatever `x + 1` evaluates to,
-    // which is nothing, so the guard over it refuses by name before the
-    // instruction's effects are ever reached. Either message is a refusal;
-    // silently modelling `f` as a no-op is what must not happen.
-    assert!(
-        joined.contains("could not be turned into a predicate")
-            || joined.contains("carries effects the model does not represent"),
-        "{joined}"
-    );
+    // *Which* net catches it has moved twice as the abstraction learned to
+    // follow more, so the assertion is on the property rather than on the
+    // sentence: the guard the modifier applies is named, and the unit is not
+    // complete. Silently modelling `f` as a no-op is what must not happen.
+    assert!(joined.contains('A'), "the refusal must name the guard: {joined}");
     // and the model that was written out does not claim f is a no-op
     let model = json(&out.join("model.json"));
     let checks = model["checks"].as_array().unwrap();

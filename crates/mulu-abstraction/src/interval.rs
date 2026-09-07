@@ -87,6 +87,13 @@ impl IntervalSet {
         Self::point(v).complement()
     }
 
+    /// The smallest and largest value in the set, or `None` when it is empty.
+    /// A comparison of two sets needs only these: everything between is
+    /// covered by the order.
+    pub fn bounds(&self) -> Option<(U256, U256)> {
+        Some((self.ranges.first()?.0, self.ranges.last()?.1))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ranges.is_empty()
     }
