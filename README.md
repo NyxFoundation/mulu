@@ -311,6 +311,13 @@ all, so mulu refuses to compare one and records it against
 substitutes `default { break }`; solc always writes `default {}` itself, so
 nothing compiled from Solidity reaches it.
 
+Both are already fixed upstream and not merged, in
+[EVMYulLean#84](https://github.com/NethermindEth/EVMYulLean/pull/84), open
+since May 2026 with no review. Pointing the pin at that branch makes all four
+cases agree, which is how that was checked. The pin stays on `main` rather
+than on an unreviewed personal branch, so the probe keeps reporting two
+wrong.
+
 The rule is executable, not documentary. `verify` recomputes each finding's
 scope from the ledger and refuses a report that claims more; it also refuses a
 ledger that claims a discharge, since the tool discharges nothing and cannot

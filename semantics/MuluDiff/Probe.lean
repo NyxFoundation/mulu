@@ -24,9 +24,18 @@ all, so `mulu-yul/src/lean.rs` refuses to compare one and records it against
 the obligation it defeats. The second never arises from solc, which always
 writes `default {}` itself.
 
+Both are already fixed, and not merged. NethermindEth/EVMYulLean#84
+("Align Yul interpreter with Solidity semantics", opened 2026-05-15) makes
+every case here agree; running this probe against that branch was how that was
+established. It has no review and no comment, and upstream last pushed in
+November 2025, so the pin stays on `main` and these two stay wrong. Moving to
+the branch would also cost a small change here: it gives `Exception.Revert` a
+state argument.
+
 Run with `make semantics-probe`. A case that starts agreeing is as
 interesting as one that starts disagreeing, so the expected strings are
-pinned and the probe fails if any of them changes.
+pinned and the probe fails if any of them changes. That is not decoration:
+it is what reported the fix when the pin was pointed at #84.
 -/
 
 open EvmYul EvmYul.Yul EvmYul.Yul.Ast
