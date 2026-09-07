@@ -436,7 +436,7 @@ impl<'a> Lowering<'a> {
             let reduce = |e: &Expr| -> Option<usize> {
                 let mut cur = fold_fixpoint(e);
                 for _ in 0..32 {
-                    let next = fold_fixpoint(&self.inline_aliases(&cur));
+                    let next = fold_fixpoint(&self.inline_aliases(&strip_byte_slice(&cur)));
                     if next.render() == cur.render() {
                         break;
                     }
@@ -454,6 +454,8 @@ impl<'a> Lowering<'a> {
     }
 
     /// Replace calls to pure alias helpers by their bodies, one layer at a time.
+    ///
+    /// See below for the other half of this: `update_byte_slice`.
     fn inline_aliases(&self, e: &Expr) -> Expr {
         match e {
             Expr::Ident { .. } | Expr::Literal { .. } => e.clone(),
@@ -1295,5 +1297,36 @@ mod tests {
         assert_eq!(kind_of("fun_setLimit_27"), FunctionKind::Body);
         assert_eq!(kind_of("constructor_Limits_38"), FunctionKind::Constructor);
         assert_eq!(kind_of("allocate_unbounded"), FunctionKind::Helper);
+    }
+}
+
+/// `update_byte_slice_N_shift_0(sload(slot), v)` down to `v`.
+///
+/// A slot holding a variable narrower than a word is written by reading the
+/// slot, masking the variable's bytes out and the new value's bytes in. The
+/// bytes that survive belong to the *other* variables packed in that slot,
+/// which this write does not change; the value of the variable being written
+/// is the one inserted. Without this only `uint256` writes were recognised as
+/// writes at all, because theirs is the one mask that folds away, and every
+/// `address`, `bool` and `enum` field looked to the model like an instruction
+/// with effects it could not represent.
+fn strip_byte_slice(e: &Expr) -> Expr {
+    match e {
+        Expr::Call { name, args, src } => {
+            if name.starts_with("update_byte_slice_") && name.ends_with("_shift_0") && args.len() == 2
+            {
+                if let Expr::Call { name: inner, .. } = &args[0] {
+                    if inner == "sload" {
+                        return strip_byte_slice(&args[1]);
+                    }
+                }
+            }
+            Expr::Call {
+                name: name.clone(),
+                args: args.iter().map(strip_byte_slice).collect(),
+                src: *src,
+            }
+        }
+        other => other.clone(),
     }
 }

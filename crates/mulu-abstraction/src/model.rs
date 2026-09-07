@@ -309,21 +309,36 @@ impl<'a> Builder<'a> {
             // The argument's domain comes from its ABI type, not from the
             // machine word. A uint8 argument has 256 values; treating it as a
             // full word invents regions no type-correct call can reach.
+            //
+            // A dynamic type reaches the body as more words than the ABI
+            // lists it as: `f(bytes)` takes a pointer and a length. Then the
+            // types line up with nothing, and every body parameter takes the
+            // whole word.
             let abi_params = signature_params(&e.signature);
-            if abi_params.len() != f.parameters.len() {
-                self.refuse(format!(
-                    "entrypoint {}: the ABI lists {} parameter(s) but the body takes {}",
-                    e.signature,
+            let arities_match = abi_params.len() == f.parameters.len();
+            if !arities_match {
+                self.note(format!(
+                    "whole-word-argument: the ABI lists {} parameter(s) of {} and the body takes \
+                     {}, which is how solc passes a dynamic type. Each body parameter ranges \
+                     over the whole 256-bit word",
                     abi_params.len(),
+                    e.signature,
                     f.parameters.len()
                 ));
-                continue;
             }
             let mut params = Vec::new();
             let mut bad = false;
-            for (ty, name) in abi_params.iter().zip(f.parameters.iter()) {
-                match crate::types::domain_of(ty) {
-                    Ok(domain) => {
+            for (i, name) in f.parameters.iter().enumerate() {
+                let ty = if arities_match {
+                    abi_params[i].clone()
+                } else {
+                    "uint256".to_string()
+                };
+                match crate::types::domain_or_whole_word(&ty) {
+                    Ok((domain, note)) => {
+                        if let Some(n) = note {
+                            self.note(n);
+                        }
                         params.push(Param { name: name.clone(), ty: ty.clone(), domain })
                     }
                     Err(why) => {
@@ -382,7 +397,22 @@ impl<'a> Builder<'a> {
     /// boolean algebra they generate, plus the combinations that turned out
     /// to be unsatisfiable.
     fn partition(sets: &[(String, IntervalSet)]) -> (Vec<IntervalSet>, Vec<String>) {
-        let mut atoms = vec![(IntervalSet::full(), Vec::<(String, bool)>::new())];
+        Self::partition_within(&IntervalSet::full(), sets)
+    }
+
+    /// The same, over a universe smaller than the whole word.
+    ///
+    /// A slot's type is not a boundary to split on, it is the universe the
+    /// slot lives in. Splitting on it produced a second region holding the
+    /// values the type cannot take, and the region product over the slots is
+    /// what the walk enumerates: a contract with seven `address` and `bool`
+    /// slots asked for 128 storage regions, 127 of which no deployment can
+    /// reach.
+    fn partition_within(
+        universe: &IntervalSet,
+        sets: &[(String, IntervalSet)],
+    ) -> (Vec<IntervalSet>, Vec<String>) {
+        let mut atoms = vec![(universe.clone(), Vec::<(String, bool)>::new())];
         let mut infeasible = Vec::new();
         for (name, s) in sets {
             let mut next = Vec::new();
@@ -422,19 +452,25 @@ impl<'a> Builder<'a> {
         let mut per_slot: Vec<(String, Vec<IntervalSet>)> = Vec::new();
         for v in self.storage.clone() {
             let mut sets: Vec<(String, IntervalSet)> = Vec::new();
-            // A slot cannot hold values its type has no room for.
+            // A slot cannot hold values its type has no room for. That is the
+            // universe it lives in, not a line to cut it along: cutting gave
+            // every `address` slot a region holding the values an address
+            // cannot be, and the walk enumerates the product over the slots.
             let type_label = v.type_label.clone().unwrap_or_else(|| v.type_id.clone());
-            if let Ok(d) = crate::types::domain_of(&type_label) {
-                if !d.is_full() {
-                    storage_preds.push(PredicateInfo {
-                        id: format!("type:{}", v.label),
-                        source: format!("the declared type of {}", v.label),
-                        text: format!("{} is {type_label}", v.label),
-                        set: d.clone(),
-                    });
-                    sets.push((format!("type:{}", v.label), d));
+            let universe = match crate::types::domain_of(&type_label) {
+                Ok(d) => {
+                    if !d.is_full() {
+                        storage_preds.push(PredicateInfo {
+                            id: format!("type:{}", v.label),
+                            source: format!("the declared type of {}", v.label),
+                            text: format!("{} is {type_label}", v.label),
+                            set: d.clone(),
+                        });
+                    }
+                    d
                 }
-            }
+                Err(_) => IntervalSet::full(),
+            };
             sets.extend(
                 self.props
                     .iter()
@@ -449,7 +485,7 @@ impl<'a> Builder<'a> {
                         (p.id.clone(), p.predicate.set())
                     }),
             );
-            let (regions, infeasible) = Self::partition(&sets);
+            let (regions, infeasible) = Self::partition_within(&universe, &sets);
             for i in infeasible {
                 self.discharged.push(format!("storage {}: {i} is unsatisfiable", v.label));
             }
@@ -1264,8 +1300,8 @@ impl<'a> Walk<'a> {
         // because the fork count is exponential in the first: a function
         // guarded by eight mapping reads has 256 paths, and past that the
         // model costs more than it says.
-        const MAX_SPLITS: usize = 12;
-        const MAX_FORKS: usize = 512;
+        const MAX_SPLITS: usize = 24;
+        const MAX_FORKS: usize = 4096;
         let planned: usize = entries
             .iter()
             .map(|e| {
@@ -1341,11 +1377,12 @@ impl<'a> Walk<'a> {
                                 if sp.len() >= MAX_SPLITS || forks > MAX_FORKS {
                                     self.b.refuse(format!(
                                         "{}: more of this function turns on values the model \
-                                         does not have than the limit allows ({MAX_SPLITS} \
-                                         undecided guards on one path, {MAX_FORKS} paths); \
-                                         the model is not built rather than built from part \
-                                         of it",
-                                        e.signature
+                                         does not have than the limit allows ({} on one path, \
+                                         limit {MAX_SPLITS}; {forks} paths, limit {MAX_FORKS}); \
+                                         the last was {what}. The model is not built rather \
+                                         than built from part of it",
+                                        e.signature,
+                                        sp.len()
                                     ));
                                     break;
                                 }
@@ -1543,6 +1580,13 @@ impl<'a> Walk<'a> {
         memory.insert(U256::from(64u8), IntervalSet::point(U256::from(0x80u8)));
         let mut steps: Vec<Step> = Vec::new();
         let mut seen_checks: Vec<String> = Vec::new();
+        // Conditions this path has already taken a side on, by canonical
+        // term. `require(amount <= balances[msg.sender])` and the underflow
+        // check on `balances[msg.sender] -= amount` are two conditions over
+        // the same two values, and without this the walk forked on each and
+        // produced a path where the first passed and the second failed. That
+        // path is not one the program has, and the paths multiply.
+        let mut facts: BTreeMap<String, bool> = BTreeMap::new();
         let mut frames: Vec<Frame> = vec![Frame {
             func: e.func.clone(),
             block: 0,
@@ -1552,6 +1596,16 @@ impl<'a> Walk<'a> {
                 .iter()
                 .zip(args.iter())
                 .map(|(p, a)| (p.name.clone(), self.arg_regions[*a].clone()))
+                .collect(),
+            terms: e
+                .params
+                .iter()
+                .map(|p| {
+                    (
+                        p.name.clone(),
+                        mulu_yul::Expr::Ident { name: p.name.clone(), src: None },
+                    )
+                })
                 .collect(),
             returns_to: vec![],
             visited: BTreeSet::new(),
@@ -1577,9 +1631,9 @@ impl<'a> Walk<'a> {
                 }
             }
             let depth = frames.len();
-            let (func, block, index, env) = {
+            let (func, block, index, env, terms) = {
                 let fr = frames.last().expect("a frame");
-                (fr.func.clone(), fr.block, fr.index, fr.env.clone())
+                (fr.func.clone(), fr.block, fr.index, fr.env.clone(), fr.terms.clone())
             };
             let f = self.b.ir.function(&func).ok_or("no such function")?.clone();
             let blk = f.block(block).clone();
@@ -1600,12 +1654,13 @@ impl<'a> Walk<'a> {
                         .or_else(|| self.decide_cond(&c.condition, &env, &storage, &memory))
                     {
                         Some(v) => v,
-                        None => {
-                            splits.next().ok_or_else(|| TraceStop::Undecided {
-                                ways: 2,
-                                what: format!("check {} in {func}", c.id),
-                            })? == 1
-                        }
+                        None => decide_or_split(
+                            &c.condition,
+                            &terms,
+                            &mut facts,
+                            &mut splits,
+                            || format!("check {} in {func}", c.id),
+                        )?,
                     };
                     steps.push(Step::Check {
                         id: c.id.clone(),
@@ -1644,10 +1699,19 @@ impl<'a> Walk<'a> {
                         Some(to) => to,
                         None => {
                             let ways = self.per_slot[slot_idx].1.len();
-                            splits.next().ok_or_else(|| TraceStop::Undecided {
-                                ways,
-                                what: format!("the value written to {slot_label}"),
-                            })?
+                            // A slot with one region has one place the write
+                            // can land, so there is nothing to choose. Asking
+                            // for a decision anyway doubled the path count
+                            // for every store of an unknown value, which is
+                            // most stores.
+                            if ways <= 1 {
+                                0
+                            } else {
+                                splits.next().ok_or_else(|| TraceStop::Undecided {
+                                    ways,
+                                    what: format!("the value written to {slot_label}"),
+                                })?
+                            }
                         }
                     };
                     storage[slot_idx] = to;
@@ -1711,20 +1775,33 @@ impl<'a> Walk<'a> {
                         if let Ok(set) = self.eval(v, &env, &storage, &memory) {
                             frames.last_mut().unwrap().env.insert(targets[0].clone(), set);
                         } else {
-                            // Not knowing a local is not an error. A guard
-                            // that needs it refuses later, by name.
+                            // Not knowing a local's *value* is not an error.
+                            // A guard that needs it forks later, by name.
                             frames.last_mut().unwrap().env.remove(&targets[0]);
+                        }
+                        // Its term is known whether or not its value is, and
+                        // the term is what says two locals hold the same
+                        // thing.
+                        let fr = frames.last_mut().unwrap();
+                        match canon(v, &terms) {
+                            Some(t) => {
+                                fr.terms.insert(targets[0].clone(), t);
+                            }
+                            None => {
+                                fr.terms.remove(&targets[0]);
+                            }
                         }
                         continue;
                     }
                     mulu_yul::ir::Op::Let { targets, value: None } if only_computes => {
                         // `let a, b` is zero until assigned.
                         for t in targets {
-                            frames
-                                .last_mut()
-                                .unwrap()
-                                .env
-                                .insert(t.clone(), IntervalSet::point(U256::ZERO));
+                            let fr = frames.last_mut().unwrap();
+                            fr.env.insert(t.clone(), IntervalSet::point(U256::ZERO));
+                            fr.terms.insert(
+                                t.clone(),
+                                mulu_yul::Expr::Literal { text: "0".into(), src: None },
+                            );
                         }
                         continue;
                     }
@@ -1735,7 +1812,9 @@ impl<'a> Walk<'a> {
                         // Several targets from one call: nothing here can say
                         // which value went where, so they stay unknown.
                         for t in targets {
-                            frames.last_mut().unwrap().env.remove(t);
+                            let fr = frames.last_mut().unwrap();
+                            fr.env.remove(t);
+                            fr.terms.remove(t);
                         }
                         continue;
                     }
@@ -1759,11 +1838,13 @@ impl<'a> Walk<'a> {
                                 return Err(format!("call depth limit reached at {callee}").into());
                             }
                             let inner = bind_arguments(g, &args, &env)?;
+                            let inner_terms = bind_terms(g, &args, &terms);
                             frames.push(Frame {
                                 func: callee,
                                 block: 0,
                                 index: 0,
                                 env: inner,
+                                terms: inner_terms,
                                 returns_to: targets,
                                 visited: BTreeSet::new(),
                             });
@@ -1782,17 +1863,56 @@ impl<'a> Walk<'a> {
                                 return Err(format!("call depth limit reached at {callee}").into());
                             }
                             let inner = bind_arguments(g, &args, &env)?;
+                            let inner_terms = bind_terms(g, &args, &terms);
                             frames.push(Frame {
                                 func: callee,
                                 block: 0,
                                 index: 0,
                                 env: inner,
+                                terms: inner_terms,
                                 returns_to: vec![],
                                 visited: BTreeSet::new(),
                             });
                             continue;
                         }
                     }
+                }
+
+                // An instruction that can revert but writes nothing is a
+                // cleanup with a panic in it: solc's `cleanup_t_enum` reverts
+                // on a value outside the enum, and it sits *inside* the
+                // condition rather than being a call the walk can enter. Two
+                // ways: it does not panic and the instruction is the value it
+                // computes, or it does and the transaction ends there.
+                // Skipping it would drop the revert path, which is the hole
+                // this net exists to stop.
+                if ins.effects.can_revert && !ins.effects.writes_storage {
+                    let reverts = decide_or_split(
+                        &mulu_yul::Expr::Ident {
+                            name: format!("panic-in:{func}#{block}#{index}"),
+                            src: None,
+                        },
+                        &terms,
+                        &mut facts,
+                        &mut splits,
+                        || format!("a panic inside an instruction in {func}"),
+                    )?;
+                    if reverts {
+                        return Ok(Trace { steps, ending: Ending::Revert });
+                    }
+                    // It computes; whatever it defines stays unknown, which
+                    // is what the arms above would have left had it not been
+                    // able to revert.
+                    if let mulu_yul::ir::Op::Let { targets, .. }
+                    | mulu_yul::ir::Op::Assign { targets, .. } = &ins.op
+                    {
+                        for t in targets {
+                            let fr = frames.last_mut().unwrap();
+                            fr.env.remove(t);
+                            fr.terms.remove(t);
+                        }
+                    }
+                    continue;
                 }
 
                 if ins.effects.writes_storage || ins.effects.can_revert {
@@ -1829,12 +1949,13 @@ impl<'a> Walk<'a> {
                             .or_else(|| self.decide_cond(&c.condition, &env, &storage, &memory))
                         {
                             Some(v) => v,
-                            None => {
-                                splits.next().ok_or_else(|| TraceStop::Undecided {
-                                    ways: 2,
-                                    what: format!("check {} in {func}", c.id),
-                                })? == 1
-                            }
+                            None => decide_or_split(
+                                &c.condition,
+                                &terms,
+                                &mut facts,
+                                &mut splits,
+                                || format!("check {} in {func}", c.id),
+                            )?,
                         };
                         steps.push(Step::Check {
                             id: c.id.clone(),
@@ -1866,12 +1987,9 @@ impl<'a> Walk<'a> {
                         .or_else(|| self.decide_cond(cond, &env, &storage, &memory))
                     {
                         Some(v) => v,
-                        None => {
-                            splits.next().ok_or_else(|| TraceStop::Undecided {
-                                ways: 2,
-                                what: format!("a branch in {func}"),
-                            })? == 1
-                        }
+                        None => decide_or_split(cond, &terms, &mut facts, &mut splits, || {
+                            format!("a branch in {func}")
+                        })?,
                     };
                     let target = if taken { *then_block } else { *else_block };
                     let fr = frames.last_mut().unwrap();
@@ -1971,20 +2089,57 @@ impl<'a> Walk<'a> {
                             }
                         }
                     };
+                    // Which cases the value could match. One means the switch
+                    // is decided; more than one, or one plus the chance of
+                    // matching none, means it is not, and the walk goes each
+                    // way. A `bool` reaching a `switch` is the common shape:
+                    // the value is in {0, 1} and case 0 is one of two ways.
+                    let mut possible: Vec<Option<usize>> = Vec::new();
+                    let mut certain = false;
                     for (lit, block) in cases {
                         let v = crate::interval::parse_decimal(lit)
                             .map_err(|e| format!("a switch case label is not a literal: {e}"))?;
                         let case = IntervalSet::point(v);
                         if set.subset_of(&case) {
-                            target = Some(*block);
+                            possible.clear();
+                            possible.push(Some(*block));
+                            certain = true;
                             break;
                         }
                         if !set.disjoint_from(&case) {
-                            return Err(format!(
-                                "a switch value {set} straddles the case {v}, so which branch \
-                                 runs is not determined"
-                            ).into());
+                            possible.push(Some(*block));
                         }
+                    }
+                    if !certain {
+                        // The value can also match no case at all, unless the
+                        // cases cover it between them.
+                        let covered = cases
+                            .iter()
+                            .filter_map(|(lit, _)| crate::interval::parse_decimal(lit).ok())
+                            .fold(IntervalSet::empty(), |acc, v| {
+                                acc.union(&IntervalSet::point(v))
+                            });
+                        if !set.subset_of(&covered) {
+                            possible.push(*default);
+                        }
+                    }
+                    if possible.len() > 1 {
+                        let ways = possible.len();
+                        let pick = splits.next().ok_or_else(|| TraceStop::Undecided {
+                            ways,
+                            what: format!("a switch in {func}"),
+                        })?;
+                        target = possible[pick.min(ways - 1)];
+                        if target.is_none() {
+                            // Nothing matched and there is no default.
+                            frames.pop();
+                            if frames.is_empty() {
+                                return Ok(Trace { steps, ending: Ending::Return });
+                            }
+                            continue;
+                        }
+                    } else {
+                        target = possible.first().copied().flatten();
                     }
                     let target = match (target, default) {
                         (Some(t), _) => t,
@@ -2453,6 +2608,11 @@ struct Frame {
     index: usize,
     /// What this frame knows: parameter name to the values it can take.
     env: crate::value::Env,
+    /// The same names, as expressions in terms of the entrypoint's arguments
+    /// and the reads the model cannot resolve. Two locals holding the same
+    /// value render the same here, which is how the walk recognises a
+    /// condition it has already taken a side on.
+    terms: BTreeMap<String, mulu_yul::Expr>,
     /// The caller's names for this call's results. Empty for a call made as
     /// a statement, which has none.
     returns_to: Vec<String>,
@@ -2516,6 +2676,65 @@ fn bind_arguments(
         }
     }
     Ok(env)
+}
+
+/// Take a side on a condition the regions do not decide.
+///
+/// If this path already took a side on a condition with the same canonical
+/// term, take the same side: `require(amount <= bal)` followed by the
+/// underflow check on `bal -= amount` is one relation asked twice, and
+/// forking on each produced a path where the first held and the second did
+/// not. Otherwise fork, and remember the side for the rest of the path.
+fn decide_or_split(
+    cond: &mulu_yul::Expr,
+    terms: &BTreeMap<String, mulu_yul::Expr>,
+    facts: &mut BTreeMap<String, bool>,
+    splits: &mut impl Iterator<Item = usize>,
+    what: impl Fn() -> String,
+) -> Result<bool, TraceStop> {
+    let key = canon(cond, terms).map(|t| t.render());
+    if let Some(k) = &key {
+        if let Some(known) = facts.get(k) {
+            return Ok(*known);
+        }
+    }
+    let side = splits.next().ok_or_else(|| TraceStop::Undecided { ways: 2, what: what() })? == 1;
+    if let Some(k) = key {
+        facts.insert(k, side);
+    }
+    Ok(side)
+}
+
+/// The callee's parameters, as terms in the caller's names.
+fn bind_terms(
+    callee: &Function,
+    args: &[mulu_yul::Expr],
+    caller: &BTreeMap<String, mulu_yul::Expr>,
+) -> BTreeMap<String, mulu_yul::Expr> {
+    let mut out = BTreeMap::new();
+    for (i, a) in args.iter().enumerate() {
+        let Some(param) = callee.parameters.get(i) else { break };
+        if let Some(t) = canon(a, caller) {
+            out.insert(param.clone(), t);
+        }
+    }
+    out
+}
+
+/// The canonical term of an expression: every local replaced by what defines
+/// it, folded. Two expressions with the same term denote the same value, and
+/// that is all the fact store needs — it never has to decide the value, only
+/// notice that a condition is one it has already taken a side on.
+///
+/// Bounded, because substitution can grow a term faster than it is worth:
+/// past the cap there is no term, and a condition over it forks as before.
+fn canon(e: &mulu_yul::Expr, terms: &BTreeMap<String, mulu_yul::Expr>) -> Option<mulu_yul::Expr> {
+    const MAX_TERM: usize = 4096;
+    let out = mulu_yul::fold::fold_fixpoint(&e.substitute(terms));
+    if out.render().len() > MAX_TERM {
+        return None;
+    }
+    Some(out)
 }
 
 /// Every way of picking one item from each list, in a stable order. With no

@@ -8,10 +8,11 @@
 //!
 //! The same applies to storage: a `uint8` slot cannot hold 300.
 //!
-//! Types P1a does not model are refused. Signed integers are refused because
-//! the interval arithmetic here is unsigned; `bytesN` because its value sits
-//! left-aligned in the word, which is a different encoding than the numeric
-//! types share.
+//! A type whose values do not form an interval set is not refused: it is
+//! given the whole word, which is sound and says less. Signed integers are
+//! the exception. Reading a signed value as unsigned does not widen the
+//! domain, it reorders it, and every comparison the model makes would be the
+//! wrong one.
 
 use crate::interval::{IntervalSet, U256};
 
@@ -37,12 +38,35 @@ pub fn domain_of(ty: &str) -> Result<IntervalSet, String> {
             "`{t}` is signed; P1a reasons over unsigned uint256 words only"
         ));
     }
-    if t.starts_with("bytes") || t == "string" {
-        return Err(format!(
-            "`{t}` is not a numeric word; P1a models uint, address and bool"
-        ));
+    if t == "bytes32" {
+        // A full word, left-aligned or not: every value is possible.
+        return Ok(IntervalSet::full());
     }
     Err(bad(t))
+}
+
+/// The domain to reason over, and what was given up to get it.
+///
+/// A `bytes4` argument holds its value in the top four bytes, so its values
+/// are the multiples of 2^224 below 2^256 — not an interval set. A `string`
+/// argument reaches the body as a memory pointer. Neither is a domain this
+/// can describe, and refusing them threw away the contract for a parameter
+/// that often decides nothing. The whole word covers both, and a guard over
+/// such an argument is then one the regions do not decide, which the walk
+/// takes both ways.
+pub fn domain_or_whole_word(ty: &str) -> Result<(IntervalSet, Option<String>), String> {
+    match domain_of(ty) {
+        Ok(d) => Ok((d, None)),
+        Err(why) if why.contains("signed") => Err(why),
+        Err(_) => Ok((
+            IntervalSet::full(),
+            Some(format!(
+                "whole-word-argument: an argument of type `{ty}` ranges over the whole 256-bit \
+                 word here, because its values are not an interval set. Wider than the type \
+                 admits, so no guard is decided that the type alone would not decide"
+            )),
+        )),
+    }
 }
 
 fn bad(t: &str) -> String {
@@ -109,12 +133,32 @@ mod tests {
 
     #[test]
     fn what_p1a_cannot_model_is_refused() {
-        for t in ["int256", "int8", "bytes32", "bytes", "string", "uint7", "uint0", "uint512", "mapping", "MyStruct"] {
-            assert!(domain_of(t).is_err(), "{t} must be refused");
+        for t in ["int256", "int8", "bytes", "string", "uint7", "uint0", "uint512", "mapping", "MyStruct"] {
+            assert!(domain_of(t).is_err(), "{t} must be refused an exact domain");
         }
         // and the message says why, rather than being generic
         assert!(domain_of("int256").unwrap_err().contains("signed"));
-        assert!(domain_of("bytes32").unwrap_err().contains("not a numeric word"));
+        // a full word is a full word, whichever end the value sits at
+        assert!(domain_of("bytes32").unwrap().is_full());
+    }
+
+    /// Everything but a signed integer has *some* domain to reason over.
+    /// Refusing the contract for a `string` parameter that decides nothing
+    /// was the wrong trade; a domain that says less is the right one.
+    #[test]
+    fn a_type_without_an_interval_domain_gets_the_whole_word_and_says_so() {
+        for t in ["bytes", "string", "bytes4", "MyStruct", "uint256[]"] {
+            let (d, note) = domain_or_whole_word(t).unwrap();
+            assert!(d.is_full(), "{t}");
+            assert!(note.unwrap().starts_with("whole-word-argument:"), "{t}");
+        }
+        // exact where it can be, and silent about it
+        let (d, note) = domain_or_whole_word("uint8").unwrap();
+        assert_eq!(d.count(), Some(256));
+        assert!(note.is_none());
+        // a signed integer is still refused: the whole word is not a wider
+        // reading of it, it is a different one
+        assert!(domain_or_whole_word("int256").is_err());
     }
 
     #[test]
