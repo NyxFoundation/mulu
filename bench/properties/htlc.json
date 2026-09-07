@@ -67,6 +67,38 @@
           "assert": "reverts"
         }
       ]
+    },
+    {
+      "id": "reveal-timeout-after-commit",
+      "from": "certora/reveal-timeout-after-commit.spec",
+      "rules": [
+        {
+          "entrypoint": "reveal(string)",
+          "given": {
+            "op": "eq",
+            "left": {
+              "storage": "isCommitted"
+            },
+            "right": {
+              "uint256": "0"
+            }
+          },
+          "assert": "reverts"
+        },
+        {
+          "entrypoint": "timeout()",
+          "given": {
+            "op": "eq",
+            "left": {
+              "storage": "isCommitted"
+            },
+            "right": {
+              "uint256": "0"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
     }
   ]
 }

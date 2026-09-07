@@ -226,12 +226,22 @@ pub fn of_in(
 /// `negated` tracks an odd number of enclosing `iszero`, which is how solc
 /// writes `<=` as `iszero(gt(..))`.
 fn rel(e: &Expr, negated: bool) -> Option<(Relation, bool)> {
-    let Expr::Call { name, args, .. } = e else { return None };
+    // A Yul condition is "not zero", so any expression used as one is the
+    // relation `e == 0` read the other way round. `require(isCommitted)`
+    // becomes `storage(isCommitted) == 0` with the sense reversed, which is
+    // the same key a specification writing `isCommitted == false` produces.
+    let as_nonzero = |e: &Expr| {
+        Some((
+            Relation { op: Op::Eq, left: e.render(), right: "0".to_string() },
+            negated,
+        ))
+    };
+    let Expr::Call { name, args, .. } = e else { return as_nonzero(e) };
     if name == "iszero" && args.len() == 1 {
         return rel(&args[0], !negated);
     }
     if args.len() != 2 {
-        return None;
+        return as_nonzero(e);
     }
     let a = strip(&args[0]).render();
     let b = strip(&args[1]).render();
@@ -259,7 +269,7 @@ fn rel(e: &Expr, negated: bool) -> Option<(Relation, bool)> {
         ("eq", false) => (Op::Eq, a, b, true),
         // A disequality is one relation read the other way round, not two.
         ("eq", true) => (Op::Eq, a, b, false),
-        _ => return None,
+        _ => return as_nonzero(e),
     };
     Some((Relation { op, left, right }, sense))
 }
@@ -387,14 +397,32 @@ mod tests {
         assert_eq!(r.key(), "bal < amt");
     }
 
+    /// A condition that is not a comparison is still a question: Yul reads
+    /// it as "not zero", and that is one relation with the sense reversed.
+    /// `require(isCommitted)` and a specification's `isCommitted == false`
+    /// then meet on one key.
     #[test]
-    fn what_is_not_a_comparison_has_no_relation() {
+    fn a_condition_that_is_not_a_comparison_is_the_relation_against_zero() {
         let t = BTreeMap::new();
-        assert!(of(&parse("var_success_46"), &t).is_none());
-        assert!(of(&parse("and(a, b)"), &t).is_none());
-        // a disequality is the equality with the sense reversed
-        let (r, sense) = of_in(&parse("iszero(eq(a, b))"), &t, &|_: crate::interval::U256| None)
-            .expect("a relation");
+        let (r, sense) =
+            of_in(&parse("flag"), &t, &|_: crate::interval::U256| None).expect("a relation");
+        assert_eq!((r.key().as_str(), sense), ("flag == 0", false));
+        // and `iszero` of it is the same key, the other way
+        let (r, sense) =
+            of_in(&parse("iszero(flag)"), &t, &|_: crate::interval::U256| None).expect("one");
+        assert_eq!((r.key().as_str(), sense), ("flag == 0", true));
+    }
+
+    /// A disequality is the equality read the other way round, not two
+    /// relations, and a conjunction is neither.
+    #[test]
+    fn a_disequality_is_the_equality_with_the_sense_reversed() {
+        let t = BTreeMap::new();
+        let no = |_: crate::interval::U256| None;
+        let (r, sense) = of_in(&parse("iszero(eq(a, b))"), &t, &no).expect("a relation");
         assert_eq!((r.key().as_str(), sense), ("a == b", false));
+        // a conjunction has no single relation, so it is keyed as a whole
+        let (r, sense) = of_in(&parse("and(a, b)"), &t, &no).expect("a key");
+        assert_eq!((r.key().as_str(), sense), ("and(a, b) == 0", false));
     }
 }

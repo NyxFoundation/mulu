@@ -87,8 +87,8 @@ Each property names the file it was written from.
 
 | | |
 | --- | --- |
-| (property, version) pairs asked | 56 |
-| correct | 53 |
+| (property, version) pairs asked | 62 |
+| correct | 59 |
 | wrong | 3 |
 | no answer | 0 |
 
@@ -132,10 +132,12 @@ which.
 Certora file drops the first half, and with it the counterexample
 `withdraw(0)`.
 
-Nine of the sixteen use cases have no file yet. Their revert rules turn on
-things the model does not have: the *sender's* ether balance, `msg.value`
-(the environment profile fixes it at zero), or several transactions in
-sequence.
+Nine of the sixteen use cases have no file yet, and the reasons are the
+model's, not the encoding's. Their revert rules turn on the *sender's* ether
+balance, on `msg.value` (the environment profile fixes it at zero), on
+several transactions in sequence, or on signed arithmetic: `zerotoken_bet`
+keeps its balances in `int`, and every comparison on one is an `slt` that
+nothing here decides.
 
 ## What the corpus said, 2026-09-07
 

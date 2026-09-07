@@ -490,7 +490,20 @@ impl<'a> Builder<'a> {
                     }
                     d
                 }
-                Err(_) => IntervalSet::full(),
+                Err(why) => {
+                    // A slot whose type has no interval domain takes the
+                    // whole word. That is sound: every value of the type is
+                    // some word. It is also all the model will ever know
+                    // about it, and for a signed slot in particular every
+                    // comparison is an `slt` or an `sgt`, which nothing here
+                    // decides, so every one of them forks.
+                    self.note(format!(
+                        "whole-word-slot: {} is `{type_label}`, which is not an interval domain \
+                         ({why}), so it ranges over the whole 256-bit word",
+                        v.label
+                    ));
+                    IntervalSet::full()
+                }
             };
             sets.extend(
                 self.props
