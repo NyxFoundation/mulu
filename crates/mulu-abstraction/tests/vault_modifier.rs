@@ -70,7 +70,15 @@ fn setlimit_is_not_a_no_op() {
     let s0 = goes(&a, "idle_LIM0", "call_setLimit#X0").expect("the call");
     let s1 = goes(&a, s0, "A_pass").expect("the modifier's guard");
     let s2 = goes(&a, s1, "B_pass").expect("the function's own guard");
-    let s3 = goes(&a, s2, "store_limit").expect("the storage write inside the inner body");
+    // The region the store lands in is part of the event now.
+    let s3 = a
+        .model
+        .transitions
+        .iter()
+        .find(|t| t.from == s2 && t.event.starts_with("store_limit"))
+        .map(|t| t.to.clone())
+        .expect("the storage write inside the inner body");
+    let s3 = s3.as_str();
     let s4 = goes(&a, s3, "return").expect("a successful return");
     assert!(s4.contains("ret"));
 
@@ -102,7 +110,14 @@ fn the_partition_is_refined_by_the_guard_in_the_imported_modifier() {
 fn forceset_still_violates_the_specification() {
     let (_, a) = build();
     let s1 = goes(&a, "idle_LIM0", "call_forceSet#X2").unwrap();
-    let s2 = goes(&a, s1, "store_limit").unwrap();
+    let s2 = a
+        .model
+        .transitions
+        .iter()
+        .find(|t| t.from == s1 && t.event.starts_with("store_limit"))
+        .map(|t| t.to.clone())
+        .expect("the store");
+    let s2 = s2.as_str();
     let s3 = goes(&a, s2, "return").unwrap();
     assert_eq!(goes(&a, s3, "next_tx"), Some("bad"));
 }

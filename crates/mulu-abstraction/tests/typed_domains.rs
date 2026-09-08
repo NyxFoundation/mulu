@@ -120,7 +120,15 @@ fn the_wide_entrypoint_still_can() {
     // the last region is the one above the bound
     let last = a.report.argument_regions.len() - 1;
     let s1 = goes("idle_REA0", &format!("call_force#X{last}")).expect("force on the top region");
-    let s2 = goes(&s1, "store_reading").unwrap();
+    // The region the store lands in is part of the event; this one lands
+    // above the bound, which is what makes the next state bad.
+    let s2 = a
+        .model
+        .transitions
+        .iter()
+        .find(|t| t.from == s1 && t.event.starts_with("store_reading"))
+        .map(|t| t.to.clone())
+        .expect("the store");
     let s3 = goes(&s2, "return").unwrap();
     assert_eq!(goes(&s3, "next_tx").as_deref(), Some("bad"));
 }

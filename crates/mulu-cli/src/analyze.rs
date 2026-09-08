@@ -26,6 +26,8 @@ pub struct AnalyzeArgs {
     pub fail_on_candidate: bool,
     pub max_states: usize,
     pub max_edges: usize,
+    /// Model a callee calling back in, rather than assuming it does not.
+    pub reentrancy: bool,
 }
 
 /// Where the sources and the compiler settings come from: the command line,
@@ -115,7 +117,7 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
     }
 
     // --- abstraction
-    let abstraction = Builder::new(&ir, &props).build();
+    let abstraction = Builder::new(&ir, &props).with_reentrancy(args.reentrancy).build();
     let model_text = serde_json::to_string_pretty(&abstraction.model)?;
     fs::write(args.out.join("model.json"), &model_text)?;
     fs::write(

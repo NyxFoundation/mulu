@@ -180,6 +180,8 @@ pub fn signature_params(sig: &str) -> Vec<String> {
 pub struct Builder<'a> {
     ir: &'a ProgramIr,
     props: &'a [CompiledProperty],
+    /// Model a callee calling back in, rather than assuming it does not.
+    reentrancy: bool,
     storage: Vec<StorageVar>,
     unsupported: Vec<String>,
     assumptions: Vec<String>,
@@ -215,11 +217,25 @@ impl<'a> Builder<'a> {
         Self {
             ir,
             props,
+            reentrancy: false,
             storage: storage_vars(&ir.storage_layout),
             unsupported: vec![],
             assumptions: vec![],
             discharged: vec![],
         }
+    }
+
+    /// Model reentrancy instead of assuming it away.
+    ///
+    /// docs/11 §4 makes every event of the plant uncontrollable except
+    /// `Continue` at a control site. A callee calling back in is the
+    /// adversary's move and belongs on that side: the contract cannot forbid
+    /// it, and what the supervisor may still do is refuse to continue past a
+    /// guard. That is what makes "this check is the one holding the attack
+    /// off" a question the envelope can answer.
+    pub fn with_reentrancy(mut self, on: bool) -> Self {
+        self.reentrancy = on;
+        self
     }
 
     fn note(&mut self, s: impl Into<String>) {
@@ -331,7 +347,7 @@ impl<'a> Builder<'a> {
             // callee calling back in: a reentrant call runs the contract's
             // own entrypoints again and can move storage under the caller.
             // The model does not represent that, so it says so.
-            if f.effects.external_call {
+            if f.effects.external_call && !self.reentrancy {
                 self.note(format!(
                     "no-reentrancy: {} makes an external call, and the model assumes the \
                      callee does not call back into this contract",
@@ -799,6 +815,10 @@ enum Step {
         label: String,
         to: usize,
     },
+    /// Control leaves the contract. Under the reentrancy profile this is
+    /// where the adversary moves: the callee may call back into any
+    /// entrypoint, any number of times, before returning.
+    ExternalCall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -901,6 +921,47 @@ impl<'a> Walk<'a> {
             plant_sites: BTreeMap::new(),
             plant_bad_used: false,
             paths: Vec::new(),
+        }
+    }
+
+    /// How a position inside a transaction is named: by the arguments and
+    /// the storage it started in, and by the storage it is in now when a
+    /// store has moved it. Both are needed. Without the second a store the
+    /// regions do not settle leaves one state with two successors on one
+    /// event; without the first two walks that entered differently and
+    /// reached the same region would share a state, and they revert to
+    /// different places.
+    fn position(&self, e: &Entry, arg: &[usize], entry: &StorageRegion, at: &StorageRegion) -> String {
+        let base = self.suffix(e, arg, entry);
+        if at == entry {
+            return base;
+        }
+        format!("{base}to{}", self.storage_name(at))
+    }
+
+    /// `store_total`, or `store_total_TOT1` where the slot has more than one
+    /// region and the target is part of what the step did.
+    fn store_event(&self, slot: usize, label: &str, to: usize) -> String {
+        if self.per_slot[slot].1.len() <= 1 {
+            return format!("store_{label}");
+        }
+        format!("store_{label}_{}{}", short(&self.per_slot[slot].0), to)
+    }
+
+    /// What leaving the contract is called, which depends on what the model
+    /// says can happen while it is gone.
+    fn external_call_event(&self) -> (&'static str, &'static str) {
+        if self.b.reentrancy {
+            (
+                "reenter",
+                "Reentry(the callee may call back into any entrypoint before returning)",
+            )
+        } else {
+            (
+                "external_call",
+                "ExternalCall(control leaves the contract and returns; the callee is assumed \
+                 not to call back)",
+            )
         }
     }
 
@@ -2138,6 +2199,40 @@ impl<'a> Walk<'a> {
                 // the arms below, from `eval`.
                 if ins.effects.external_call {
                     memory.clear();
+                    steps.push(Step::ExternalCall);
+                    // Under the reentrancy profile the callee may call back
+                    // into any entrypoint before returning, so every slot it
+                    // could write is in any of its regions afterwards. That
+                    // is the same widening a loop gets, for the same reason:
+                    // the model does not represent what ran, only that
+                    // something did.
+                    if self.b.reentrancy {
+                        self.b.note(
+                            "reentrancy-modelled: a callee may call back into any entrypoint \
+                             before returning, so every slot is in any of its regions after an \
+                             external call. `reenter` is an uncontrollable event of the plant: \
+                             the contract cannot forbid it, and what a supervisor may still do \
+                             is refuse to continue past a guard before it",
+                        );
+                        for i in 0..self.per_slot.len() {
+                            let ways = self.per_slot[i].1.len();
+                            if ways <= 1 {
+                                continue;
+                            }
+                            let to = splits.next().ok_or_else(|| TraceStop::Undecided {
+                                ways,
+                                what: format!(
+                                    "what a reentrant call leaves in {}",
+                                    self.per_slot[i].0
+                                ),
+                            })?;
+                            let label = self.per_slot[i].0.clone();
+                            storage[i] = to;
+                            *versions.entry(label.clone()).or_default() += 1;
+                            steps.push(Step::Store { slot: i, label, to });
+                        }
+                        cell_version += 1;
+                    }
                 }
 
                 if let mulu_yul::ir::Op::Effect {
@@ -2823,7 +2918,20 @@ impl<'a> Walk<'a> {
 
         let mut storage = entry_storage.clone();
         for (i, step) in t.steps.iter().enumerate() {
-            let next = format!("{}#{}_{suffix}", e.solidity_name, i + 1);
+            // The storage as it stands, not as it was on entry. A store whose
+            // target region the regions do not settle takes two paths, and
+            // naming both positions after the entry region put one state on
+            // `return` with two targets, which is not a plant the core can
+            // take.
+            if let Step::Store { slot, to, .. } = step {
+                storage[*slot] = *to;
+            }
+            let next = format!(
+                "{}#{}_{}",
+                e.solidity_name,
+                i + 1,
+                self.position(e, arg, entry_storage, &storage)
+            );
             match step {
                 Step::Check { id, passes, .. } => {
                     let pass = format!("{id}_pass");
@@ -2842,11 +2950,17 @@ impl<'a> Walk<'a> {
                     }
                 }
                 Step::Store { slot, label, to } => {
-                    storage[*slot] = *to;
-                    let ev = self.event(
-                        &format!("store_{label}"),
-                        &format!("InternalStep(store {label})"),
-                    );
+                    // The region it lands in is part of the event. A store
+                    // whose target the regions do not settle takes two paths
+                    // out of one state, and one event with two targets is not
+                    // a plant the core can take.
+                    let ev = self.store_event(*slot, label, *to);
+                    let ev = self.event(&ev, &format!("InternalStep(store {label})"));
+                    self.add(&cur.clone(), &ev, &next);
+                }
+                Step::ExternalCall => {
+                    let (id, desc) = self.external_call_event();
+                    let ev = self.event(id, desc);
                     self.add(&cur.clone(), &ev, &next);
                 }
             }
@@ -2917,8 +3031,19 @@ impl<'a> Walk<'a> {
         // The implementation stops at the first guard the region makes fail,
         // so beyond that point it has no state to pair a site with.
         let mut impl_reaches = true;
+        let mut at = entry_storage.clone();
         for (i, step) in t.steps.iter().enumerate() {
-            let next = format!("{}@{}_{suffix}", e.solidity_name, i + 1);
+            let here = self.position(e, arg, entry_storage, &at);
+            if let Step::Store { slot, to, .. } = step {
+                storage[*slot] = *to;
+                at[*slot] = *to;
+            }
+            let next = format!(
+                "{}@{}_{}",
+                e.solidity_name,
+                i + 1,
+                self.position(e, arg, entry_storage, &at)
+            );
             match step {
                 Step::Check { id, passes, .. } => {
                     let cont = format!("cont_{id}");
@@ -2934,7 +3059,7 @@ impl<'a> Walk<'a> {
                     self.plant_event(&rej, &format!("Reject(site {id})"), Control::Uncontrollable);
                     self.plant_add(&cur.clone(), &cont, &next);
                     self.plant_add(&cur.clone(), &rej, &rev);
-                    let impl_state = format!("{}#{}_{suffix}", e.solidity_name, i);
+                    let impl_state = format!("{}#{}_{here}", e.solidity_name, i);
                     let reached = impl_reaches;
                     let entry = self.plant_sites.entry(id.clone()).or_insert(ControlSite {
                         id: id.clone(),
@@ -2953,14 +3078,24 @@ impl<'a> Walk<'a> {
                     }
                 }
                 Step::Store { slot, label, to } => {
-                    storage[*slot] = *to;
-                    let ev = format!("store_{label}");
+                    let ev = self.store_event(*slot, label, *to);
                     self.plant_event(
                         &ev,
                         &format!("InternalStep(store {label})"),
                         Control::Uncontrollable,
                     );
                     self.plant_add(&cur.clone(), &ev, &next);
+                }
+                Step::ExternalCall => {
+                    // Under the reentrancy profile this is the adversary's
+                    // move, and the reason the split between controllable
+                    // and uncontrollable earns its keep: the contract cannot
+                    // forbid the callee from calling back, and all a
+                    // supervisor may still do is refuse to continue past a
+                    // guard before this point.
+                    let (id, desc) = self.external_call_event();
+                    self.plant_event(id, desc, Control::Uncontrollable);
+                    self.plant_add(&cur.clone(), id, &next);
                 }
             }
             cur = next;

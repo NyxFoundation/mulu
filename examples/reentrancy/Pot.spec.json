@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "properties": [
+    {
+      "id": "pot-at-most-100",
+      "contract": "Pot",
+      "when": "successful-transaction-end",
+      "assert": { "op": "ule", "left": { "storage": "total" }, "right": { "uint256": "100" } }
+    }
+  ]
+}

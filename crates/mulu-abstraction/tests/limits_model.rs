@@ -134,7 +134,10 @@ fn forceset_reaches_bad_and_setlimit_does_not() {
 
     // forceSet with an argument above the bound stores it and violates the spec
     let s1 = goes(&a, "idle_LIM0", "call_forceSet#X2").expect("forceSet on X2");
-    let s2 = goes(&a, s1, "store_limit").expect("the store");
+    // The region the store lands in is part of the event: a slot with two
+    // regions can be written into either, and one event with two targets is
+    // not a plant the core takes.
+    let s2 = goes(&a, s1, "store_limit_LIM1").expect("the store, landing above the bound");
     let s3 = goes(&a, s2, "return").expect("a successful return");
     assert_eq!(
         goes(&a, s3, "next_tx"),

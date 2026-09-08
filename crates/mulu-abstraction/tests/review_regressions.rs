@@ -125,7 +125,15 @@ fn a_guard_written_as_if_revert_is_still_a_guard() {
     };
     let s0 = goes("idle_LIM0", "call_setLimit#X0").unwrap();
     let s1 = goes(&s0, &format!("{id}_pass")).expect("the guard passes below 100");
-    assert!(goes(&s1, "store_limit").is_some());
+    // The region the store lands in is part of the event, so match on the
+    // prefix: what this test is about is that the store happens at all.
+    assert!(
+        a.model
+            .transitions
+            .iter()
+            .any(|t| t.from == s1 && t.event.starts_with("store_limit")),
+        "the store happens below the bound"
+    );
     let r0 = goes("idle_LIM0", "call_setLimit#X1").unwrap();
     assert!(
         goes(&r0, &format!("{id}_fail")).is_some(),

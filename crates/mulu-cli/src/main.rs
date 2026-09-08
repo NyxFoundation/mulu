@@ -93,6 +93,11 @@ enum Cmd {
         max_states: usize,
         #[arg(long, default_value = "1000000")]
         max_edges: usize,
+        /// Model a callee calling back into this contract, instead of
+        /// assuming it does not. `reenter` becomes an uncontrollable event of
+        /// the plant, so the envelope can say which guard holds the attack off.
+        #[arg(long)]
+        reentrancy: bool,
         /// Also write the SARIF results here (always written to <out>/results.sarif)
         #[arg(long)]
         sarif: Option<PathBuf>,
@@ -207,6 +212,7 @@ fn run() -> Result<i32> {
             fail_on_candidate,
             max_states,
             max_edges,
+            reentrancy,
             sarif,
             tools,
         } => {
@@ -225,6 +231,7 @@ fn run() -> Result<i32> {
                     fail_on_candidate,
                     max_states,
                     max_edges,
+                    reentrancy,
                 },
                 &tools,
             )?;
