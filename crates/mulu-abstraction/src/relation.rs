@@ -264,6 +264,18 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
     }
 }
 
+/// The canonical term of an expression: locals replaced by their terms, the
+/// encoding wrappers gone, storage named the way the contract names it.
+///
+/// One function, because a term built two ways is two terms. The guard's
+/// `add(storage(total), amount)` and the store's
+/// `add(cleanup_t_uint256(storage(total)), cleanup_t_uint256(amount))` are
+/// the same value, and until they rendered the same the fact one left could
+/// not be used by the other.
+pub fn term(e: &Expr, terms: &BTreeMap<String, Expr>, layout: &impl Layout) -> Expr {
+    normalise(&strip(&mulu_yul::fold::fold_fixpoint(&e.substitute(terms))), layout)
+}
+
 /// The condition as a relation, with every local replaced by its term.
 ///
 /// `None` when the condition is not a comparison this can name: a bare

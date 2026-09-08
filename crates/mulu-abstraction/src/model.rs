@@ -2108,9 +2108,36 @@ impl<'a> Walk<'a> {
                     // does not follow. Then the slot could end in any of its
                     // regions, and the walk takes each in turn rather than
                     // refusing. Same for a value that straddles a boundary.
+                    // Intervals first, and then what the path assumed. A
+                    // guard the source wrote bounds the value the store
+                    // writes: `require(total + amount <= 100)` and
+                    // `total = total + amount` are the same term, and
+                    // without reading the fact the store forked into the
+                    // region the guard has just ruled out.
+                    let by_facts = || {
+                        let t = crate::relation::term(
+                            &w.value,
+                            &terms,
+                            &names(&versions, cell_version),
+                        )
+                        .render();
+                        let mut edges = crate::order::edges_of(&facts);
+                        for (label, ver) in versions.iter() {
+                            let _ = (label, ver);
+                        }
+                        edges.extend(self.per_slot.iter().enumerate().filter_map(|(i, (l, r))| {
+                            let set = r.get(storage[i])?;
+                            let (lo, hi) = set.bounds()?;
+                            let _ = lo;
+                            Some((format!("storage({l})"), hi.to_string(), false))
+                        }));
+                        let b = crate::order::bounds_of(&edges, &t);
+                        self.region_of(slot_idx, &b)
+                    };
                     let to = match crate::value::value_set(&w.value, &env)
                         .ok()
                         .and_then(|values| self.region_of(slot_idx, &values))
+                        .or_else(by_facts)
                     {
                         Some(to) => to,
                         None => {
@@ -2135,8 +2162,11 @@ impl<'a> Walk<'a> {
                     // is a new version, so the two are an equality the rest of
                     // the path can use: `players@1 == add(players, 1)` is how
                     // a length after a push relates to the length before.
-                    let written = canon(&w.value, &terms)
-                        .map(|t| crate::relation::normalise(&t, &names(&versions, cell_version)));
+                    let written = Some(crate::relation::term(
+                        &w.value,
+                        &terms,
+                        &names(&versions, cell_version),
+                    ));
                     storage[slot_idx] = to;
                     *versions.entry(slot_label.clone()).or_default() += 1;
                     if let Some(written) = written {

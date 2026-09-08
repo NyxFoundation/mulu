@@ -1290,3 +1290,55 @@ contract C {
     assert!(has(fail), "the reverting branch, which is the point");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn reentry_is_the_difference_between_safe_and_not() {
+    if !ready() {
+        return;
+    }
+    // `add` checks the bound before it leaves the contract and restores it
+    // after, so each transaction on its own keeps `total <= 100`. Two of them
+    // interleaved do not: both read `total` before either writes it, both
+    // pass the guard, and both add.
+    //
+    // The contract cannot forbid the callee from calling back, which is why
+    // `reenter` is an uncontrollable event of the plant. The whole difference
+    // between the two runs below is whether the model has it.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/reentrancy");
+    let sol = root.join("Pot.sol");
+    let spec = root.join("Pot.spec.json");
+    let verdict = |reentrancy: bool| -> String {
+        let out = std::env::temp_dir().join(format!(
+            "mulu-reentry-{}-{reentrancy}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&out);
+        let mut cmd = mulu();
+        cmd.args(["analyze", sol.to_str().unwrap()])
+            .args(["--spec", spec.to_str().unwrap()])
+            .args(["--out", out.to_str().unwrap()]);
+        if reentrancy {
+            cmd.arg("--reentrancy");
+        }
+        assert!(cmd.status().unwrap().code().is_some());
+        let report = json(&out.join("report.json"));
+        let d = report["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "model-safe" || d["id"] == "spec-violation")
+            .cloned()
+            .expect("a safety diagnostic");
+        assert_eq!(d["status"], "proven", "either way the kernel checks it");
+        assert!(report["summary"]["kernel_checked"].as_bool().unwrap_or(false));
+        let s = d["claim"].as_str().unwrap().to_string();
+        let _ = std::fs::remove_dir_all(&out);
+        s
+    };
+    // Assuming the callee away, the bound holds, and the kernel checks the
+    // invariant that says so.
+    assert_eq!(verdict(false), "bad-unreachable", "no reentry: the bound holds");
+    // Modelling it, the violation is reachable, and the kernel checks the
+    // path that reaches it. Nothing else about the run differs.
+    assert_eq!(verdict(true), "bad-reachable", "with reentry: the bound does not");
+}
