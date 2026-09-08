@@ -553,6 +553,20 @@ impl<'a> Builder<'a> {
         if !self.reentrancy {
             return self.build_once();
         }
+        // Two shapes need no fixpoint, and between them they are most
+        // contracts. Without an external call nothing reenters. With one
+        // storage state there is nowhere for a reentrant call to leave the
+        // contract that it did not find it in -- the values still move, and
+        // the versions still say so, but the state does not.
+        let calls_out = self.ir.functions.iter().any(|f| f.effects.external_call);
+        // Nothing partitions a slot but the specification, so without one
+        // there is a single storage state and a reentrant call cannot leave
+        // the contract anywhere it did not find it. The values still move and
+        // the versions still say so.
+        let one_state = self.props.is_empty();
+        if !calls_out || one_state {
+            return self.build_once();
+        }
         const MAX_ROUNDS: usize = 8;
         let (ir, props) = (self.ir, self.props);
         let deadline = self
