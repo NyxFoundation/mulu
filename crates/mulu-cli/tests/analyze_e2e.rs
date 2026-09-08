@@ -1307,10 +1307,11 @@ fn reentry_is_the_difference_between_safe_and_not() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/reentrancy");
     let sol = root.join("Pot.sol");
     let spec = root.join("Pot.spec.json");
-    let verdict = |reentrancy: bool| -> String {
+    let verdict = |sol: &std::path::Path, reentrancy: bool| -> String {
         let out = std::env::temp_dir().join(format!(
-            "mulu-reentry-{}-{reentrancy}",
-            std::process::id()
+            "mulu-reentry-{}-{}-{reentrancy}",
+            std::process::id(),
+            sol.file_stem().unwrap().to_string_lossy()
         ));
         let _ = std::fs::remove_dir_all(&out);
         let mut cmd = mulu();
@@ -1337,8 +1338,16 @@ fn reentry_is_the_difference_between_safe_and_not() {
     };
     // Assuming the callee away, the bound holds, and the kernel checks the
     // invariant that says so.
-    assert_eq!(verdict(false), "bad-unreachable", "no reentry: the bound holds");
+    assert_eq!(verdict(&sol, false), "bad-unreachable", "no reentry: the bound holds");
     // Modelling it, the violation is reachable, and the kernel checks the
     // path that reaches it. Nothing else about the run differs.
-    assert_eq!(verdict(true), "bad-reachable", "with reentry: the bound does not");
+    assert_eq!(verdict(&sol, true), "bad-reachable", "with reentry: the bound does not");
+
+    // The same contract with the effect before the interaction. The bound is
+    // restored before control leaves, so a reentrant call finds the contract
+    // in a state it is allowed to be in. This is the half that says the
+    // analysis is not just reporting every external call: it is the ordering
+    // that decides, and mulu works it out rather than matching a pattern.
+    let ordered = root.join("PotOrdered.sol");
+    assert_eq!(verdict(&ordered, true), "bad-unreachable", "effect before interaction is safe");
 }

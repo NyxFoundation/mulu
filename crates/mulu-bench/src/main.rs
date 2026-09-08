@@ -46,6 +46,10 @@ struct Args {
     /// `contracts/<use case>/versions/` and the shared `lib/`.
     #[arg(long, value_enum, default_value = "semantic-tests")]
     corpus_kind: CorpusKind,
+    /// Model a callee calling back into the contract, instead of assuming it
+    /// does not.
+    #[arg(long)]
+    reentrancy: bool,
     /// A directory of mulu property files, one per use case, scored against
     /// the corpus's own `ground-truth.csv`.
     #[arg(long)]
@@ -288,7 +292,12 @@ fn category(reason: &str) -> String {
     r.lines().next().unwrap_or(r).trim().chars().take(90).collect()
 }
 
-fn measure(case: &corpus::Case, solc: Option<PathBuf>, key: Option<&AnswerKey>) -> Outcome {
+fn measure(
+    case: &corpus::Case,
+    solc: Option<PathBuf>,
+    key: Option<&AnswerKey>,
+    reentrancy: bool,
+) -> Outcome {
     let mut o = Outcome {
         name: case.name.clone(),
         stage: "out-of-scope",
@@ -367,7 +376,9 @@ fn measure(case: &corpus::Case, solc: Option<PathBuf>, key: Option<&AnswerKey>) 
 
     // The abstraction, with no specification: the redundancy half of the
     // tool, which is the half that needs nothing from the user.
-    let abstraction = mulu_abstraction::model::Builder::new(&ir, &[]).build();
+    let abstraction = mulu_abstraction::model::Builder::new(&ir, &[])
+        .with_reentrancy(reentrancy)
+        .build();
     o.entrypoints = abstraction.report.entrypoints_modelled.len();
     o.states = abstraction.model.states.len();
     o.transitions = abstraction.model.transitions.len();
@@ -465,9 +476,10 @@ fn main() -> Result<()> {
             let (queue, results, done, solc) =
                 (queue.clone(), results.clone(), done.clone(), args.solc.clone());
             let key = key.as_ref();
+            let reentrancy = args.reentrancy;
             s.spawn(move || loop {
                 let Some(case) = queue.lock().unwrap().next() else { return };
-                let o = measure(&case, solc.clone(), key);
+                let o = measure(&case, solc.clone(), key, reentrancy);
                 results.lock().unwrap().push(o);
                 let mut d = done.lock().unwrap();
                 *d += 1;

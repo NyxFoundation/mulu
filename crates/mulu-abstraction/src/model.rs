@@ -182,6 +182,14 @@ pub struct Builder<'a> {
     props: &'a [CompiledProperty],
     /// Model a callee calling back in, rather than assuming it does not.
     reentrancy: bool,
+    /// Storage state to the storage states a sequence of complete
+    /// transactions can leave the contract in. `None` means the widest
+    /// answer: any of them.
+    reach: Option<BTreeMap<String, BTreeSet<String>>>,
+    /// When this contract's walks must be over, shared across the rounds of
+    /// the reentrancy fixpoint. Without it each round takes a fresh budget
+    /// and a contract can cost eight times what one is meant to.
+    deadline: Option<std::time::Instant>,
     storage: Vec<StorageVar>,
     unsupported: Vec<String>,
     assumptions: Vec<String>,
@@ -204,6 +212,40 @@ struct ConstructorEffect {
     reasons: Vec<String>,
 }
 
+/// Which `idle_*` states each `idle_*` state reaches, over whole
+/// transactions. That is where a sequence of complete transactions can leave
+/// the contract, which is what a reentrant call gets to do.
+fn idle_reachability(m: &FiniteProduct) -> BTreeMap<String, BTreeSet<String>> {
+    let mut succ: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for t in &m.transitions {
+        succ.entry(t.from.as_str()).or_default().push(t.to.as_str());
+    }
+    let idles: Vec<&str> = m
+        .states
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| s.starts_with("idle_"))
+        .collect();
+    let mut out = BTreeMap::new();
+    for start in &idles {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut stack = vec![*start];
+        while let Some(n) = stack.pop() {
+            if !seen.insert(n) {
+                continue;
+            }
+            if let Some(ns) = succ.get(n) {
+                stack.extend(ns.iter().copied());
+            }
+        }
+        out.insert(
+            start.to_string(),
+            seen.into_iter().filter(|s| s.starts_with("idle_")).map(|s| s.to_string()).collect(),
+        );
+    }
+    out
+}
+
 /// One initial state or several, as the schema distinguishes them.
 fn initial_of(names: &[String]) -> Initial {
     match names {
@@ -218,6 +260,8 @@ impl<'a> Builder<'a> {
             ir,
             props,
             reentrancy: false,
+            reach: None,
+            deadline: None,
             storage: storage_vars(&ir.storage_layout),
             unsupported: vec![],
             assumptions: vec![],
@@ -492,7 +536,73 @@ impl<'a> Builder<'a> {
         (out, infeasible)
     }
 
-    pub fn build(mut self) -> Abstraction {
+    /// Build, and where reentrancy is modelled, find where a reentrant call
+    /// can leave the contract rather than assuming it can leave it anywhere.
+    ///
+    /// A least fixpoint, from below. The first pass lets a reentrant call
+    /// change nothing, which is the smallest answer; the model it produces
+    /// says which storage states a sequence of complete transactions reaches,
+    /// and the next pass lets a reentrant call leave the contract in those.
+    /// The set only grows and the storage states are finite, so it settles.
+    ///
+    /// Starting from above instead -- any state -- terminates in one pass and
+    /// is sound, but it reports a violation for every contract with an
+    /// external call and a partitioned slot, the orderings that are safe
+    /// included. That is not a useful answer.
+    pub fn build(self) -> Abstraction {
+        if !self.reentrancy {
+            return self.build_once();
+        }
+        const MAX_ROUNDS: usize = 8;
+        let (ir, props) = (self.ir, self.props);
+        let deadline = self
+            .deadline
+            .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(60));
+        // Round zero: a reentrant call leaves everything as it found it.
+        let mut reach: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut last = None;
+        for _ in 0..MAX_ROUNDS {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            let a = Builder::new(ir, props)
+                .with_reentrancy(true)
+                .with_reach(Some(reach.clone()))
+                .with_deadline(deadline)
+                .build_once();
+            let next = idle_reachability(&a.model);
+            if next == reach {
+                return a;
+            }
+            reach = next;
+            last = Some(a);
+        }
+        // It did not settle. The widest answer is sound, and saying so is
+        // better than returning a model built from a set still growing.
+        let mut a = Builder::new(ir, props)
+            .with_reentrancy(true)
+            .with_deadline(deadline)
+            .build_once();
+        a.report.assumptions.push(format!(
+            "reentrancy-widest: where a reentrant call can leave the contract did not settle in \
+             {MAX_ROUNDS} rounds, so it is taken to be any storage state. Sound, and coarse \
+             enough that a violation it reports may be one no sequence of transactions reaches"
+        ));
+        let _ = last;
+        a
+    }
+
+    fn with_reach(mut self, r: Option<BTreeMap<String, BTreeSet<String>>>) -> Self {
+        self.reach = r;
+        self
+    }
+
+    fn with_deadline(mut self, d: std::time::Instant) -> Self {
+        self.deadline = Some(d);
+        self
+    }
+
+    fn build_once(mut self) -> Abstraction {
         let mut entries = self.entries();
         disambiguate(&mut entries);
 
@@ -800,6 +910,8 @@ struct Walk<'a> {
     plant_bad_used: bool,
     /// Every path the walk took, in the order it took them.
     paths: Vec<PathSummary>,
+    /// Every storage state, worked out once.
+    all_regions: Vec<StorageRegion>,
 }
 
 /// One position of an abstract execution along the path where guards pass.
@@ -894,6 +1006,9 @@ impl<'a> Walk<'a> {
                 .map(|f| f.id.clone())
                 .collect();
         drop(with_checks);
+        let deadline = b
+            .deadline
+            .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(60));
         Self {
             b,
             entries,
@@ -906,7 +1021,7 @@ impl<'a> Walk<'a> {
             budget: 20_000_000,
             transition_keys: BTreeSet::new(),
             plant_transition_keys: BTreeSet::new(),
-            deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            deadline,
             states: BTreeSet::new(),
             marked: BTreeSet::new(),
             events: BTreeMap::new(),
@@ -921,6 +1036,7 @@ impl<'a> Walk<'a> {
             plant_sites: BTreeMap::new(),
             plant_bad_used: false,
             paths: Vec::new(),
+            all_regions: Vec::new(),
         }
     }
 
@@ -1523,6 +1639,7 @@ impl<'a> Walk<'a> {
 
     fn run(mut self) -> Abstraction {
         let storage_regions = self.storage_regions();
+        self.all_regions = storage_regions.clone();
 
         // Initial storage: the state a constructor within the modelled subset
         // leaves behind. P1a handles the case where it writes nothing, so
@@ -2227,8 +2344,16 @@ impl<'a> Walk<'a> {
                 // whose address the model does not track, so afterwards it
                 // knows nothing about memory. The result itself is bound by
                 // the arms below, from `eval`.
+                // `effects.external_call` is transitive: an instruction that
+                // calls a function that eventually calls out carries it too.
+                // Memory is cleared for either, which costs only precision.
+                // Where control actually leaves is the instruction that
+                // names `call` itself, and widening storage anywhere else
+                // threw away the facts a modifier had just established.
                 if ins.effects.external_call {
                     memory.clear();
+                }
+                if calls_out_directly(&ins.op) {
                     steps.push(Step::ExternalCall);
                     // Under the reentrancy profile the callee may call back
                     // into any entrypoint before returning, so every slot it
@@ -2239,27 +2364,58 @@ impl<'a> Walk<'a> {
                     if self.b.reentrancy {
                         self.b.note(
                             "reentrancy-modelled: a callee may call back into any entrypoint \
-                             before returning, so every slot is in any of its regions after an \
-                             external call. `reenter` is an uncontrollable event of the plant: \
-                             the contract cannot forbid it, and what a supervisor may still do \
-                             is refuse to continue past a guard before it",
+                             before returning, so the storage afterwards is any state a \
+                             sequence of complete transactions can leave. `reenter` is an \
+                             uncontrollable event of the plant: the contract cannot forbid it, \
+                             and what a supervisor may still do is refuse to continue past a \
+                             guard before it",
                         );
+                        // Where a reentrant call can leave the contract. Not
+                        // any state: only the ones the contract's own
+                        // entrypoints reach, which is what `reach` holds.
+                        // Widening to any state reported a violation for
+                        // every contract with an external call and a
+                        // partitioned slot, the safe orderings included.
+                        let here = self.storage_name(&storage);
+                        let mut targets: Vec<StorageRegion> = match &self.b.reach {
+                            Some(r) => {
+                                let names = r.get(&here).cloned().unwrap_or_default();
+                                self.all_regions
+                                    .iter()
+                                    .filter(|s| names.contains(&self.storage_name(s)))
+                                    .cloned()
+                                    .collect()
+                            }
+                            None => self.all_regions.clone(),
+                        };
+                        if targets.is_empty() {
+                            targets.push(storage.clone());
+                        }
+                        let ways = targets.len();
+                        let pick = if ways <= 1 {
+                            0
+                        } else {
+                            splits.next().ok_or_else(|| TraceStop::Undecided {
+                                ways,
+                                what: "where a reentrant call leaves storage".to_string(),
+                            })?
+                        };
+                        let to = targets[pick.min(ways - 1)].clone();
                         for i in 0..self.per_slot.len() {
-                            let ways = self.per_slot[i].1.len();
-                            if ways <= 1 {
+                            // The version moves whether or not the region
+                            // does. A reentrant call can change a value
+                            // without taking it out of its region, and a fact
+                            // about what the slot held before the call is not
+                            // a fact about what it holds after. Missing that
+                            // made the whole analysis say every ordering is
+                            // safe.
+                            let label = self.per_slot[i].0.clone();
+                            *versions.entry(label.clone()).or_default() += 1;
+                            if storage[i] == to[i] {
                                 continue;
                             }
-                            let to = splits.next().ok_or_else(|| TraceStop::Undecided {
-                                ways,
-                                what: format!(
-                                    "what a reentrant call leaves in {}",
-                                    self.per_slot[i].0
-                                ),
-                            })?;
-                            let label = self.per_slot[i].0.clone();
-                            storage[i] = to;
-                            *versions.entry(label.clone()).or_default() += 1;
-                            steps.push(Step::Store { slot: i, label, to });
+                            storage[i] = to[i];
+                            steps.push(Step::Store { slot: i, label, to: to[i] });
                         }
                         cell_version += 1;
                     }
@@ -3623,6 +3779,19 @@ fn loop_body(f: &Function, head: usize) -> BTreeSet<usize> {
         }
     }
     back
+}
+
+/// Does this instruction name `call` or `staticcall` itself, rather than
+/// reaching one through a function it calls?
+fn calls_out_directly(op: &mulu_yul::ir::Op) -> bool {
+    let e = match op {
+        mulu_yul::ir::Op::Let { value: Some(v), .. } | mulu_yul::ir::Op::Assign { value: v, .. } => v,
+        mulu_yul::ir::Op::Effect { call } => call,
+        _ => return false,
+    };
+    let mut calls = Vec::new();
+    collect_calls(e, &mut calls);
+    calls.iter().any(|(n, _)| n == "call" || n == "staticcall")
 }
 
 /// Every call in an expression, with its arguments, innermost last.
