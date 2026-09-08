@@ -122,6 +122,20 @@ minute:
 `contracts/vault/README.md` and `contracts/vault/ground-truth.csv` also
 disagree with each other on `wd-fin-before` and `fin-canc-twice`.
 
+### Reentrancy
+
+`--reentrancy` puts the callee calling back into the plant as an
+uncontrollable event, instead of assuming it away. On this corpus it changes
+nothing: 63 of 66 either way, and the two runs agree row for row. The
+properties here are revert conditions over an entrypoint's arguments, and
+whether the callee calls back does not bear on them.
+
+That is worth knowing before adding a second attack path. What the profile
+needs to pay off is a specification about *state*, and this corpus's mulu
+encodings are about *requests*. `examples/reentrancy/` is where it does pay
+off: two contracts differing in one line's position, and only the one that
+writes after the call reports a violation.
+
 ### What the encoding rests on
 
 Two things, both declared and both printed with the answer.
