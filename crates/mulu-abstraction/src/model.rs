@@ -238,9 +238,14 @@ fn idle_reachability(m: &FiniteProduct) -> BTreeMap<String, BTreeSet<String>> {
                 stack.extend(ns.iter().copied());
             }
         }
+        // Keyed by the storage state, not by the state name, because that is
+        // what the walk has in hand when it reaches an external call.
         out.insert(
-            start.to_string(),
-            seen.into_iter().filter(|s| s.starts_with("idle_")).map(|s| s.to_string()).collect(),
+            start.trim_start_matches("idle_").to_string(),
+            seen.into_iter()
+                .filter(|s| s.starts_with("idle_"))
+                .map(|s| s.trim_start_matches("idle_").to_string())
+                .collect(),
         );
     }
     out
