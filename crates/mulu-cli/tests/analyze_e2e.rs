@@ -1351,3 +1351,58 @@ fn reentry_is_the_difference_between_safe_and_not() {
     let ordered = root.join("PotOrdered.sol");
     assert_eq!(verdict(&ordered, true), "bad-unreachable", "effect before interaction is safe");
 }
+
+#[test]
+fn a_getter_in_a_guard_reads_as_the_variable_it_returns() {
+    if !ready() {
+        return;
+    }
+    // `require(!paused())` reads storage through a function, and the walk
+    // does not enter a helper with no effect and no check. The term stayed
+    // as the call, where a specification says `_paused`, and the two could
+    // not meet. This is the shape OpenZeppelin's `Pausable` has, and the
+    // shape of most of its access control.
+    let dir = std::env::temp_dir().join(format!("mulu-getter-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("C.sol"),
+        r#"pragma solidity ^0.8.0;
+contract C {
+    bool private _paused;
+    function paused() public view returns (bool) { return _paused; }
+    function pause() external { require(!paused()); _paused = true; }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("p.json"),
+        r#"{"schema_version":1,"call_properties":[
+          {"id":"pause-reverts-when-paused","rules":[{"entrypoint":"pause()",
+            "given":{"op":"ne","left":{"storage":"_paused"},"right":{"uint256":"0"}},
+            "assert":"reverts"}]},
+          {"id":"pause-succeeds-when-not","rules":[{"entrypoint":"pause()",
+            "given":{"op":"eq","left":{"storage":"_paused"},"right":{"uint256":"0"}},
+            "assert":"does-not-revert"}]}]}"#,
+    )
+    .unwrap();
+    let out = dir.join("out");
+    let code = mulu()
+        .args(["analyze", dir.join("C.sol").to_str().unwrap()])
+        .args(["--contract", "C", "--out", out.to_str().unwrap()])
+        .args(["--call-properties", dir.join("p.json").to_str().unwrap()])
+        .status()
+        .unwrap()
+        .code()
+        .unwrap();
+    assert_eq!(code, 0);
+    let answers = json(&out.join("call-properties.json"));
+    let verdicts: Vec<String> = answers
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["verdict"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(verdicts, vec!["holds", "holds"], "both directions of `success <=> !paused`");
+    let _ = std::fs::remove_dir_all(&dir);
+}

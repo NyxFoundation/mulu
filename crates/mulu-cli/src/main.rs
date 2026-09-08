@@ -98,6 +98,11 @@ enum Cmd {
         /// the plant, so the envelope can say which guard holds the attack off.
         #[arg(long)]
         reentrancy: bool,
+        /// Properties about calls, in mulu's call-property JSON. Answered
+        /// from the paths the walk took and written to
+        /// <out>/call-properties.json.
+        #[arg(long)]
+        call_properties: Option<PathBuf>,
         /// Also write the SARIF results here (always written to <out>/results.sarif)
         #[arg(long)]
         sarif: Option<PathBuf>,
@@ -213,6 +218,7 @@ fn run() -> Result<i32> {
             max_states,
             max_edges,
             reentrancy,
+            call_properties,
             sarif,
             tools,
         } => {
@@ -232,6 +238,7 @@ fn run() -> Result<i32> {
                     max_states,
                     max_edges,
                     reentrancy,
+                    call_properties,
                 },
                 &tools,
             )?;

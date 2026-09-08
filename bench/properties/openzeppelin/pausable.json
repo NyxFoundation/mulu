@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "use_case": "openzeppelin-pausable",
+  "source": "openzeppelin-contracts fv/specs/Pausable.spec, against fv/harnesses/PausableHarness.sol",
+  "note": "OpenZeppelin verifies these with Certora, and the shape of its assertions is mulu's own question: `assert success <=> !pausedBefore` is `not too permissive` read one way and `not too restrictive` read the other. Every rule here is expected to hold, so a `fails` is a false positive and nothing else.",
+  "call_properties": [
+    {
+      "id": "pause-iff-not-paused-reverts",
+      "from": "fv/specs/Pausable.spec rule pause, the <= direction",
+      "rules": [
+        {
+          "entrypoint": "pause()",
+          "given": { "op": "ne", "left": { "storage": "_paused" }, "right": { "uint256": "0" } },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "pause-iff-not-paused-succeeds",
+      "from": "fv/specs/Pausable.spec rule pause, the => direction",
+      "rules": [
+        {
+          "entrypoint": "pause()",
+          "given": { "op": "eq", "left": { "storage": "_paused" }, "right": { "uint256": "0" } },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "unpause-iff-paused-reverts",
+      "from": "fv/specs/Pausable.spec rule unpause",
+      "rules": [
+        {
+          "entrypoint": "unpause()",
+          "given": { "op": "eq", "left": { "storage": "_paused" }, "right": { "uint256": "0" } },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "unpause-iff-paused-succeeds",
+      "from": "fv/specs/Pausable.spec rule unpause",
+      "rules": [
+        {
+          "entrypoint": "unpause()",
+          "given": { "op": "ne", "left": { "storage": "_paused" }, "right": { "uint256": "0" } },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "when-paused-requires-paused",
+      "from": "fv/specs/Pausable.spec rule whenPaused",
+      "rules": [
+        {
+          "entrypoint": "onlyWhenPaused()",
+          "given": { "op": "eq", "left": { "storage": "_paused" }, "right": { "uint256": "0" } },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "when-not-paused-requires-not-paused",
+      "from": "fv/specs/Pausable.spec rule whenNotPaused",
+      "rules": [
+        {
+          "entrypoint": "onlyWhenNotPaused()",
+          "given": { "op": "ne", "left": { "storage": "_paused" }, "right": { "uint256": "0" } },
+          "assert": "reverts"
+        }
+      ]
+    }
+  ]
+}

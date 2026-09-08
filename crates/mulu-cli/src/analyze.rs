@@ -28,6 +28,8 @@ pub struct AnalyzeArgs {
     pub max_edges: usize,
     /// Model a callee calling back in, rather than assuming it does not.
     pub reentrancy: bool,
+    /// Properties about calls, answered from the paths the walk took.
+    pub call_properties: Option<PathBuf>,
 }
 
 /// Where the sources and the compiler settings come from: the command line,
@@ -131,6 +133,32 @@ pub fn run(args: &AnalyzeArgs, tools: &crate::ToolArgs) -> Result<i32> {
         args.out.join("paths.json"),
         serde_json::to_string_pretty(&abstraction.paths)?,
     )?;
+
+    // Properties about calls, if any were given. These are answered from the
+    // paths rather than from the model, and they are written out beside them.
+    if let Some(path) = &args.call_properties {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let file: mulu_abstraction::call_property::PropertyFile = serde_json::from_str(&text)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let answers: Vec<_> = file
+            .call_properties
+            .iter()
+            .map(|p| {
+                mulu_abstraction::call_property::check_with(p, &file.invariants, &abstraction.paths)
+            })
+            .collect();
+        println!("\ncall properties");
+        for a in &answers {
+            let verdict = serde_json::to_string(&a.verdict)?;
+            println!("  {:<44} {}", a.id, verdict.trim_matches('"'));
+            println!("      {}", a.because);
+        }
+        fs::write(
+            args.out.join("call-properties.json"),
+            serde_json::to_string_pretty(&answers)?,
+        )?;
+    }
 
     print_abstraction(&abstraction, &props);
 

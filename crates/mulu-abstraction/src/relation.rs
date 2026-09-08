@@ -170,6 +170,16 @@ fn low_bit_mask(e: &Expr) -> Option<u32> {
     (v == all_ones).then_some(bits)
 }
 
+/// Helpers this module gives a name of its own. Whatever else is done to a
+/// term, these must survive to be recognised here.
+pub fn is_storage_idiom(name: &str) -> bool {
+    name.starts_with("read_from_storage")
+        || name.starts_with("mapping_index_access")
+        || name.starts_with("array_length")
+        || name.starts_with("convert_array")
+        || name == "sload"
+}
+
 fn is_encoding_wrapper(name: &str) -> bool {
     name == "identity"
         || name.starts_with("cleanup_t_")

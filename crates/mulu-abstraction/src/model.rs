@@ -1584,6 +1584,54 @@ impl<'a> Walk<'a> {
         })
     }
 
+    /// Replace a call to a helper that only computes by what it returns.
+    ///
+    /// `require(!paused())` reads storage through a getter, and the walk does
+    /// not enter a helper with no effect and no check, so the term stayed
+    /// `fun_paused_75()` where a specification says `_paused`. One is not the
+    /// other until this puts them together.
+    fn inline_pure(&self, e: &mulu_yul::Expr, depth: usize) -> mulu_yul::Expr {
+        const MAX: usize = 6;
+        if depth >= MAX {
+            return e.clone();
+        }
+        let mulu_yul::Expr::Call { name, args, src } = e else { return e.clone() };
+        let args: Vec<mulu_yul::Expr> =
+            args.iter().map(|a| self.inline_pure(a, depth + 1)).collect();
+        // Not the ones `relation::normalise` recognises. Inlining
+        // `mapping_index_access` and `read_from_storage` replaced
+        // `cell(balances, caller())` with `sload(keccak256(0, 64))`, which
+        // says less and matches nothing a specification writes.
+        if self.pure_helpers.contains(name) && !crate::relation::is_storage_idiom(name) {
+            if let Some(g) = self.b.ir.function(name) {
+                if g.returns.len() == 1 && g.blocks.len() == 1 {
+                    let mut env: BTreeMap<String, mulu_yul::Expr> = g
+                        .parameters
+                        .iter()
+                        .cloned()
+                        .zip(args.iter().cloned())
+                        .collect();
+                    for i in &g.blocks[0].instructions {
+                        let (targets, value) = match &i.op {
+                            mulu_yul::ir::Op::Let { targets, value: Some(v) }
+                            | mulu_yul::ir::Op::Assign { targets, value: v } => (targets, v),
+                            _ => continue,
+                        };
+                        if targets.len() != 1 {
+                            continue;
+                        }
+                        let sub = value.substitute(&env);
+                        env.insert(targets[0].clone(), self.inline_pure(&sub, depth + 1));
+                    }
+                    if let Some(r) = env.get(&g.returns[0]) {
+                        return r.clone();
+                    }
+                }
+            }
+        }
+        mulu_yul::Expr::Call { name: name.clone(), args, src: *src }
+    }
+
     /// Does every check inside this expression's helpers pass, given what the
     /// walk knows about its arguments?
     ///
@@ -2191,7 +2239,7 @@ impl<'a> Walk<'a> {
                     {
                         Some(v) => v,
                         None => decide_or_split(
-                            &c.condition,
+                            &self.inline_pure(&c.condition, 0),
                             &terms,
                             &names(&versions, cell_version),
                             &mut facts,
@@ -2488,7 +2536,10 @@ impl<'a> Walk<'a> {
                         // that slot holds the value from before it, and must
                         // not read as the value from after.
                         let stamped = canon(v, &terms).map(|t| {
-                            crate::relation::normalise(&t, &names(&versions, cell_version))
+                            crate::relation::normalise(
+                                &crate::relation::strip(&self.inline_pure(&t, 0)),
+                                &names(&versions, cell_version),
+                            )
                         });
                         let fr = frames.last_mut().unwrap();
                         match stamped {
@@ -2653,7 +2704,10 @@ impl<'a> Walk<'a> {
                             if targets.len() == 1 =>
                         {
                             let t = canon(v, &terms).map(|t| {
-                                crate::relation::normalise(&t, &names(&versions, cell_version))
+                                crate::relation::normalise(
+                                    &crate::relation::strip(&self.inline_pure(&t, 0)),
+                                    &names(&versions, cell_version),
+                                )
                             });
                             let fr = frames.last_mut().unwrap();
                             fr.env.remove(&targets[0]);
@@ -2799,7 +2853,7 @@ impl<'a> Walk<'a> {
                         {
                             Some(v) => v,
                             None => decide_or_split(
-                                &c.condition,
+                                &self.inline_pure(&c.condition, 0),
                                 &terms,
                                 &names(&versions, cell_version),
                                 &mut facts,
