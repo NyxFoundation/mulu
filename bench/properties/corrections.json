@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "note": "Rows of the corpus's `ground-truth.csv` that this project believes are wrong, each with a counterexample in `bench/disagreements/` that runs on an EVM. The harness scores against the key as shipped and reports that number first; this file only adds a second number beside it, so a reader can see both and check the difference. Nothing here changes what mulu answered.",
+  "note": "Rows of the corpus's `ground-truth.csv` that this project believes are wrong, each with a counterexample in `bench/disagreements/` that runs on an EVM. The harness scores against the key as shipped and reports that number first; this file only adds a second number beside it, so a reader can see both and check the difference. Nothing here changes what mulu answered. Reported upstream as fsainas/contracts-verification-benchmark#86 on 2026-09-08; these rows stay until that is resolved.",
   "corrections": [
     {
       "use_case": "vault",

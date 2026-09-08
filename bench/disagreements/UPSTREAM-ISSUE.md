@@ -1,9 +1,15 @@
-# Draft issue for `fsainas/contracts-verification-benchmark`
+# Issue filed with `fsainas/contracts-verification-benchmark`
 
-Not sent. This is the text to file if and when we decide to.
+Filed 2026-09-08 as
+<https://github.com/fsainas/contracts-verification-benchmark/issues/86>.
 
-Checked against `01251cc` (`feat: add docker image`), which is the current
-upstream HEAD as of 2026-09-08.
+The version sent inlines the three tests rather than linking here, because
+this repository's `bench/disagreements/` was not published at the time, and
+an issue whose reproduction steps point at nothing is worse than one that
+carries them.
+
+Checked against `01251cc` (`feat: add docker image`), which was the upstream
+HEAD that day.
 
 ---
 
