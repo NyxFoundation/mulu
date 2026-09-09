@@ -110,13 +110,35 @@ pub enum Op {
 
 impl Relation {
     /// The key two equal relations share, and that a negated one does not.
+    ///
+    /// Equality is symmetric, so its two sides are put in a fixed order: a
+    /// literal goes on the right, and otherwise the smaller string goes
+    /// first. Without that `caller() == storage(_owner)` and
+    /// `storage(_owner) == caller()` were two keys for one question, and a
+    /// specification could not use a fact the walk had left.
     pub fn key(&self) -> String {
         let o = match self.op {
             Op::Lt => "<",
             Op::Le => "<=",
             Op::Eq => "==",
         };
-        format!("{} {o} {}", self.left, self.right)
+        let (l, r) = if self.op == Op::Eq {
+            Self::ordered(&self.left, &self.right)
+        } else {
+            (self.left.as_str(), self.right.as_str())
+        };
+        format!("{l} {o} {r}")
+    }
+
+    /// The two sides of an equality, in the order its key uses.
+    pub fn ordered<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
+        let lit = |t: &str| crate::interval::parse_decimal(t).is_ok();
+        match (lit(a), lit(b)) {
+            (true, false) => (b, a),
+            (false, true) => (a, b),
+            _ if a <= b => (a, b),
+            _ => (b, a),
+        }
     }
 }
 

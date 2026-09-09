@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "use_case": "openzeppelin-ownable",
+  "source": "openzeppelin-contracts fv/specs/Ownable.spec, against a harness of the shape fv/harnesses uses",
+  "note": "Each `assert success <=> cond` is written here as two rules, one per direction: `not cond` reverts, and `cond` does not. The post-state halves of OpenZeppelin's rules (`success => owner() == newOwner`) are about the state a call leaves, not about whether it is accepted, and are not written here. Every rule is expected to hold, so a `fails` is a false positive.",
+  "call_properties": [
+    {
+      "id": "transfer-only-owner-and-nonzero-reverts",
+      "from": "fv/specs/Ownable.spec rule transferOwnership, the <= direction",
+      "rules": [
+        {
+          "entrypoint": "transferOwnership(address)",
+          "given": {
+            "op": "or",
+            "args": [
+              { "op": "ne", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+              { "op": "eq", "left": { "argument": 0 }, "right": { "uint256": "0" } }
+            ]
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "transfer-only-owner-and-nonzero-succeeds",
+      "from": "fv/specs/Ownable.spec rule transferOwnership, the => direction",
+      "rules": [
+        {
+          "entrypoint": "transferOwnership(address)",
+          "given": {
+            "op": "and",
+            "args": [
+              { "op": "eq", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+              { "op": "ne", "left": { "argument": 0 }, "right": { "uint256": "0" } }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "renounce-only-owner-reverts",
+      "from": "fv/specs/Ownable.spec rule renounceOwnership",
+      "rules": [
+        {
+          "entrypoint": "renounceOwnership()",
+          "given": { "op": "ne", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "renounce-only-owner-succeeds",
+      "from": "fv/specs/Ownable.spec rule renounceOwnership",
+      "rules": [
+        {
+          "entrypoint": "renounceOwnership()",
+          "given": { "op": "eq", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "only-owner-modifier-reverts",
+      "from": "fv/specs/Ownable.spec rule onlyCurrentOwnerCanCallOnlyOwner",
+      "rules": [
+        {
+          "entrypoint": "restricted()",
+          "given": { "op": "ne", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "only-owner-modifier-succeeds",
+      "from": "fv/specs/Ownable.spec rule onlyCurrentOwnerCanCallOnlyOwner",
+      "rules": [
+        {
+          "entrypoint": "restricted()",
+          "given": { "op": "eq", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+          "assert": "does-not-revert"
+        }
+      ]
+    }
+  ]
+}
