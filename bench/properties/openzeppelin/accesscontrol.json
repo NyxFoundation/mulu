@@ -1,0 +1,260 @@
+{
+  "schema_version": 1,
+  "use_case": "openzeppelin-accesscontrol",
+  "source": "openzeppelin-contracts fv/specs/AccessControl.spec, against a harness of the shape fv/harnesses uses",
+  "note": "`_roles[role].members[account]` is two mapping accesses over one declared variable and `_roles[role].adminRole` is the second word of the first, which is why the terms nest. The post-state halves of OpenZeppelin's rules are about the state a call leaves rather than whether it is accepted, and are not written. Every rule here is expected to hold.",
+  "call_properties": [
+    {
+      "id": "grant-only-admin-reverts",
+      "from": "fv/specs/AccessControl.spec rule grantRoleEffect, the <= direction",
+      "rules": [
+        {
+          "entrypoint": "grantRole(bytes32,address)",
+          "given": {
+            "op": "eq",
+            "left": {
+              "nested": {
+                "var": "_roles",
+                "keys": [
+                  {
+                    "field": {
+                      "of": {
+                        "cell": {
+                          "var": "_roles",
+                          "key": {
+                            "argument": 0
+                          }
+                        }
+                      },
+                      "index": 1
+                    }
+                  },
+                  {
+                    "env": "caller"
+                  }
+                ]
+              }
+            },
+            "right": {
+              "uint256": "0"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "grant-only-admin-succeeds",
+      "from": "fv/specs/AccessControl.spec rule grantRoleEffect, the => direction",
+      "rules": [
+        {
+          "entrypoint": "grantRole(bytes32,address)",
+          "given": {
+            "op": "ne",
+            "left": {
+              "nested": {
+                "var": "_roles",
+                "keys": [
+                  {
+                    "field": {
+                      "of": {
+                        "cell": {
+                          "var": "_roles",
+                          "key": {
+                            "argument": 0
+                          }
+                        }
+                      },
+                      "index": 1
+                    }
+                  },
+                  {
+                    "env": "caller"
+                  }
+                ]
+              }
+            },
+            "right": {
+              "uint256": "0"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "revoke-only-admin-reverts",
+      "from": "fv/specs/AccessControl.spec rule revokeRoleEffect",
+      "rules": [
+        {
+          "entrypoint": "revokeRole(bytes32,address)",
+          "given": {
+            "op": "eq",
+            "left": {
+              "nested": {
+                "var": "_roles",
+                "keys": [
+                  {
+                    "field": {
+                      "of": {
+                        "cell": {
+                          "var": "_roles",
+                          "key": {
+                            "argument": 0
+                          }
+                        }
+                      },
+                      "index": 1
+                    }
+                  },
+                  {
+                    "env": "caller"
+                  }
+                ]
+              }
+            },
+            "right": {
+              "uint256": "0"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "revoke-only-admin-succeeds",
+      "from": "fv/specs/AccessControl.spec rule revokeRoleEffect",
+      "rules": [
+        {
+          "entrypoint": "revokeRole(bytes32,address)",
+          "given": {
+            "op": "ne",
+            "left": {
+              "nested": {
+                "var": "_roles",
+                "keys": [
+                  {
+                    "field": {
+                      "of": {
+                        "cell": {
+                          "var": "_roles",
+                          "key": {
+                            "argument": 0
+                          }
+                        }
+                      },
+                      "index": 1
+                    }
+                  },
+                  {
+                    "env": "caller"
+                  }
+                ]
+              }
+            },
+            "right": {
+              "uint256": "0"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "renounce-only-self-reverts",
+      "from": "fv/specs/AccessControl.spec rule renounceRoleEffect",
+      "rules": [
+        {
+          "entrypoint": "renounceRole(bytes32,address)",
+          "given": {
+            "op": "ne",
+            "left": {
+              "argument": 1
+            },
+            "right": {
+              "env": "caller"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "renounce-only-self-succeeds",
+      "from": "fv/specs/AccessControl.spec rule renounceRoleEffect",
+      "rules": [
+        {
+          "entrypoint": "renounceRole(bytes32,address)",
+          "given": {
+            "op": "eq",
+            "left": {
+              "argument": 1
+            },
+            "right": {
+              "env": "caller"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "only-role-modifier-reverts",
+      "from": "the `onlyRole` modifier the harness exposes",
+      "rules": [
+        {
+          "entrypoint": "restricted(bytes32)",
+          "given": {
+            "op": "eq",
+            "left": {
+              "nested": {
+                "var": "_roles",
+                "keys": [
+                  {
+                    "argument": 0
+                  },
+                  {
+                    "env": "caller"
+                  }
+                ]
+              }
+            },
+            "right": {
+              "uint256": "0"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "only-role-modifier-succeeds",
+      "from": "the `onlyRole` modifier the harness exposes",
+      "rules": [
+        {
+          "entrypoint": "restricted(bytes32)",
+          "given": {
+            "op": "ne",
+            "left": {
+              "nested": {
+                "var": "_roles",
+                "keys": [
+                  {
+                    "argument": 0
+                  },
+                  {
+                    "env": "caller"
+                  }
+                ]
+              }
+            },
+            "right": {
+              "uint256": "0"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    }
+  ]
+}

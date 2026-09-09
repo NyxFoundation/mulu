@@ -120,12 +120,26 @@ pub enum Term {
         var: String,
         key: Box<Term>,
     },
+    /// A cell reached through more than one mapping.
+    /// `_roles[role].members[account]` is `{ var: "_roles", keys: [role,
+    /// account] }`, which is how every role check in OpenZeppelin's access
+    /// control is written.
+    Nested {
+        var: String,
+        keys: Vec<Term>,
+    },
     /// Transaction or block context: `caller`, `callvalue`, `number`,
     /// `timestamp`, `origin`. `balance` is the contract's own ether balance,
     /// which solc reads as `balance(address())`.
     Env(String),
     /// An `immutable` variable, by the name the source gave it.
     Immutable(String),
+    /// A struct field within a cell: `_roles[role].adminRole` is the second
+    /// word of `_roles[role]`, which is `{ of: <that cell>, index: 1 }`.
+    Field {
+        of: Box<Term>,
+        index: u64,
+    },
     /// A storage slot by number, for storage the layout does not name.
     /// ERC-7201 namespaced storage is written through assembly at a fixed
     /// slot, so `storageLayout` is empty and there is no label to use;
@@ -252,6 +266,17 @@ fn render(t: &Term, p: &PathSummary) -> Option<String> {
         Term::Immutable(v) => format!("immutable({v})"),
         Term::Slot(n) => format!("sload({})", parse_decimal(n).ok()?),
         Term::Cell { var, key } => format!("cell({var}, {})", render(key, p)?),
+        Term::Field { of, index } => format!("field({}, {index})", render(of, p)?),
+        Term::Nested { var, keys } => {
+            let mut out = String::from("cell(");
+            out.push_str(var);
+            for k in keys {
+                out.push_str(", ");
+                out.push_str(&render(k, p)?);
+            }
+            out.push(')');
+            out
+        }
         Term::Env(name) => match name.as_str() {
             "balance" | "selfbalance" => "balance(address())".to_string(),
             // The contract's own code size. Zero exactly while its
@@ -276,6 +301,8 @@ fn values(t: &Term, p: &PathSummary) -> Option<IntervalSet> {
         // are not in the model's state. What is known about them is what the
         // path assumed, which is read as a relation rather than as a set.
         Term::Cell { .. }
+        | Term::Nested { .. }
+        | Term::Field { .. }
         | Term::Env(_)
         | Term::Immutable(_)
         | Term::Slot(_)

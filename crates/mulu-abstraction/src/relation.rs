@@ -95,6 +95,50 @@ impl Layout for Names {
     }
 }
 
+/// A chain of `mapping(base, key)` accesses down to a literal slot, with the
+/// keys in the order they are applied. `mapping(mapping(0, role), account)`
+/// is slot 0 with keys `[role, account]`.
+fn mapping_chain(e: &Expr) -> Option<(crate::interval::U256, Vec<Expr>)> {
+    match e {
+        Expr::Literal { .. } => slot_of(e).map(|s| (s, vec![])),
+        Expr::Call { name, args, .. } if name == "mapping" && args.len() == 2 => {
+            let (slot, mut keys) = mapping_chain(&args[0])?;
+            keys.push(args[1].clone());
+            Some((slot, keys))
+        }
+        _ => None,
+    }
+}
+
+/// A struct field within a cell: `add(<cell slot>, n)` for a literal `n`.
+/// `_roles[role].adminRole` is the second word of `_roles[role]`, and it is
+/// what every `grantRole` checks against.
+fn field_of(e: &Expr, layout: &impl Layout) -> Option<Expr> {
+    let Expr::Call { name, args, .. } = e else { return None };
+    if name != "add" || args.len() != 2 {
+        return None;
+    }
+    for (base, off) in [(&args[0], &args[1]), (&args[1], &args[0])] {
+        let Some(n) = slot_of(off) else { continue };
+        let (slot, keys) = match mapping_chain(base) {
+            Some(c) if !c.1.is_empty() => c,
+            _ => continue,
+        };
+        let Some(l) = layout.label_at(slot) else { continue };
+        let mut a = vec![Expr::Ident { name: l, src: None }];
+        a.extend(keys);
+        return Some(Expr::Call {
+            name: "field".into(),
+            args: vec![
+                Expr::Call { name: "cell".into(), args: a, src: None },
+                Expr::Literal { text: n.to_string(), src: None },
+            ],
+            src: None,
+        });
+    }
+    None
+}
+
 fn slot_of(e: &Expr) -> Option<crate::interval::U256> {
     match e {
         Expr::Literal { text, .. } => crate::interval::parse_decimal(text).ok(),
@@ -260,21 +304,24 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
             lit @ Expr::Literal { .. } => slot_of(lit)
                 .and_then(|s| layout.label_at(s))
                 .map(|l| call("storage", vec![Expr::Ident { name: l, src: None }])),
-            Expr::Call {
-                name: m, args: ma, ..
-            } if m == "mapping" && ma.len() == 2 => {
-                slot_of(&ma[0]).and_then(|s| layout.label_at(s)).map(|l| {
-                    let l = match layout.cell_generation() {
-                        0 => l,
-                        n => format!("{l}@{n}"),
-                    };
-                    call(
-                        "cell",
-                        vec![Expr::Ident { name: l, src: None }, ma[1].clone()],
-                    )
-                })
-            }
-            _ => None,
+            // A chain of mapping accesses bottoming out in a literal slot.
+            // One key is `balances[a]`; two is `_roles[role].members[a]`,
+            // which is how every role check in OpenZeppelin's access control
+            // is written.
+            other if field_of(other, layout).is_some() => field_of(other, layout),
+            other => mapping_chain(other).and_then(|(slot, keys)| {
+                if keys.is_empty() {
+                    return None;
+                }
+                let l = layout.label_at(slot)?;
+                let l = match layout.cell_generation() {
+                    0 => l,
+                    n => format!("{l}@{n}"),
+                };
+                let mut a = vec![Expr::Ident { name: l, src: None }];
+                a.extend(keys);
+                Some(call("cell", a))
+            }),
         };
         return named.unwrap_or_else(|| {
             // A slot the layout does not name still has a version: a write
@@ -540,6 +587,25 @@ mod tests {
         // and a mask that is not `2^k - 1` is arithmetic, and stays
         let keep = parse("and(add(size, 31), 115792089237316195423570985008687907853269984665640564039457584007913129639904)");
         assert_eq!(strip(&keep).render(), keep.render());
+    }
+
+    /// `_roles[role].members[account]` is two mapping accesses over one
+    /// declared variable, and it is how every role check in OpenZeppelin's
+    /// access control is written.
+    #[test]
+    fn a_nested_mapping_is_named_by_its_variable_and_its_keys() {
+        let layout = |slot: crate::interval::U256| slot.is_zero().then(|| "_roles".to_string());
+        let t = BTreeMap::new();
+        let r = of_in(
+            &parse(
+                "eq(read_from_storage_split_offset_0_t_bool(mapping_index_access_a(mapping_index_access_b(0, role), account)), 0)",
+            ),
+            &t,
+            &layout,
+        )
+        .expect("a relation")
+        .0;
+        assert_eq!(r.key(), "cell(_roles, role, account) == 0");
     }
 
     /// The point of the whole module: the guard the compiler wrote and the
