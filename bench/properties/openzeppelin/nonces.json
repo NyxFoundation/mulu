@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "use_case": "openzeppelin-nonces",
+  "source": "openzeppelin-contracts fv/specs/Nonces.spec, against fv/harnesses/NoncesHarness.sol",
+  "note": "OpenZeppelin's `nonceSanity` precondition, `nonces(account) < max_uint256`, is written into each rule's `given`: without it `useNonce` can overflow and the rule is not about that. The post-state halves (`nonceAfter == nonceBefore + 1`) are about the state a call leaves rather than whether it is accepted, and are not written. Every rule is expected to hold.",
+  "call_properties": [
+    {
+      "id": "use-nonce-does-not-revert",
+      "from": "fv/specs/Nonces.spec rule useNonce, `assert success`",
+      "rules": [
+        {
+          "entrypoint": "useNonce(address)",
+          "given": {
+            "op": "ult",
+            "left": {
+              "cell": {
+                "var": "_nonces",
+                "key": {
+                  "argument": 0
+                }
+              }
+            },
+            "right": {
+              "uint256": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "use-checked-nonce-wrong-reverts",
+      "from": "fv/specs/Nonces.spec rule useCheckedNonce, the <= direction",
+      "rules": [
+        {
+          "entrypoint": "useCheckedNonce(address,uint256)",
+          "given": {
+            "op": "ne",
+            "left": {
+              "argument": 1
+            },
+            "right": {
+              "cell": {
+                "var": "_nonces",
+                "key": {
+                  "argument": 0
+                }
+              }
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "use-checked-nonce-right-succeeds",
+      "from": "fv/specs/Nonces.spec rule useCheckedNonce, the => direction",
+      "rules": [
+        {
+          "entrypoint": "useCheckedNonce(address,uint256)",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "left": {
+                  "argument": 1
+                },
+                "right": {
+                  "cell": {
+                    "var": "_nonces",
+                    "key": {
+                      "argument": 0
+                    }
+                  }
+                }
+              },
+              {
+                "op": "ult",
+                "left": {
+                  "cell": {
+                    "var": "_nonces",
+                    "key": {
+                      "argument": 0
+                    }
+                  }
+                },
+                "right": {
+                  "uint256": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    }
+  ]
+}

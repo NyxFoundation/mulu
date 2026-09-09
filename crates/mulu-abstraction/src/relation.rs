@@ -34,6 +34,11 @@ pub trait Layout {
     fn cell_generation(&self) -> u32 {
         0
     }
+    /// How many times a slot the layout does not name has been written.
+    /// ERC-7201 namespaced storage lives at such a slot.
+    fn raw_generation(&self, _slot: crate::interval::U256) -> u32 {
+        0
+    }
 }
 
 impl<F: Fn(crate::interval::U256) -> Option<String>> Layout for F {
@@ -59,6 +64,10 @@ pub struct Names {
     /// of them could have been a cell of any mapping, so one counter covers
     /// them all.
     pub cell_version: u32,
+    /// The same, per literal slot the layout does not name. A write there
+    /// goes to one place and the model knows which, so it does not have to
+    /// forget every cell.
+    pub raw_versions: BTreeMap<crate::interval::U256, u32>,
 }
 
 impl Names {
@@ -80,6 +89,9 @@ impl Layout for Names {
     }
     fn cell_generation(&self) -> u32 {
         self.cell_version
+    }
+    fn raw_generation(&self, slot: crate::interval::U256) -> u32 {
+        self.raw_versions.get(&slot).copied().unwrap_or(0)
     }
 }
 
@@ -264,7 +276,18 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
             }
             _ => None,
         };
-        return named.unwrap_or_else(|| call("sload", args));
+        return named.unwrap_or_else(|| {
+            // A slot the layout does not name still has a version: a write
+            // there is a write to one place, and a fact about what it held
+            // before is not a fact about what it holds after.
+            match slot_of(&args[0]).map(|s| (s, layout.raw_generation(s))) {
+                Some((s, n)) if n > 0 => call(
+                    "sload",
+                    vec![Expr::Ident { name: format!("{s}@{n}"), src: None }],
+                ),
+                _ => call("sload", args),
+            }
+        });
     }
     if name.starts_with("mapping_index_access") && args.len() == 2 {
         return call("mapping", args);

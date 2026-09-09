@@ -80,6 +80,15 @@ pub struct CallProperty {
     /// can put them side by side.
     #[serde(default)]
     pub from: String,
+    /// What this property is expected to come out as, when that is not
+    /// "holds". A rule mulu cannot answer is worth keeping in the file and
+    /// worth saying so about, rather than deleting until the file agrees
+    /// with the tool.
+    #[serde(default)]
+    pub expected: String,
+    /// Why, when `expected` says something.
+    #[serde(default)]
+    pub why: String,
     /// One rule per entrypoint the property is about. A file of the
     /// benchmark's may hold several rules under one name, and the answer key
     /// has one row for the name, so the property holds when all of them do.
@@ -117,6 +126,11 @@ pub enum Term {
     Env(String),
     /// An `immutable` variable, by the name the source gave it.
     Immutable(String),
+    /// A storage slot by number, for storage the layout does not name.
+    /// ERC-7201 namespaced storage is written through assembly at a fixed
+    /// slot, so `storageLayout` is empty and there is no label to use;
+    /// every upgradeable OpenZeppelin contract is this shape.
+    Slot(String),
     /// A literal, in decimal or 0x hex.
     Uint256(String),
     /// Wrapping addition and subtraction, as the EVM does them. `request_time
@@ -236,9 +250,14 @@ fn render(t: &Term, p: &PathSummary) -> Option<String> {
         Term::Argument(i) => p.parameters.get(*i)?.clone(),
         Term::Storage(v) => format!("storage({v})"),
         Term::Immutable(v) => format!("immutable({v})"),
+        Term::Slot(n) => format!("sload({})", parse_decimal(n).ok()?),
         Term::Cell { var, key } => format!("cell({var}, {})", render(key, p)?),
         Term::Env(name) => match name.as_str() {
             "balance" | "selfbalance" => "balance(address())".to_string(),
+            // The contract's own code size. Zero exactly while its
+            // constructor runs, which several of OpenZeppelin's rules turn
+            // on without saying so: they are stated of a deployed contract.
+            "codesize" | "extcodesize" => "extcodesize(address())".to_string(),
             other => format!("{other}()"),
         },
         Term::Uint256(text) => parse_decimal(text).ok()?.to_string(),
@@ -259,6 +278,7 @@ fn values(t: &Term, p: &PathSummary) -> Option<IntervalSet> {
         Term::Cell { .. }
         | Term::Env(_)
         | Term::Immutable(_)
+        | Term::Slot(_)
         | Term::Add { .. }
         | Term::Sub { .. } => None,
     }
@@ -609,6 +629,8 @@ mod tests {
         CallProperty {
             id: "withdraw-revert".into(),
             from: String::new(),
+            expected: String::new(),
+            why: String::new(),
             rules: vec![Rule {
                 entrypoint: "withdraw(uint256)".into(),
                 given: Some(Condition::Or {
@@ -671,6 +693,8 @@ mod tests {
         let not_revert = CallProperty {
             id: "withdraw-not-revert".into(),
             from: String::new(),
+            expected: String::new(),
+            why: String::new(),
             rules: vec![Rule {
                 entrypoint: "withdraw(uint256)".into(),
                 given: Some(Condition::Ule {
@@ -791,6 +815,8 @@ mod tests {
         let p = CallProperty {
             id: "x".into(),
             from: String::new(),
+            expected: String::new(),
+            why: String::new(),
             rules: vec![Rule {
                 entrypoint: "withdraw(uint256)".into(),
                 given: Some(Condition::Ugt {

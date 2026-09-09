@@ -2154,11 +2154,17 @@ impl<'a> Walk<'a> {
         // specification talks about the state the call started in.
         let mut versions: BTreeMap<String, u32> = BTreeMap::new();
         let mut cell_version: u32 = 0;
-        let names = |versions: &BTreeMap<String, u32>, cell_version: u32| crate::relation::Names {
+        // Per literal slot the layout does not name. ERC-7201 namespaced
+        // storage lives at one of these, so every upgradeable contract does.
+        let mut raw_versions: BTreeMap<U256, u32> = BTreeMap::new();
+        let names = |versions: &BTreeMap<String, u32>,
+                     cell_version: u32,
+                     raw: &BTreeMap<U256, u32>| crate::relation::Names {
             slots: slots.clone(),
             immutables: immutables.clone(),
             versions: versions.clone(),
             cell_version,
+            raw_versions: raw.clone(),
         };
         let mut frames: Vec<Frame> = vec![Frame {
             func: e.func.clone(),
@@ -2241,7 +2247,7 @@ impl<'a> Walk<'a> {
                         None => decide_or_split(
                             &self.inline_pure(&c.condition, 0),
                             &terms,
-                            &names(&versions, cell_version),
+                            &names(&versions, cell_version, &raw_versions),
                             &mut facts,
                             &mut splits,
                             || format!("check {} in {func}", c.id),
@@ -2281,10 +2287,43 @@ impl<'a> Walk<'a> {
                              colliding with a small constant slot is an assumption, the same \
                              one solc's own storage layout rests on",
                         );
-                        // It moved *some* cell, and the model does not know
-                        // which, so every fact about a cell is now about the
-                        // state before this write.
-                        cell_version += 1;
+                        // A literal slot the layout does not name is one
+                        // place, and the model knows which: version it and
+                        // leave the other cells alone. Anything else moved
+                        // *some* cell and the model does not know which.
+                        match crate::interval::parse_decimal(&slot_text) {
+                            Ok(n) => {
+                                // What it now holds, named, the same as for a
+                                // slot the layout does name.
+                                let written = crate::relation::term(
+                                    &w.value,
+                                    &terms,
+                                    &names(&versions, cell_version, &raw_versions),
+                                );
+                                *raw_versions.entry(n).or_default() += 1;
+                                let after = crate::relation::normalise(
+                                    &mulu_yul::Expr::Call {
+                                        name: "sload".into(),
+                                        args: vec![mulu_yul::Expr::Literal {
+                                            text: n.to_string(),
+                                            src: None,
+                                        }],
+                                        src: None,
+                                    },
+                                    &names(&versions, cell_version, &raw_versions),
+                                );
+                                facts.insert(
+                                    crate::relation::Relation {
+                                        op: crate::relation::Op::Eq,
+                                        left: after.render(),
+                                        right: written.render(),
+                                    }
+                                    .key(),
+                                    true,
+                                );
+                            }
+                            Err(_) => cell_version += 1,
+                        }
                         continue;
                     };
                     // What is written may not be a value the walk knows: it
@@ -2302,7 +2341,7 @@ impl<'a> Walk<'a> {
                         let t = crate::relation::term(
                             &w.value,
                             &terms,
-                            &names(&versions, cell_version),
+                            &names(&versions, cell_version, &raw_versions),
                         )
                         .render();
                         let mut edges = crate::order::edges_of(&facts);
@@ -2349,7 +2388,7 @@ impl<'a> Walk<'a> {
                     let written = Some(crate::relation::term(
                         &w.value,
                         &terms,
-                        &names(&versions, cell_version),
+                        &names(&versions, cell_version, &raw_versions),
                     ));
                     storage[slot_idx] = to;
                     *versions.entry(slot_label.clone()).or_default() += 1;
@@ -2369,7 +2408,7 @@ impl<'a> Walk<'a> {
                                 }],
                                 src: None,
                             },
-                            &names(&versions, cell_version),
+                            &names(&versions, cell_version, &raw_versions),
                         );
                         let key = crate::relation::Relation {
                             op: crate::relation::Op::Eq,
@@ -2538,7 +2577,7 @@ impl<'a> Walk<'a> {
                         let stamped = canon(v, &terms).map(|t| {
                             crate::relation::normalise(
                                 &crate::relation::strip(&self.inline_pure(&t, 0)),
-                                &names(&versions, cell_version),
+                                &names(&versions, cell_version, &raw_versions),
                             )
                         });
                         let fr = frames.last_mut().unwrap();
@@ -2676,7 +2715,7 @@ impl<'a> Walk<'a> {
                                 src: None,
                             },
                             &terms,
-                            &names(&versions, cell_version),
+                            &names(&versions, cell_version, &raw_versions),
                             &mut facts,
                             &mut splits,
                             || format!("a panic inside an instruction in {func}"),
@@ -2706,7 +2745,7 @@ impl<'a> Walk<'a> {
                             let t = canon(v, &terms).map(|t| {
                                 crate::relation::normalise(
                                     &crate::relation::strip(&self.inline_pure(&t, 0)),
-                                    &names(&versions, cell_version),
+                                    &names(&versions, cell_version, &raw_versions),
                                 )
                             });
                             let fr = frames.last_mut().unwrap();
@@ -2806,7 +2845,7 @@ impl<'a> Walk<'a> {
                                     src: None,
                                 },
                                 &terms,
-                                &names(&versions, cell_version),
+                                &names(&versions, cell_version, &raw_versions),
                                 &mut facts,
                                 &mut splits,
                                 || format!("whether the loop in {func} reverts"),
@@ -2855,7 +2894,7 @@ impl<'a> Walk<'a> {
                             None => decide_or_split(
                                 &self.inline_pure(&c.condition, 0),
                                 &terms,
-                                &names(&versions, cell_version),
+                                &names(&versions, cell_version, &raw_versions),
                                 &mut facts,
                                 &mut splits,
                                 || format!("check {} in {func}", c.id),
@@ -2901,7 +2940,7 @@ impl<'a> Walk<'a> {
                             None => decide_or_split(
                                 cond,
                                 &terms,
-                                &names(&versions, cell_version),
+                                &names(&versions, cell_version, &raw_versions),
                                 &mut facts,
                                 &mut splits,
                                 || format!("a branch in {func}"),

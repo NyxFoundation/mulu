@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "use_case": "openzeppelin-initializable",
+  "source": "openzeppelin-contracts fv/specs/Initializable.spec, against fv/harnesses/InitializableHarness.sol",
+  "note": "`Initializable` keeps its state in ERC-7201 namespaced storage, written through assembly at a fixed slot, so `storageLayout` names nothing and the slot is given by number. The word there holds `_initialized` in its low eight bytes and `_initializing` in the ninth; outside a call the latter is zero, so the word is the version. The `increasingVersion` and `notInitializing` rules are about the state a call leaves rather than whether it is accepted, and are not written. Every rule is stated of a *deployed* contract: OpenZeppelin's `initializer` admits `initialized == 1` while `address(this).code.length == 0`, which is the constructor running, and Certora's rules are about the contract afterwards. `extcodesize(address()) != 0` says so in each `given`. Every rule here is expected to hold.",
+  "call_properties": [
+    {
+      "id": "cannot-initialize-twice",
+      "from": "fv/specs/Initializable.spec rule cannotInitializeTwice",
+      "rules": [
+        {
+          "entrypoint": "initialize()",
+          "assert": "reverts",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ne",
+                "left": {
+                  "env": "extcodesize"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ugt",
+                "left": {
+                  "slot": "108904022758810753673719992590105913556127789646572562039383141376366747609600"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "cannot-initialize-once-disabled",
+      "from": "fv/specs/Initializable.spec rule cannotInitializeOnceDisabled",
+      "rules": [
+        {
+          "entrypoint": "initialize()",
+          "assert": "reverts",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ne",
+                "left": {
+                  "env": "extcodesize"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "eq",
+                "left": {
+                  "slot": "108904022758810753673719992590105913556127789646572562039383141376366747609600"
+                },
+                "right": {
+                  "uint256": "18446744073709551615"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "cannot-reinitialize-once-disabled",
+      "from": "fv/specs/Initializable.spec rule cannotReinitializeOnceDisabled",
+      "rules": [
+        {
+          "entrypoint": "reinitialize(uint64)",
+          "assert": "reverts",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ne",
+                "left": {
+                  "env": "extcodesize"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "eq",
+                "left": {
+                  "slot": "108904022758810753673719992590105913556127789646572562039383141376366747609600"
+                },
+                "right": {
+                  "uint256": "18446744073709551615"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "cannot-nest-initializers",
+      "from": "fv/specs/Initializable.spec rules cannotNestInitializers_*",
+      "rules": [
+        {
+          "entrypoint": "nested_init_init()",
+          "assert": "reverts",
+          "given": {
+            "op": "ne",
+            "left": {
+              "env": "extcodesize"
+            },
+            "right": {
+              "uint256": "0"
+            }
+          }
+        },
+        {
+          "entrypoint": "nested_init_reinit(uint64)",
+          "assert": "reverts",
+          "given": {
+            "op": "ne",
+            "left": {
+              "env": "extcodesize"
+            },
+            "right": {
+              "uint256": "0"
+            }
+          }
+        },
+        {
+          "entrypoint": "nested_reinit_init(uint64)",
+          "assert": "reverts",
+          "given": {
+            "op": "ne",
+            "left": {
+              "env": "extcodesize"
+            },
+            "right": {
+              "uint256": "0"
+            }
+          }
+        },
+        {
+          "entrypoint": "nested_reinit_reinit(uint64,uint64)",
+          "assert": "reverts",
+          "given": {
+            "op": "ne",
+            "left": {
+              "env": "extcodesize"
+            },
+            "right": {
+              "uint256": "0"
+            }
+          }
+        }
+      ],
+      "expected": "fails, and the failure is mulu's",
+      "why": "`_initializing` is the ninth byte of the same word as `_initialized`, and the outer modifier sets it before calling the inner one. Deciding this means reasoning about the bit packing inside that word, and the order closure does arithmetic on whole values only. Left in rather than removed: a rule mulu cannot answer is worth seeing."
+    }
+  ]
+}
