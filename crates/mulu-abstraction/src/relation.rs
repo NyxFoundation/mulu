@@ -95,6 +95,17 @@ impl Layout for Names {
     }
 }
 
+/// The declared slot a chain of mapping accesses starts from.
+///
+/// `None` for a bare slot: that is one place, not a variable's worth of
+/// cells, and the caller versions it by number.
+pub fn base_slot(e: &Expr) -> Option<crate::interval::U256> {
+    match mapping_chain(e) {
+        Some((s, keys)) if !keys.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 /// A chain of `mapping(base, key)` accesses down to a literal slot, with the
 /// keys in the order they are applied. `mapping(mapping(0, role), account)`
 /// is slot 0 with keys `[role, account]`.
@@ -314,10 +325,9 @@ pub fn normalise(e: &Expr, layout: &impl Layout) -> Expr {
                     return None;
                 }
                 let l = layout.label_at(slot)?;
-                let l = match layout.cell_generation() {
-                    0 => l,
-                    n => format!("{l}@{n}"),
-                };
+                // `label_at` has already stamped the variable's own version.
+                // A cell used to carry a counter shared by every mapping, so
+                // writing an allowance made every fact about a balance stale.
                 let mut a = vec![Expr::Ident { name: l, src: None }];
                 a.extend(keys);
                 Some(call("cell", a))

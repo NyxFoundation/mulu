@@ -1,0 +1,226 @@
+{
+  "schema_version": 1,
+  "use_case": "openzeppelin-safecast",
+  "source": "openzeppelin-contracts utils/math/SafeCast.sol, against a harness that exposes each cast",
+  "note": "Each cast reverts exactly when the value does not fit, so each is written as two rules, one per direction. The property language compares words, not signed values, so a signed bound is written as the words it admits: `value < 0` over an `int256` is `value >= 2^255`, and `-128 <= value <= 127` is `value <= 127 or value >= 2^256-128`. That is the same statement, and it is the one the EVM makes. Every rule is expected to hold.",
+  "call_properties": [
+    {
+      "id": "to-uint8-reverts",
+      "from": "fv/specs/SafeCast, toUint8",
+      "rules": [
+        {
+          "entrypoint": "toUint8(uint256)",
+          "given": {
+            "op": "ugt",
+            "left": {
+              "argument": 0
+            },
+            "right": {
+              "uint256": "255"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "to-uint8-succeeds",
+      "from": "fv/specs/SafeCast, toUint8",
+      "rules": [
+        {
+          "entrypoint": "toUint8(uint256)",
+          "given": {
+            "op": "ule",
+            "left": {
+              "argument": 0
+            },
+            "right": {
+              "uint256": "255"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "to-uint128-reverts",
+      "from": "fv/specs/SafeCast, toUint128",
+      "rules": [
+        {
+          "entrypoint": "toUint128(uint256)",
+          "given": {
+            "op": "ugt",
+            "left": {
+              "argument": 0
+            },
+            "right": {
+              "uint256": "340282366920938463463374607431768211455"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "to-uint128-succeeds",
+      "from": "fv/specs/SafeCast, toUint128",
+      "rules": [
+        {
+          "entrypoint": "toUint128(uint256)",
+          "given": {
+            "op": "ule",
+            "left": {
+              "argument": 0
+            },
+            "right": {
+              "uint256": "340282366920938463463374607431768211455"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "to-uint256-reverts",
+      "from": "fv/specs/SafeCast, toUint256",
+      "rules": [
+        {
+          "entrypoint": "toUint256(int256)",
+          "given": {
+            "op": "uge",
+            "left": {
+              "argument": 0
+            },
+            "right": {
+              "uint256": "57896044618658097711785492504343953926634992332820282019728792003956564819968"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "to-uint256-succeeds",
+      "from": "fv/specs/SafeCast, toUint256",
+      "rules": [
+        {
+          "entrypoint": "toUint256(int256)",
+          "given": {
+            "op": "ult",
+            "left": {
+              "argument": 0
+            },
+            "right": {
+              "uint256": "57896044618658097711785492504343953926634992332820282019728792003956564819968"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "to-int8-reverts",
+      "from": "fv/specs/SafeCast, toInt8",
+      "rules": [
+        {
+          "entrypoint": "toInt8(int256)",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ugt",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "127"
+                }
+              },
+              {
+                "op": "ult",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "115792089237316195423570985008687907853269984665640564039457584007913129639808"
+                }
+              }
+            ]
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "to-int8-succeeds",
+      "from": "fv/specs/SafeCast, toInt8",
+      "rules": [
+        {
+          "entrypoint": "toInt8(int256)",
+          "given": {
+            "op": "or",
+            "args": [
+              {
+                "op": "ule",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "127"
+                }
+              },
+              {
+                "op": "uge",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "115792089237316195423570985008687907853269984665640564039457584007913129639808"
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "to-int256-reverts",
+      "from": "fv/specs/SafeCast, toInt256",
+      "rules": [
+        {
+          "entrypoint": "toInt256(uint256)",
+          "given": {
+            "op": "ugt",
+            "left": {
+              "argument": 0
+            },
+            "right": {
+              "uint256": "57896044618658097711785492504343953926634992332820282019728792003956564819967"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "to-int256-succeeds",
+      "from": "fv/specs/SafeCast, toInt256",
+      "rules": [
+        {
+          "entrypoint": "toInt256(uint256)",
+          "given": {
+            "op": "ule",
+            "left": {
+              "argument": 0
+            },
+            "right": {
+              "uint256": "57896044618658097711785492504343953926634992332820282019728792003956564819967"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    }
+  ]
+}

@@ -26,7 +26,7 @@
 
 use crate::interval::{parse_decimal, IntervalSet};
 use crate::model::PathSummary;
-use crate::order::{contradictory, split_top};
+use crate::order::contradictory;
 use crate::relation::{Op, Relation};
 use serde::{Deserialize, Serialize};
 

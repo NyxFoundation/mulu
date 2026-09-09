@@ -207,6 +207,26 @@ fn strip_cleanup(e: &Expr, domain: &IntervalSet) -> Expr {
     let Expr::Call { name, args, .. } = e else {
         return e.clone();
     };
+    // `signextend` is idempotent at the same byte, and solc writes it twice
+    // where a signed value crosses a function boundary. The doubled form is
+    // the same expression, and collapsing it is what lets the comparison
+    // below be read as a width check.
+    if name == "signextend" && args.len() == 2 {
+        if let (
+            Some(b),
+            Expr::Call {
+                name: inner,
+                args: ia,
+                ..
+            },
+        ) = (literal_of(&args[0]), &args[1])
+        {
+            if inner == "signextend" && ia.len() == 2 && literal_of(&ia[0]) == Some(b) {
+                return strip_cleanup(&args[1], domain);
+            }
+        }
+        return e.clone();
+    }
     if name != "and" || args.len() != 2 {
         return e.clone();
     }
@@ -366,6 +386,37 @@ pub fn translate_in(e: &Expr, vars: &[String], domain: &IntervalSet) -> Result<P
                 }
                 "eq" => {
                     arity(2)?;
+                    // `signextend(k, v) == v` is how solc asks whether a
+                    // value fits in `int(8k+8)`: the sign extension is a
+                    // no-op exactly on the words that type admits.
+                    for (a, b) in [(&args[0], &args[1]), (&args[1], &args[0])] {
+                        let a = strip_cleanup(a, domain);
+                        let Expr::Call { name, args: ia, .. } = &a else {
+                            continue;
+                        };
+                        if name != "signextend" || ia.len() != 2 {
+                            continue;
+                        }
+                        let (Some(byte), Operand::Var(v)) = (
+                            literal_of(&ia[0]),
+                            operand(&strip_cleanup(b, domain), vars)?,
+                        ) else {
+                            continue;
+                        };
+                        if ia[1].render() != b.render() && ia[1].render() != v {
+                            continue;
+                        }
+                        let Ok(byte) = u32::try_from(byte) else {
+                            continue;
+                        };
+                        if byte >= 31 {
+                            return Ok(Predicate::True);
+                        }
+                        return Ok(Predicate::normalise(
+                            v,
+                            crate::interval::signed_bits(8 * (byte + 1)),
+                        ));
+                    }
                     // `eq(e, e)` is true whatever `e` is, which is how the
                     // uint256 ABI validator collapses.
                     let (l, r) = (
@@ -389,9 +440,35 @@ pub fn translate_in(e: &Expr, vars: &[String], domain: &IntervalSet) -> Result<P
                     arity(2)?;
                     translate_in(&args[0], vars, domain)?.or(&translate_in(&args[1], vars, domain)?)
                 }
-                "slt" | "sgt" => Err(format!(
-                    "`{name}` is a signed comparison; P1a models unsigned uint256 only"
-                )),
+                // Signed comparisons. Against a literal these still name a
+                // set of words, so they translate; between two variables the
+                // ordering is not the unsigned one `Predicate::Less` carries,
+                // and it is left to be decided where both are bound.
+                "slt" | "sgt" => {
+                    arity(2)?;
+                    let (l, r) = (
+                        strip_cleanup(&args[0], domain),
+                        strip_cleanup(&args[1], domain),
+                    );
+                    let (on_left, on_right): (fn(U256) -> IntervalSet, fn(U256) -> IntervalSet) =
+                        if name == "slt" {
+                            (crate::interval::signed_lt, crate::interval::signed_gt)
+                        } else {
+                            (crate::interval::signed_gt, crate::interval::signed_lt)
+                        };
+                    match (operand(&l, vars)?, operand(&r, vars)?) {
+                        (Operand::Var(v), Operand::Lit(k)) => {
+                            Ok(Predicate::normalise(v, on_left(k)))
+                        }
+                        (Operand::Lit(k), Operand::Var(v)) => {
+                            Ok(Predicate::normalise(v, on_right(k)))
+                        }
+                        _ => Err(format!(
+                            "`{name}` between two variables: the signed ordering is not the \
+                             unsigned one the P1a fragment relates"
+                        )),
+                    }
+                }
                 other => Err(format!("`{other}` is outside the P1a guard fragment")),
             }
         }
@@ -496,14 +573,72 @@ mod tests {
         assert_eq!(tr("lt(x, 0)", &["x"]).unwrap(), Predicate::False);
     }
 
+    /// A signed comparison against a literal still names a set of words. The
+    /// negatives sit at the top of the word, so it is two ranges, not one.
+    #[test]
+    fn a_signed_comparison_against_a_literal_is_a_set_of_words() {
+        let half = crate::interval::sign_bit();
+        assert_eq!(
+            tr("slt(x, 1)", &["x"]).unwrap(),
+            Predicate::Over {
+                var: "x".into(),
+                set: IntervalSet::eq_to(u(0)).union(&IntervalSet::ge(half)),
+            }
+        );
+        // Below zero is exactly the negatives.
+        assert_eq!(
+            tr("slt(x, 0)", &["x"]).unwrap(),
+            Predicate::Over {
+                var: "x".into(),
+                set: IntervalSet::ge(half)
+            }
+        );
+        // Above zero is the positives, and zero itself is in neither.
+        assert_eq!(
+            tr("sgt(x, 0)", &["x"]).unwrap(),
+            Predicate::Over {
+                var: "x".into(),
+                set: IntervalSet::range(u(1), half - crate::interval::U256::from(1u8)),
+            }
+        );
+    }
+
+    /// `signextend(k, v) == v` is how solc asks whether a value fits in a
+    /// signed type: the extension is a no-op exactly on the words that type
+    /// admits. It is written twice where a value crosses a function
+    /// boundary, and the doubled form is the same question.
+    #[test]
+    fn a_width_check_written_as_a_sign_extension_is_read_as_one() {
+        let int8 = crate::interval::signed_bits(8);
+        for e in [
+            "eq(signextend(0, x), x)",
+            "eq(signextend(0, signextend(0, x)), x)",
+            "eq(x, signextend(0, signextend(0, x)))",
+            "iszero(iszero(eq(signextend(0, signextend(0, x)), x)))",
+        ] {
+            assert_eq!(
+                tr(e, &["x"]).unwrap(),
+                Predicate::Over {
+                    var: "x".into(),
+                    set: int8.clone()
+                },
+                "{e}"
+            );
+        }
+        // a full word is always its own extension
+        assert_eq!(
+            tr("eq(signextend(31, x), x)", &["x"]).unwrap(),
+            Predicate::True
+        );
+    }
+
     #[test]
     fn what_is_outside_the_fragment_is_refused_not_guessed() {
         for (expr, vars) in [
-            ("slt(x, 100)", &["x"][..]),        // signed
-            ("gt(sub(a, b), 32)", &["a", "b"]), // arithmetic
-            ("gt(calldatasize(), 4)", &["x"]),  // environment read
-            ("callvalue()", &["x"]),            // not a comparison
-            ("slt(x, 1)", &["x"]),              // signed
+            ("gt(sub(a, b), 32)", &["a", "b"][..]), // arithmetic
+            ("gt(calldatasize(), 4)", &["x"]),      // environment read
+            ("callvalue()", &["x"]),                // not a comparison
+            ("slt(a, b)", &["a", "b"]),             // signed, between two variables
         ] {
             let vars: Vec<String> = vars.iter().map(|s| s.to_string()).collect();
             let src = format!("object \"T\" {{ code {{ let c := {expr} }} }}");

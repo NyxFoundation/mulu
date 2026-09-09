@@ -464,12 +464,14 @@ impl<'a> Builder<'a> {
     }
 
     /// Guard predicates of a function, keyed by check id.
+    ///
     pub(crate) fn guards(
         &mut self,
         f: &Function,
         domain: &IntervalSet,
     ) -> BTreeMap<String, Predicate> {
         let mut out = BTreeMap::new();
+        let pure = pure_helpers_of(self.ir);
         for c in self.ir.checks.iter().filter(|c| c.function == f.id) {
             if c.purity != Purity::Pure {
                 self.refuse(format!(
@@ -484,7 +486,23 @@ impl<'a> Builder<'a> {
             // values: `gt(add(memPtr, size), 0xffffffff)` is a comparison
             // whose left is arithmetic. Refusing here meant the walk never
             // got to look. It refuses instead, if it also cannot decide.
-            if let Ok(p) = crate::predicate::translate_in(&c.condition, &f.parameters, domain) {
+            // Resolve the locals the guard is written over, then inline the
+            // pure helper a conversion goes through: `downcasted` stands for
+            // `convert_t_int256_to_t_int8(value)`, and only past that is the
+            // guard the `signextend` it compiles to.
+            let cond = resolve_locals(f, c, &c.condition);
+            // To a fixed point: a conversion nests helpers deeper than one
+            // pass of `inline_pure` reaches, and what is left of the guard is
+            // `identity(cleanup(...))` around the operation that decides it.
+            let mut cond = cond;
+            for _ in 0..4 {
+                let next = resolve_locals(f, c, &inline_pure_in(self.ir, &pure, &cond, 0));
+                if next.render() == cond.render() {
+                    break;
+                }
+                cond = next;
+            }
+            if let Ok(p) = crate::predicate::translate_in(&cond, &f.parameters, domain) {
                 out.insert(c.id.clone(), p);
             }
         }
@@ -648,12 +666,10 @@ impl<'a> Builder<'a> {
                     d
                 }
                 Err(why) => {
-                    // A slot whose type has no interval domain takes the
-                    // whole word. That is sound: every value of the type is
-                    // some word. It is also all the model will ever know
-                    // about it, and for a signed slot in particular every
-                    // comparison is an `slt` or an `sgt`, which nothing here
-                    // decides, so every one of them forks.
+                    // A slot whose type has no domain here takes the whole
+                    // word. That is sound: every value of the type is some
+                    // word. It is also all the model will ever know about it,
+                    // so every guard over it forks.
                     self.note(format!(
                         "whole-word-slot: {} is `{type_label}`, which is not an interval domain \
                          ({why}), so it ranges over the whole 256-bit word",
@@ -1009,22 +1025,7 @@ impl<'a> Walk<'a> {
         per_slot: Vec<(String, Vec<IntervalSet>)>,
     ) -> Self {
         // Worked out once, from the whole contract, before `b` is moved.
-        const MAX_BODY: usize = 32;
-        let with_checks: BTreeSet<&str> = b.ir.checks.iter().map(|c| c.function.as_str()).collect();
-        let pure_helpers: BTreeSet<String> =
-            b.ir.functions
-                .iter()
-                .filter(|f| {
-                    !f.effects.writes_storage
-                        && !f.effects.can_revert
-                        && !with_checks.contains(f.id.as_str())
-                        && f.blocks.len() == 1
-                        && f.blocks[0].instructions.len() <= MAX_BODY
-                        && !f.returns.is_empty()
-                })
-                .map(|f| f.id.clone())
-                .collect();
-        drop(with_checks);
+        let pure_helpers = pure_helpers_of(b.ir);
         let deadline = b
             .deadline
             .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(60));
@@ -1272,9 +1273,38 @@ impl<'a> Walk<'a> {
                 None
             };
         };
+        // `sint(l) < sint(r)`, when the sets say which side of zero each is
+        // on. Within the negatives and within the non-negatives the word
+        // order is the signed order, so those two cases are the unsigned
+        // comparison; across them the sign settles it outright.
+        let signed_order = |a: &mulu_yul::Expr, b: &mulu_yul::Expr| -> Option<bool> {
+            let (l, r) = (
+                self.eval(a, env, storage, memory).ok()?,
+                self.eval(b, env, storage, memory).ok()?,
+            );
+            let neg = IntervalSet::ge(crate::interval::sign_bit());
+            let (ln, rn) = (l.subset_of(&neg), r.subset_of(&neg));
+            let (lp, rp) = (l.disjoint_from(&neg), r.disjoint_from(&neg));
+            let ((llo, lhi), (rlo, rhi)) = (l.bounds()?, r.bounds()?);
+            let unsigned = if lhi < rlo {
+                Some(true)
+            } else if llo >= rhi {
+                Some(false)
+            } else {
+                None
+            };
+            match (ln, lp, rn, rp) {
+                (true, _, _, true) => Some(true),
+                (_, true, true, _) => Some(false),
+                (true, _, true, _) | (_, true, _, true) => unsigned,
+                _ => None,
+            }
+        };
         match (name.as_str(), args.len()) {
             ("lt", 2) => order(&args[0], &args[1], true),
             ("gt", 2) => order(&args[1], &args[0], true),
+            ("slt", 2) => signed_order(&args[0], &args[1]),
+            ("sgt", 2) => signed_order(&args[1], &args[0]),
             ("iszero", 1) => self.decide_cond(&args[0], env, storage, memory).map(|b| !b),
             ("eq", 2) => {
                 let (l, r) = (
@@ -1332,8 +1362,12 @@ impl<'a> Walk<'a> {
         depth: usize,
     ) -> Result<IntervalSet, String> {
         // Nesting is bounded because the walk enumerates a product of regions
-        // and evaluates the same helper many times over.
-        const MAX_DEPTH: usize = 4;
+        // and evaluates the same helper many times over. Four was too few:
+        // solc writes `address(0)` as
+        // `convert_t_rational_0_by_1_to_t_address(0)`, whose body is three
+        // more cleanups deep, so the argument came back unknown and the
+        // `if (from == address(0))` that followed went both ways.
+        const MAX_DEPTH: usize = 12;
         if depth >= MAX_DEPTH {
             return Err(format!(
                 "evaluating {callee} nests deeper than {MAX_DEPTH} calls"
@@ -1501,9 +1535,23 @@ impl<'a> Walk<'a> {
         }
         match crate::value::value_set(e, env) {
             Ok(v) => Ok(v),
-            // A call `value_set` does not know may still be a helper that
-            // only computes.
             Err(why) => match e {
+                // A comparison has a *value*, one or zero, and `value_set`
+                // computes values while `decide_cond` decides truths. Solidity
+                // puts the truth in a local and switches on it, so without
+                // this the switch that an `if` compiles to had no value to
+                // look at and went both ways -- through the branch its own
+                // condition had just ruled out.
+                mulu_yul::Expr::Call { name, .. }
+                    if matches!(name.as_str(), "eq" | "lt" | "gt" | "slt" | "sgt" | "iszero") =>
+                {
+                    match self.decide_cond(e, env, storage, memory) {
+                        Some(b) => Ok(IntervalSet::point(U256::from(u8::from(b)))),
+                        None => Err(why),
+                    }
+                }
+                // A call `value_set` does not know may still be a helper that
+                // only computes.
                 mulu_yul::Expr::Call { name, args, .. } => {
                     self.eval_call(name, args, env, storage, memory, depth)
                 }
@@ -1591,19 +1639,52 @@ impl<'a> Walk<'a> {
     /// `fun_paused_75()` where a specification says `_paused`. One is not the
     /// other until this puts them together.
     fn inline_pure(&self, e: &mulu_yul::Expr, depth: usize) -> mulu_yul::Expr {
+        inline_pure_in(self.b.ir, &self.pure_helpers, e, depth)
+    }
+}
+
+/// Helpers that only compute: no storage write, no revert, no guard, one
+/// block and a short body.
+fn pure_helpers_of(ir: &ProgramIr) -> BTreeSet<String> {
+    const MAX_BODY: usize = 32;
+    let with_checks: BTreeSet<&str> = ir.checks.iter().map(|c| c.function.as_str()).collect();
+    ir.functions
+        .iter()
+        .filter(|f| {
+            !f.effects.writes_storage
+                && !f.effects.can_revert
+                && !with_checks.contains(f.id.as_str())
+                && f.blocks.len() == 1
+                && f.blocks[0].instructions.len() <= MAX_BODY
+                && !f.returns.is_empty()
+        })
+        .map(|f| f.id.clone())
+        .collect()
+}
+
+#[allow(clippy::only_used_in_recursion)]
+fn inline_pure_in(
+    ir: &ProgramIr,
+    pure_helpers: &BTreeSet<String>,
+    e: &mulu_yul::Expr,
+    depth: usize,
+) -> mulu_yul::Expr {
+    {
         const MAX: usize = 6;
         if depth >= MAX {
             return e.clone();
         }
         let mulu_yul::Expr::Call { name, args, src } = e else { return e.clone() };
-        let args: Vec<mulu_yul::Expr> =
-            args.iter().map(|a| self.inline_pure(a, depth + 1)).collect();
+        let args: Vec<mulu_yul::Expr> = args
+            .iter()
+            .map(|a| inline_pure_in(ir, pure_helpers, a, depth + 1))
+            .collect();
         // Not the ones `relation::normalise` recognises. Inlining
         // `mapping_index_access` and `read_from_storage` replaced
         // `cell(balances, caller())` with `sload(keccak256(0, 64))`, which
         // says less and matches nothing a specification writes.
-        if self.pure_helpers.contains(name) && !crate::relation::is_storage_idiom(name) {
-            if let Some(g) = self.b.ir.function(name) {
+        if pure_helpers.contains(name) && !crate::relation::is_storage_idiom(name) {
+            if let Some(g) = ir.function(name) {
                 if g.returns.len() == 1 && g.blocks.len() == 1 {
                     let mut env: BTreeMap<String, mulu_yul::Expr> = g
                         .parameters
@@ -1621,7 +1702,10 @@ impl<'a> Walk<'a> {
                             continue;
                         }
                         let sub = value.substitute(&env);
-                        env.insert(targets[0].clone(), self.inline_pure(&sub, depth + 1));
+                        env.insert(
+                            targets[0].clone(),
+                            inline_pure_in(ir, pure_helpers, &sub, depth + 1),
+                        );
                     }
                     if let Some(r) = env.get(&g.returns[0]) {
                         return r.clone();
@@ -1630,6 +1714,37 @@ impl<'a> Walk<'a> {
             }
         }
         mulu_yul::Expr::Call { name: name.clone(), args, src: *src }
+    }
+}
+
+impl<'a> Walk<'a> {
+    /// The callee's parameters, bound to what the walk can work out about the
+    /// arguments.
+    ///
+    /// `eval` rather than a plain value lookup: an argument may be a helper
+    /// call, and `up(address(0), v)` reaches the callee as
+    /// `convert_t_rational_0_by_1_to_t_address(0)`. Dropping it left the
+    /// parameter unknown, the `if (from == address(0))` that follows had no
+    /// value to switch on, and the walk went down the branch its own
+    /// condition had ruled out.
+    fn bind_args(
+        &self,
+        callee: &Function,
+        args: &[mulu_yul::Expr],
+        env: &crate::value::Env,
+        storage: &StorageRegion,
+        memory: &BTreeMap<U256, IntervalSet>,
+    ) -> crate::value::Env {
+        let mut out = crate::value::Env::new();
+        for (i, a) in args.iter().enumerate() {
+            let Some(param) = callee.parameters.get(i) else {
+                break;
+            };
+            if let Ok(set) = self.eval(a, env, storage, memory) {
+                out.insert(param.clone(), set);
+            }
+        }
+        out
     }
 
     /// Does every check inside this expression's helpers pass, given what the
@@ -2291,6 +2406,20 @@ impl<'a> Walk<'a> {
                         // place, and the model knows which: version it and
                         // leave the other cells alone. Anything else moved
                         // *some* cell and the model does not know which.
+                        // Which variable's cells moved. A mapping write is a
+                        // write to one variable, and versioning every cell of
+                        // every mapping made a fact about a balance stale
+                        // because an allowance was written.
+                        let base = crate::relation::base_slot(&crate::relation::term(
+                            &w.slot,
+                            &terms,
+                            &names(&versions, cell_version, &raw_versions),
+                        ))
+                        .and_then(|n| slots.get(&n).cloned());
+                        if let Some(label) = base {
+                            *versions.entry(label).or_default() += 1;
+                            continue;
+                        }
                         match crate::interval::parse_decimal(&slot_text) {
                             Ok(n) => {
                                 // What it now holds, named, the same as for a
@@ -2322,7 +2451,14 @@ impl<'a> Walk<'a> {
                                     true,
                                 );
                             }
-                            Err(_) => cell_version += 1,
+                            // A slot the model cannot place at all: any
+                            // variable's cells may have moved.
+                            Err(_) => {
+                                cell_version += 1;
+                                for (label, _) in self.per_slot.iter() {
+                                    *versions.entry(label.clone()).or_default() += 1;
+                                }
+                            }
                         }
                         continue;
                     };
@@ -2641,7 +2777,7 @@ impl<'a> Walk<'a> {
                             if depth >= MAX_DEPTH {
                                 return Err(format!("call depth limit reached at {callee}").into());
                             }
-                            let inner = bind_arguments(g, &args, &env)?;
+                            let inner = self.bind_args(g, &args, &env, &storage, &memory);
                             let inner_terms = bind_terms(g, &args, &terms);
                             frames.push(Frame {
                                 func: callee,
@@ -2666,7 +2802,7 @@ impl<'a> Walk<'a> {
                             if depth >= MAX_DEPTH {
                                 return Err(format!("call depth limit reached at {callee}").into());
                             }
-                            let inner = bind_arguments(g, &args, &env)?;
+                            let inner = self.bind_args(g, &args, &env, &storage, &memory);
                             let inner_terms = bind_terms(g, &args, &terms);
                             frames.push(Frame {
                                 func: callee,
@@ -3036,6 +3172,39 @@ impl<'a> Walk<'a> {
                     cases,
                     default,
                 } => {
+                    // `switch c case 0 { B } default { A }` is how solc
+                    // compiles `if (c) { A } else { B }`. Treated as a switch
+                    // it forked on the *value* and left a fact about the
+                    // value; treated as what it is, it forks on the condition
+                    // and leaves the same fact a guard on that condition
+                    // leaves. Without that the walk took the branch a guard
+                    // had already ruled out.
+                    if cases.len() == 1 && cases[0].0 == "0" {
+                        if let Some(d) = default {
+                            let taken = match self.decide_cond(value, &env, &storage, &memory) {
+                                Some(v) => v,
+                                None => decide_or_split(
+                                    &self.inline_pure(value, 0),
+                                    &terms,
+                                    &names(&versions, cell_version, &raw_versions),
+                                    &mut facts,
+                                    &mut splits,
+                                    || format!("an if in {func}"),
+                                )?,
+                            };
+                            let target = if taken { *d } else { cases[0].1 };
+                            let fr = frames.last_mut().unwrap();
+                            if !fr.visited.insert((target, 0)) {
+                                return Err(TraceStop::Refused(
+                                    "the abstract execution revisits a block; P1a does not model loops"
+                                        .into(),
+                                ));
+                            }
+                            fr.block = target;
+                            fr.index = 0;
+                            continue;
+                        }
+                    }
                     // A switch on a value the walk does not know goes every
                     // way the switch has: one per case, plus one for the
                     // default. `returndatasize` after an external call is the
@@ -3053,6 +3222,29 @@ impl<'a> Walk<'a> {
                             ways,
                             what: format!("a switch in {func}"),
                         })?;
+                        // Which case was taken is a fact, and it has to be
+                        // one: solc compiles `if (c) {..} else {..}` to a
+                        // switch, and without recording the choice the walk
+                        // took the branch that a guard on the same condition
+                        // had just ruled out.
+                        let t = crate::relation::term(
+                            value,
+                            &terms,
+                            &names(&versions, cell_version, &raw_versions),
+                        )
+                        .render();
+                        for (i, (lit, _)) in cases.iter().enumerate() {
+                            let Ok(v) = crate::interval::parse_decimal(lit) else {
+                                continue;
+                            };
+                            let key = crate::relation::Relation {
+                                op: crate::relation::Op::Eq,
+                                left: t.clone(),
+                                right: v.to_string(),
+                            }
+                            .key();
+                            facts.insert(key, i == pick);
+                        }
                         let chosen = match cases.get(pick) {
                             Some((_, b)) => Some(*b),
                             None => *default,
@@ -3730,38 +3922,6 @@ fn statement_call(ins: &mulu_yul::ir::Instruction) -> Option<(String, Vec<mulu_y
     }
 }
 
-/// Which of the callee's parameters denotes the abstract argument.
-///
-/// P1a carries a single uint256 argument, so a call may pass it along
-/// unchanged or pass none of it. Anything else, such as a computed value,
-/// would need the argument partition to be re-derived and is refused.
-/// What the callee knows, from what the caller knows.
-///
-/// Each argument expression is evaluated in the caller's environment and
-/// bound to the callee's parameter of the same position. This replaced a rule
-/// that could bind exactly one parameter, to exactly the entrypoint argument,
-/// passed by name and nothing else. A call like `capped(x + 1)` had no way to
-/// be described; now it is described whenever `value_set` can evaluate it.
-///
-/// A parameter whose argument does not evaluate is simply not bound. The walk
-/// then refuses any guard that needs it, by name, rather than here.
-fn bind_arguments(
-    callee: &Function,
-    args: &[mulu_yul::Expr],
-    caller: &crate::value::Env,
-) -> Result<crate::value::Env, String> {
-    let mut env = crate::value::Env::new();
-    for (i, a) in args.iter().enumerate() {
-        let Some(param) = callee.parameters.get(i) else {
-            break;
-        };
-        if let Ok(set) = crate::value::value_set(a, caller) {
-            env.insert(param.clone(), set);
-        }
-    }
-    Ok(env)
-}
-
 /// Take a side on a condition the regions do not decide.
 ///
 /// If this path already took a side on a condition with the same canonical
@@ -3790,6 +3950,34 @@ fn decide_or_split(
         None => canon(cond, terms).map(|t| t.render()),
     };
     let sense = keyed.as_ref().map(|(_, s)| *s).unwrap_or(true);
+    // Some relations need no fork and no fact. Two literals settle
+    // themselves, and a value compared with itself settles too. Forking on
+    // `0 == 0` sent the walk down the side where `_update`'s `from` is not
+    // the zero address it was just given, and every ERC20 rule failed on a
+    // path the contract does not have.
+    if let Some((r, _)) = &keyed {
+        let holds = if r.left == r.right {
+            Some(matches!(
+                r.op,
+                crate::relation::Op::Le | crate::relation::Op::Eq
+            ))
+        } else {
+            match (
+                crate::interval::parse_decimal(&r.left),
+                crate::interval::parse_decimal(&r.right),
+            ) {
+                (Ok(a), Ok(b)) => Some(match r.op {
+                    crate::relation::Op::Lt => a < b,
+                    crate::relation::Op::Le => a <= b,
+                    crate::relation::Op::Eq => a == b,
+                }),
+                _ => None,
+            }
+        };
+        if let Some(h) = holds {
+            return Ok(if sense { h } else { !h });
+        }
+    }
     if let Some(k) = &key {
         if let Some(known) = facts.get(k) {
             return Ok(if sense { *known } else { !*known });
@@ -3897,7 +4085,8 @@ fn loop_body(f: &Function, head: usize) -> BTreeSet<usize> {
 /// reaching one through a function it calls?
 fn calls_out_directly(op: &mulu_yul::ir::Op) -> bool {
     let e = match op {
-        mulu_yul::ir::Op::Let { value: Some(v), .. } | mulu_yul::ir::Op::Assign { value: v, .. } => v,
+        mulu_yul::ir::Op::Let { value: Some(v), .. }
+        | mulu_yul::ir::Op::Assign { value: v, .. } => v,
         mulu_yul::ir::Op::Effect { call } => call,
         _ => return false,
     };
@@ -4064,4 +4253,104 @@ mod tests {
         disambiguate(&mut v);
         assert_eq!(names(&v), vec!["setLimit", "forceSet"]);
     }
+}
+
+/// A guard written over a local, rewritten over what defines it.
+///
+/// `SafeCast.toInt8` writes `downcasted := signextend(0, value)` and then
+/// guards on `downcasted == value`. Over the local that is not a statement
+/// about the argument and no region splits on it; over `value` it is the
+/// width check it was written to be.
+///
+/// Which definition a name stands for is a question about where the check is.
+/// A named return is written twice, `let downcasted := 0` at entry and the
+/// assignment after it, so taking either one on its own would be wrong. In
+/// the check's own block the last definition before it is the one that
+/// reached it; outside that block only a name defined exactly once is folded.
+fn resolve_locals(f: &Function, c: &mulu_yul::ir::Check, e: &mulu_yul::Expr) -> mulu_yul::Expr {
+    let mut count: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut whole: BTreeMap<&str, &mulu_yul::Expr> = BTreeMap::new();
+    for b in &f.blocks {
+        for i in &b.instructions {
+            let (targets, value) = match &i.op {
+                mulu_yul::ir::Op::Let { targets, value } => (targets, value.as_ref()),
+                mulu_yul::ir::Op::Assign { targets, value } => (targets, Some(value)),
+                mulu_yul::ir::Op::Effect { .. } => continue,
+            };
+            for t in targets {
+                *count.entry(t.as_str()).or_default() += 1;
+            }
+            if let (1, Some(v)) = (targets.len(), value) {
+                whole.insert(targets[0].as_str(), v);
+            }
+        }
+    }
+    // The check's own block, up to the instruction that evaluates it.
+    let mut here: Vec<(usize, &str, &mulu_yul::Expr)> = vec![];
+    if let Some(b) = f.blocks.get(c.pre_location) {
+        let limit = c.pre_instruction.unwrap_or(b.instructions.len());
+        for (n, i) in b.instructions.iter().enumerate().take(limit) {
+            let (targets, value) = match &i.op {
+                mulu_yul::ir::Op::Let { targets, value } => (targets, value.as_ref()),
+                mulu_yul::ir::Op::Assign { targets, value } => (targets, Some(value)),
+                mulu_yul::ir::Op::Effect { .. } => continue,
+            };
+            if let (1, Some(v)) = (targets.len(), value) {
+                here.push((n, targets[0].as_str(), v));
+            }
+        }
+    }
+
+    struct Ctx<'a> {
+        count: BTreeMap<&'a str, usize>,
+        whole: BTreeMap<&'a str, &'a mulu_yul::Expr>,
+        here: Vec<(usize, &'a str, &'a mulu_yul::Expr)>,
+        params: &'a [String],
+    }
+    fn go(e: &mulu_yul::Expr, x: &Ctx, before: usize, depth: usize) -> mulu_yul::Expr {
+        if depth >= 8 {
+            return e.clone();
+        }
+        match e {
+            mulu_yul::Expr::Ident { name, .. } => {
+                if x.params.iter().any(|p| p == name) {
+                    return e.clone();
+                }
+                // The last definition in this block before the point asked
+                // about; failing that, a name the whole function defines once.
+                if let Some((n, _, v)) = x
+                    .here
+                    .iter()
+                    .rev()
+                    .find(|(n, t, _)| *n < before && *t == name.as_str())
+                {
+                    return go(v, x, *n, depth + 1);
+                }
+                if x.count.get(name.as_str()) == Some(&1) {
+                    if let Some(v) = x.whole.get(name.as_str()) {
+                        return go(v, x, before, depth + 1);
+                    }
+                }
+                e.clone()
+            }
+            mulu_yul::Expr::Call { name, args, src } => mulu_yul::Expr::Call {
+                name: name.clone(),
+                args: args.iter().map(|a| go(a, x, before, depth + 1)).collect(),
+                src: src.clone(),
+            },
+            _ => e.clone(),
+        }
+    }
+    let before = c.pre_instruction.unwrap_or(usize::MAX);
+    go(
+        e,
+        &Ctx {
+            count,
+            whole,
+            here,
+            params: &f.parameters,
+        },
+        before,
+        0,
+    )
 }

@@ -20,6 +20,43 @@ pub fn max_u256() -> U256 {
     U256::MAX
 }
 
+/// The smallest word whose two's-complement reading is negative, `2^255`.
+pub fn sign_bit() -> U256 {
+    U256::from(1u8) << 255
+}
+
+/// The words whose two's-complement reading is below that of `k`.
+///
+/// A signed comparison is a statement about the same 256-bit words, read
+/// differently, so it still names a set of words. What it is not is an
+/// interval: every negative value sits above every positive one as a word,
+/// so `x < 0` is the single range `[2^255, 2^256-1]` and `x < 1` is two.
+pub fn signed_lt(k: U256) -> IntervalSet {
+    let half = sign_bit();
+    if k >= half {
+        // `k` is negative: below it are the negatives below it as words.
+        IntervalSet::range(half, k).difference(&IntervalSet::point(k))
+    } else {
+        // `k` is at or above zero: every negative, and the smaller words.
+        IntervalSet::lt(k).union(&IntervalSet::ge(half))
+    }
+}
+
+/// The words whose two's-complement reading is above that of `k`.
+pub fn signed_gt(k: U256) -> IntervalSet {
+    signed_lt(k).union(&IntervalSet::point(k)).complement()
+}
+
+/// The words an `intN` admits: `[0, 2^(N-1)-1]` and `[2^256-2^(N-1), 2^256-1]`.
+pub fn signed_bits(bits: u32) -> IntervalSet {
+    if bits >= 256 {
+        return IntervalSet::full();
+    }
+    let top = (U256::from(1u8) << (bits as usize - 1)) - U256::from(1u8);
+    let low = max_u256() - top;
+    IntervalSet::le(top).union(&IntervalSet::ge(low))
+}
+
 /// A canonical union of closed intervals `[lo, hi]` over `uint256`.
 ///
 /// Serialised as pairs of **decimal strings**, matching the convention of
@@ -427,5 +464,49 @@ mod tests {
         assert_eq!(x1.count(), Some(900));
         assert!(x2.count().is_none(), "the tail is larger than u128");
         assert_eq!(x2.witness(), Some(u(1001)));
+    }
+}
+
+#[cfg(test)]
+mod signed_tests {
+    use super::*;
+
+    fn u(v: u64) -> U256 {
+        U256::from(v)
+    }
+
+    /// A signed comparison is about the same words, read differently. Zero is
+    /// the seam: everything at or above `2^255` reads as negative.
+    #[test]
+    fn the_negatives_sit_at_the_top_of_the_word() {
+        let half = sign_bit();
+        assert_eq!(signed_lt(U256::ZERO), IntervalSet::ge(half));
+        assert_eq!(signed_gt(U256::ZERO), IntervalSet::range(u(1), half - u(1)));
+        // `-1` is the all-ones word, and nothing but the other negatives is
+        // below it
+        assert_eq!(
+            signed_lt(max_u256()),
+            IntervalSet::range(half, max_u256() - u(1))
+        );
+        assert!(signed_gt(max_u256()).contains(U256::ZERO));
+        assert!(!signed_gt(max_u256()).contains(half));
+        // the two halves and the point itself partition the word
+        for k in [U256::ZERO, u(1), half, max_u256()] {
+            let all = signed_lt(k)
+                .union(&signed_gt(k))
+                .union(&IntervalSet::point(k));
+            assert!(all.is_full(), "{k} does not partition");
+            assert!(signed_lt(k).disjoint_from(&signed_gt(k)));
+        }
+    }
+
+    /// An `intN` admits `2^N` words, in two blocks.
+    #[test]
+    fn a_signed_width_admits_both_ends_of_the_word() {
+        assert_eq!(signed_bits(8).count(), Some(256));
+        assert!(signed_bits(8).contains(u(127)));
+        assert!(!signed_bits(8).contains(u(128)));
+        assert!(signed_bits(8).contains(max_u256()));
+        assert!(signed_bits(256).is_full());
     }
 }

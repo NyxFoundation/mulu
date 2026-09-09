@@ -66,10 +66,18 @@ pub fn domain_of(ty: &str) -> Result<IntervalSet, String> {
         }
         return Ok(unsigned_bits(bits));
     }
-    if t.starts_with("int") {
-        return Err(format!(
-            "`{t}` is signed; P1a reasons over unsigned uint256 words only"
-        ));
+    if let Some(rest) = t.strip_prefix("int") {
+        let bits: u32 = if rest.is_empty() {
+            256
+        } else {
+            rest.parse().map_err(|_| bad(t))?
+        };
+        if bits == 0 || bits > 256 || bits % 8 != 0 {
+            return Err(bad(t));
+        }
+        // The words an `intN` admits, read as two's complement. Not an
+        // interval: the negatives sit at the top of the word.
+        return Ok(crate::interval::signed_bits(bits));
     }
     if t == "bytes32" {
         // A full word, left-aligned or not: every value is possible.
@@ -103,7 +111,7 @@ pub fn domain_or_whole_word(ty: &str) -> Result<(IntervalSet, Option<String>), S
 }
 
 fn bad(t: &str) -> String {
-    format!("`{t}` is outside the P1a type fragment (uint8..uint256, address, bool)")
+    format!("`{t}` is outside the P1a type fragment (uint8..uint256, int8..int256, address, bool)")
 }
 
 /// `[0, 2^bits - 1]`.
@@ -200,19 +208,17 @@ mod tests {
     #[test]
     fn what_p1a_cannot_model_is_refused() {
         for t in [
-            "int256", "int8", "bytes", "string", "uint7", "uint0", "uint512", "mapping", "MyStruct",
+            "bytes", "string", "uint7", "uint0", "uint512", "int7", "int512", "mapping", "MyStruct",
         ] {
             assert!(domain_of(t).is_err(), "{t} must be refused an exact domain");
         }
-        // and the message says why, rather than being generic
-        assert!(domain_of("int256").unwrap_err().contains("signed"));
         // a full word is a full word, whichever end the value sits at
         assert!(domain_of("bytes32").unwrap().is_full());
     }
 
-    /// Everything but a signed integer has *some* domain to reason over.
-    /// Refusing the contract for a `string` parameter that decides nothing
-    /// was the wrong trade; a domain that says less is the right one.
+    /// Everything has *some* domain to reason over. Refusing the contract
+    /// for a `string` parameter that decides nothing was the wrong trade; a
+    /// domain that says less is the right one.
     #[test]
     fn a_type_without_an_interval_domain_gets_the_whole_word_and_says_so() {
         for t in ["bytes", "string", "bytes4", "MyStruct", "uint256[]"] {
@@ -224,9 +230,13 @@ mod tests {
         let (d, note) = domain_or_whole_word("uint8").unwrap();
         assert_eq!(d.count(), Some(256));
         assert!(note.is_none());
-        // a signed integer is still refused: the whole word is not a wider
-        // reading of it, it is a different one
-        assert!(domain_or_whole_word("int256").is_err());
+        // a signed integer is exact too: `int8` is the words a two's
+        // complement byte reads as, which is the low 128 and the top 128
+        let (d, note) = domain_or_whole_word("int8").unwrap();
+        assert_eq!(d.count(), Some(256));
+        assert!(d.contains(u(127)) && !d.contains(u(128)));
+        assert!(d.contains(crate::interval::max_u256()));
+        assert!(note.is_none());
     }
 
     #[test]

@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "use_case": "openzeppelin-erc20",
+  "source": "openzeppelin-contracts fv/specs/ERC20.spec, against a harness exposing _mint and _burn",
+  "note": "Each rule states what must be true *if* the call reverted, so what is written here is the contrapositive: none of those things, and the call is accepted. The other direction is not asserted by OpenZeppelin and is not written. The post-state halves and the two invariants (`totalSupplyIsSumOfBalances`, `zeroAddressNoBalance`) are about state rather than about whether a call is accepted; the first is a sum over a mapping, which this abstraction does not have. Every rule here is expected to hold.",
+  "call_properties": [
+    {
+      "id": "transfer-accepted",
+      "from": "fv/specs/ERC20.spec rule transfer, the revert branch read the other way",
+      "rules": [
+        {
+          "entrypoint": "transfer(address,uint256)",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ne",
+                "left": {
+                  "env": "caller"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ne",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ule",
+                "left": {
+                  "argument": 1
+                },
+                "right": {
+                  "cell": {
+                    "var": "_balances",
+                    "key": {
+                      "env": "caller"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "transfer-from-accepted",
+      "from": "fv/specs/ERC20.spec rule transferFrom, the revert branch read the other way",
+      "rules": [
+        {
+          "entrypoint": "transferFrom(address,address,uint256)",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ne",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ne",
+                "left": {
+                  "argument": 1
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ne",
+                "left": {
+                  "env": "caller"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ule",
+                "left": {
+                  "argument": 2
+                },
+                "right": {
+                  "cell": {
+                    "var": "_balances",
+                    "key": {
+                      "argument": 0
+                    }
+                  }
+                }
+              },
+              {
+                "op": "ule",
+                "left": {
+                  "argument": 2
+                },
+                "right": {
+                  "nested": {
+                    "var": "_allowances",
+                    "keys": [
+                      {
+                        "argument": 0
+                      },
+                      {
+                        "env": "caller"
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "approve-accepted",
+      "from": "fv/specs/ERC20.spec rule approve, the revert branch read the other way",
+      "rules": [
+        {
+          "entrypoint": "approve(address,uint256)",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ne",
+                "left": {
+                  "env": "caller"
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ne",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "mint-accepted",
+      "from": "fv/specs/ERC20.spec rule mint, the revert branch read the other way",
+      "rules": [
+        {
+          "entrypoint": "mint(address,uint256)",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ne",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ule",
+                "left": {
+                  "storage": "_totalSupply"
+                },
+                "right": {
+                  "add": {
+                    "left": {
+                      "storage": "_totalSupply"
+                    },
+                    "right": {
+                      "argument": 1
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "burn-accepted",
+      "from": "fv/specs/ERC20.spec rule burn, the revert branch read the other way",
+      "rules": [
+        {
+          "entrypoint": "burn(address,uint256)",
+          "given": {
+            "op": "and",
+            "args": [
+              {
+                "op": "ne",
+                "left": {
+                  "argument": 0
+                },
+                "right": {
+                  "uint256": "0"
+                }
+              },
+              {
+                "op": "ule",
+                "left": {
+                  "argument": 1
+                },
+                "right": {
+                  "cell": {
+                    "var": "_balances",
+                    "key": {
+                      "argument": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    }
+  ]
+}

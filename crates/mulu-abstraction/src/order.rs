@@ -125,6 +125,46 @@ pub fn contradictory(edges: &[(String, String, bool)]) -> bool {
         edges.extend(extra);
     }
 
+    let mut extra_bitwise = vec![];
+    // Bitwise `or` only ever sets bits and `and` only ever clears them, so
+    // `or(a, b)` is at or above both its arguments and `and(a, b)` at or
+    // below both. That is the whole of what says a packed word is not zero:
+    // `_initializing` sits in the ninth byte of the same word as
+    // `_initialized`, the outer modifier writes `or(and(word, mask), 1)`, and
+    // the inner one's guard reads that word as zero. Nothing about the mask
+    // is needed to see the two cannot both hold.
+    for term in edges
+        .iter()
+        .flat_map(|(a, b, _)| [a.clone(), b.clone()])
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        // Only over words. A variable that shares its slot is named for the
+        // variable and bounded by its type, while the read-modify-write
+        // around it is over the whole 32-byte word: `_timeout_called` is one
+        // byte in `{0, 1}` and the word written back is at least 256. Both
+        // are true, of different things wearing one name, and putting them
+        // on the same graph made a reachable path look contradictory.
+        if term.contains("storage(") || term.contains("cell(") {
+            continue;
+        }
+        for (head, above) in [("or(", true), ("and(", false)] {
+            let Some(inner) = term.strip_prefix(head).and_then(|r| r.strip_suffix(")")) else {
+                continue;
+            };
+            let Some((a, b)) = split_top(inner) else {
+                continue;
+            };
+            for arg in [a, b] {
+                extra_bitwise.push(if above {
+                    (arg, term.clone(), false)
+                } else {
+                    (term.clone(), arg, false)
+                });
+            }
+        }
+    }
+    edges.extend(extra_bitwise);
+
     // Floyd-Warshall over the terms, carrying whether some edge on the path
     // was strict. A term reachable from itself through a strict edge is a
     // value strictly less than itself.

@@ -24,8 +24,8 @@ regression fails and normal noise does not. It also catches something a floor
 would not obviously catch: the run has to *finish*, and the worst defect this
 corpus found was a ten-line contract that never did.
 
-**28.3% overstates it, and the harness now says so.** Of the 404 contracts
-that reach a complete model, 56 contain a guard mulu would report on. The rest
+**The percentage overstates it, and the harness says so.** Of the contracts
+that reach a complete model, 596 of 1145 contain a guard mulu would report on. The rest
 model to three states and a straight line, because there is nothing in them to
 say anything about. Coverage that produces no finding is not coverage.
 
@@ -160,6 +160,51 @@ several transactions in sequence, or on signed arithmetic: `zerotoken_bet`
 keeps its balances in `int`, and every comparison on one is an `slt` that
 nothing here decides.
 
+## OpenZeppelin — is mulu right about code people run?
+
+The two corpora above are small programs written to be measured. The third is
+the library most deployed contracts inherit from, and it comes with its own
+formal specifications: `fv/specs/*.spec`, written for Certora by the people
+who wrote the code.
+
+`bench/properties/openzeppelin/` holds those specifications rewritten in
+mulu's terms, and `bench/harnesses/openzeppelin/` holds the contracts they are
+about.
+
+```sh
+cargo run --release -p mulu-cli -- analyze \
+  --out /tmp/out bench/harnesses/openzeppelin/OwnableHarness.flat.sol \
+  --contract OwnableHarness \
+  --call-properties bench/properties/openzeppelin/ownable.json
+```
+
+| specification | rules | answered |
+| --- | --- | --- |
+| `Pausable` | 6 | 6 |
+| `Ownable` | 6 | 6 |
+| `Ownable2Step` | 8 | 8 |
+| `Nonces` | 3 | 3 |
+| `Initializable` | 4 | 4 |
+| `AccessControl` | 8 | 8 |
+| `ERC20` | 5 | 5 |
+| `SafeCast` | 10 | 10 |
+| `ReentrancyGuard` | 3 | 3 |
+| | **53** | **53** |
+
+There is no answer key to be scored against here, and that is the point: every
+one of these is expected to hold, because it is a property the library's
+authors wrote and their own tool discharges. **A `fails` would be a false
+positive, and this is the measurement that looks for them.** Each file's
+`note` says what was left out and why, and nothing is written that mulu cannot
+decide: `ERC20`'s `totalSupplyIsSumOfBalances` is a sum over every cell of a
+mapping, which this abstraction cannot express, so it is not in the file.
+
+A rule mulu could not answer stayed in the file with an `expected` saying so
+for as long as that was true. `Initializable`'s nested initializers were the
+last one, and what settled them was not a special case for them: `or(a, b)` is
+at or above both its arguments and `and(a, b)` at or below both, which is
+enough to see that a word with the ninth byte set is not zero.
+
 ## What the corpus said, 2026-09-07
 
 | run | modelled / in scope | what changed |
@@ -184,7 +229,8 @@ nothing here decides.
 | | 66.7% | a type is a slot's universe, a narrow write is a write, a panic forks |
 | | 77.2% | a loop's effect is over-approximated rather than unrolled or refused |
 | | 77.0% | a term is versioned, and a store says what it left behind |
-| latest | 77.1% | a minute to walk a contract, rather than twenty seconds |
+| | 77.1% | a minute to walk a contract, rather than twenty seconds |
+| latest | 80.1% | signed integers, `signextend` as a width check, a guard written over a local resolved at the point it is asked |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every

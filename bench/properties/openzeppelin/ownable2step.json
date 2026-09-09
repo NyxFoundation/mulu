@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "use_case": "openzeppelin-ownable2step",
+  "source": "openzeppelin-contracts fv/specs/Ownable2Step.spec, against a harness of the shape fv/harnesses uses",
+  "note": "Each `assert success <=> cond` is written here as two rules, one per direction. `Ownable2Step` overrides `transferOwnership` to record a pending owner rather than to transfer, and the override drops `Ownable`'s rejection of the zero address: handing ownership to nobody is what `renounceOwnership` is for, and a pending owner of zero can never accept, since a call cannot come from the zero address. So the rule here is `caller == owner` alone, without `newOwner != 0`. The post-state halves of OpenZeppelin's rules are about the state a call leaves, not about whether it is accepted, and are not written. Every rule is expected to hold.",
+  "call_properties": [
+    {
+      "id": "transfer-only-owner-reverts",
+      "from": "fv/specs/Ownable2Step.spec rule onlyCurrentOwnerCanTransfer, the <= direction",
+      "rules": [
+        {
+          "entrypoint": "transferOwnership(address)",
+          "given": { "op": "ne", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "transfer-only-owner-succeeds",
+      "from": "fv/specs/Ownable2Step.spec rule onlyCurrentOwnerCanTransfer, the => direction",
+      "rules": [
+        {
+          "entrypoint": "transferOwnership(address)",
+          "given": { "op": "eq", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "accept-only-pending-owner-reverts",
+      "from": "fv/specs/Ownable2Step.spec rule onlyPendingOwnerCanAccept, the <= direction",
+      "rules": [
+        {
+          "entrypoint": "acceptOwnership()",
+          "given": { "op": "ne", "left": { "env": "caller" }, "right": { "storage": "_pendingOwner" } },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "accept-only-pending-owner-succeeds",
+      "from": "fv/specs/Ownable2Step.spec rule onlyPendingOwnerCanAccept, the => direction",
+      "rules": [
+        {
+          "entrypoint": "acceptOwnership()",
+          "given": { "op": "eq", "left": { "env": "caller" }, "right": { "storage": "_pendingOwner" } },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "renounce-only-owner-reverts",
+      "from": "fv/specs/Ownable2Step.spec, inherited from Ownable",
+      "rules": [
+        {
+          "entrypoint": "renounceOwnership()",
+          "given": { "op": "ne", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "renounce-only-owner-succeeds",
+      "from": "fv/specs/Ownable2Step.spec, inherited from Ownable",
+      "rules": [
+        {
+          "entrypoint": "renounceOwnership()",
+          "given": { "op": "eq", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "only-owner-modifier-reverts",
+      "from": "fv/specs/Ownable2Step.spec, the modifier itself",
+      "rules": [
+        {
+          "entrypoint": "restricted()",
+          "given": { "op": "ne", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "only-owner-modifier-succeeds",
+      "from": "fv/specs/Ownable2Step.spec, the modifier itself",
+      "rules": [
+        {
+          "entrypoint": "restricted()",
+          "given": { "op": "eq", "left": { "env": "caller" }, "right": { "storage": "_owner" } },
+          "assert": "does-not-revert"
+        }
+      ]
+    }
+  ]
+}

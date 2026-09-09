@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "use_case": "openzeppelin-reentrancyguard",
+  "source": "openzeppelin-contracts utils/ReentrancyGuard.sol, against a harness with one guarded and one unguarded entrypoint",
+  "note": "`_status` is `1` outside a guarded call and `2` inside one, so the guard is a statement about the slot rather than about the caller. The third rule is the control: a function without the modifier is accepted whatever the status is, which is what says the first two are about the modifier and not about the contract. Every rule is expected to hold.",
+  "call_properties": [
+    {
+      "id": "guarded-reverts-while-entered",
+      "from": "fv ReentrancyGuard, the reentrant call",
+      "rules": [
+        {
+          "entrypoint": "guarded()",
+          "given": {
+            "op": "eq",
+            "left": {
+              "storage": "_status"
+            },
+            "right": {
+              "uint256": "2"
+            }
+          },
+          "assert": "reverts"
+        }
+      ]
+    },
+    {
+      "id": "guarded-succeeds-while-not-entered",
+      "from": "fv ReentrancyGuard, the first call",
+      "rules": [
+        {
+          "entrypoint": "guarded()",
+          "given": {
+            "op": "eq",
+            "left": {
+              "storage": "_status"
+            },
+            "right": {
+              "uint256": "1"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    },
+    {
+      "id": "unguarded-does-not-look-at-the-status",
+      "from": "the modifier is what guards, not the contract",
+      "rules": [
+        {
+          "entrypoint": "unguarded()",
+          "given": {
+            "op": "eq",
+            "left": {
+              "storage": "_status"
+            },
+            "right": {
+              "uint256": "2"
+            }
+          },
+          "assert": "does-not-revert"
+        }
+      ]
+    }
+  ]
+}
