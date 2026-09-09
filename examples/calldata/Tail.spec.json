@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "use_case": "calldata-guards",
+  "source": "written for examples/calldata",
+  "note": "`keep` says that a guard over the argument still decides both ways with a dynamic calldata array beside it. `first` says the walk has not been made to forget the checks solc puts around indexing: `a[0]` can revert, so the second half of `first` does not hold.",
+  "call_properties": [
+    {
+      "id": "small-x-reverts",
+      "from": "the require in keep",
+      "rules": [{ "entrypoint": "keep(uint256,uint256[])",
+                  "given": {"op":"ule","left":{"argument":0},"right":{"uint256":"10"}},
+                  "assert": "reverts" }]
+    },
+    {
+      "id": "large-x-returns",
+      "from": "the require in keep",
+      "rules": [{ "entrypoint": "keep(uint256,uint256[])",
+                  "given": {"op":"ugt","left":{"argument":0},"right":{"uint256":"10"}},
+                  "assert": "does-not-revert" }]
+    },
+    {
+      "id": "indexing-still-reverts",
+      "from": "a[0] in first",
+      "expected": "fails, and the failure is the right answer",
+      "why": "nothing in the call says the array is not empty, so `first` can revert however large `x` is. The rule is written the way a specification writer would write it if they forgot that, and the answer says so.",
+      "rules": [{ "entrypoint": "first(uint256,uint256[])",
+                  "given": {"op":"ugt","left":{"argument":0},"right":{"uint256":"10"}},
+                  "assert": "does-not-revert" }]
+    }
+  ]
+}

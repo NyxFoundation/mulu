@@ -1406,3 +1406,50 @@ contract C {
     assert_eq!(verdicts, vec!["holds", "holds"], "both directions of `success <=> !paused`");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What a call is given is computed before the call, and it can revert first.
+///
+/// `a[0]` on a calldata array compiles to
+/// `read_from_calldata(calldata_array_index_access(...))`. The walk entered
+/// the outer call and bound its parameter from the inner one's *value*, so
+/// the bounds check inside the inner call was never reached and an index into
+/// an empty array read as a path that returns. Nothing said so: the model
+/// reported no unsupported construct.
+#[test]
+fn a_check_inside_an_argument_is_not_walked_past() {
+    if !ready() {
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/calldata");
+    let out = std::env::temp_dir().join(format!("mulu-calldata-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let code = mulu()
+        .args(["analyze", root.join("Tail.sol").to_str().unwrap()])
+        .args(["--contract", "Tail", "--out", out.to_str().unwrap()])
+        .args(["--call-properties", root.join("Tail.spec.json").to_str().unwrap()])
+        .status()
+        .unwrap()
+        .code()
+        .unwrap();
+    assert!(code == 0 || code == 1, "analyze ran");
+    let props = json(&out.join("call-properties.json"));
+    let verdict = |id: &str| -> String {
+        props
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == id)
+            .unwrap_or_else(|| panic!("no property {id}"))["verdict"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // A guard over the argument still decides both ways with a dynamic
+    // calldata array beside it.
+    assert_eq!(verdict("small-x-reverts"), "holds");
+    assert_eq!(verdict("large-x-returns"), "holds");
+    // And nothing says the array is not empty, so indexing can revert
+    // however large the argument is.
+    assert_eq!(verdict("indexing-still-reverts"), "fails");
+    let _ = std::fs::remove_dir_all(&out);
+}

@@ -1811,6 +1811,22 @@ impl<'a> Walk<'a> {
         true
     }
 
+    /// Can evaluating what a call is given end the transaction?
+    ///
+    /// `false` means every check inside every argument is settled to pass, so
+    /// the walk may go straight to the call. `true` means one of them is not
+    /// settled, and the walk has to take both ways.
+    fn args_may_revert(
+        &mut self,
+        args: &[mulu_yul::Expr],
+        env: &crate::value::Env,
+        storage: &StorageRegion,
+        memory: &BTreeMap<U256, IntervalSet>,
+    ) -> bool {
+        args.iter()
+            .any(|a| !self.every_inner_check_passes(a, env, storage, memory))
+    }
+
     /// Which region of `slot` a value known to lie in `values` falls into.
     fn region_of(&self, slot: usize, values: &IntervalSet) -> Option<usize> {
         self.per_slot[slot]
@@ -2774,6 +2790,34 @@ impl<'a> Walk<'a> {
                             || g.effects.can_revert
                             || self.b.ir.checks.iter().any(|c| c.function == callee);
                         if matters {
+                            // The arguments are evaluated before the call, and
+                            // a call inside one carries its own checks.
+                            // `a[0]` on a calldata array compiles to
+                            // `read_from_calldata(index_access(...))`, whose
+                            // bounds check lives in the inner call; entering
+                            // the outer one and binding its parameter walked
+                            // straight past it, and an index into an empty
+                            // array read as a path that returns.
+                            if self.args_may_revert(&args, &env, &storage, &memory)
+                                && decide_or_split(
+                                    &mulu_yul::Expr::Ident {
+                                        name: format!("panic-in-args:{func}#{block}#{index}"),
+                                        src: None,
+                                    },
+                                    &terms,
+                                    &names(&versions, cell_version, &raw_versions),
+                                    &mut facts,
+                                    &mut splits,
+                                    || format!("a check inside an argument of {callee} in {func}"),
+                                )?
+                            {
+                                return Ok(Trace {
+                                    steps,
+                                    ending: Ending::Revert,
+                                    assumed: reverted_at.unwrap_or(facts),
+                                    reverts: true,
+                                });
+                            }
                             if depth >= MAX_DEPTH {
                                 return Err(format!("call depth limit reached at {callee}").into());
                             }
@@ -2799,6 +2843,28 @@ impl<'a> Walk<'a> {
                             || g.effects.can_revert
                             || self.b.ir.checks.iter().any(|c| c.function == callee);
                         if matters {
+                            // Same as above: what the call is given is
+                            // computed first, and it can revert first too.
+                            if self.args_may_revert(&args, &env, &storage, &memory)
+                                && decide_or_split(
+                                    &mulu_yul::Expr::Ident {
+                                        name: format!("panic-in-args:{func}#{block}#{index}"),
+                                        src: None,
+                                    },
+                                    &terms,
+                                    &names(&versions, cell_version, &raw_versions),
+                                    &mut facts,
+                                    &mut splits,
+                                    || format!("a check inside an argument of {callee} in {func}"),
+                                )?
+                            {
+                                return Ok(Trace {
+                                    steps,
+                                    ending: Ending::Revert,
+                                    assumed: reverted_at.unwrap_or(facts),
+                                    reverts: true,
+                                });
+                            }
                             if depth >= MAX_DEPTH {
                                 return Err(format!("call depth limit reached at {callee}").into());
                             }

@@ -25,7 +25,7 @@ would not obviously catch: the run has to *finish*, and the worst defect this
 corpus found was a ten-line contract that never did.
 
 **The percentage overstates it, and the harness says so.** Of the contracts
-that reach a complete model, 596 of 1145 contain a guard mulu would report on. The rest
+that reach a complete model, 595 of 1144 contain a guard mulu would report on. The rest
 model to three states and a straight line, because there is nothing in them to
 say anything about. Coverage that produces no finding is not coverage.
 
@@ -230,7 +230,8 @@ enough to see that a word with the ninth byte set is not zero.
 | | 77.2% | a loop's effect is over-approximated rather than unrolled or refused |
 | | 77.0% | a term is versioned, and a store says what it left behind |
 | | 77.1% | a minute to walk a contract, rather than twenty seconds |
-| latest | 80.1% | signed integers, `signextend` as a width check, a guard written over a local resolved at the point it is asked |
+| | 80.1% | signed integers, `signextend` as a width check, a guard written over a local resolved at the point it is asked |
+| latest | 80.0% | **a soundness hole closed**: a check inside a call's argument was walked past |
 
 The first run said 0%. mulu's Yul parser treated `data` as a reserved word,
 and solc names a generated helper `array_dataslot_…(ptr) -> data` for every
