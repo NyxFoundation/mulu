@@ -854,6 +854,19 @@ impl<'a> Builder<'a> {
             "abi-decoder-unverified: calldata decoding and the non-payable guard are taken as \
              given by the environment profile and are not modelled",
         );
+        if self
+            .ir
+            .functions
+            .iter()
+            .any(|f| f.effects.reads_transient || f.effects.writes_transient)
+        {
+            self.note(
+                "transient-storage-unread: EIP-1153 transient storage is a separate space from \
+                 storage, cleared at the end of every transaction, so nothing about it carries \
+                 from one to the next. A `tload` is not given a value here and a guard over one \
+                 is taken both ways; a `tstore` moves no declared variable",
+            );
+        }
         self.note(
             "argument-regions-are-exact: guards are decided by interval arithmetic over uint256, \
              not by a solver, so no trusted-solver assumption is carried",

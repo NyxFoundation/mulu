@@ -19,6 +19,11 @@ pub enum Builtin {
     /// a function of the guard's arguments.
     ReadsEnvironment,
     ReadsCode,
+    /// EIP-1153 transient storage. A separate space from storage, cleared at
+    /// the end of every transaction, so between transactions it is zero and
+    /// nothing about it carries over.
+    ReadsTransient,
+    WritesTransient,
     Log,
     Return,
     Revert,
@@ -42,8 +47,10 @@ pub fn classify(name: &str) -> Option<Builtin> {
         "mload" | "msize" | "keccak256" | "sha3" => ReadsMemory,
         "mstore" | "mstore8" | "mcopy" | "memoryguard" => WritesMemory,
 
-        "sload" | "tload" => ReadsStorage,
-        "sstore" | "tstore" => WritesStorage,
+        "sload" => ReadsStorage,
+        "sstore" => WritesStorage,
+        "tload" => ReadsTransient,
+        "tstore" => WritesTransient,
 
         "calldataload" | "calldatasize" | "calldatacopy" => ReadsCalldata,
 
@@ -84,6 +91,10 @@ pub fn classify(name: &str) -> Option<Builtin> {
 pub struct Effects {
     pub reads_storage: bool,
     pub writes_storage: bool,
+    #[serde(default)]
+    pub reads_transient: bool,
+    #[serde(default)]
+    pub writes_transient: bool,
     pub reads_memory: bool,
     pub writes_memory: bool,
     pub reads_calldata: bool,
@@ -100,6 +111,8 @@ impl Effects {
     pub fn merge(&mut self, other: &Effects) {
         self.reads_storage |= other.reads_storage;
         self.writes_storage |= other.writes_storage;
+        self.reads_transient |= other.reads_transient;
+        self.writes_transient |= other.writes_transient;
         self.reads_memory |= other.reads_memory;
         self.writes_memory |= other.writes_memory;
         self.reads_calldata |= other.reads_calldata;
@@ -123,6 +136,8 @@ impl Effects {
             WritesMemory => self.writes_memory = true,
             ReadsStorage => self.reads_storage = true,
             WritesStorage => self.writes_storage = true,
+            ReadsTransient => self.reads_transient = true,
+            WritesTransient => self.writes_transient = true,
             ReadsCalldata => self.reads_calldata = true,
             ReadsEnvironment => self.reads_environment = true,
             Log => self.logs = true,
@@ -156,6 +171,8 @@ pub enum Purity {
     Pure,
     ReadsCalldata,
     ReadsEnvironment,
+    /// Storage, or the transient storage beside it. Both are state the
+    /// argument does not determine.
     ReadsState,
     /// Has effects, or calls something not modelled.
     Effectful,
@@ -163,9 +180,9 @@ pub enum Purity {
 
 impl Purity {
     pub fn of(e: &Effects) -> Purity {
-        if !e.supported() || e.writes_storage || e.writes_memory || e.logs {
+        if !e.supported() || e.writes_storage || e.writes_transient || e.writes_memory || e.logs {
             Purity::Effectful
-        } else if e.reads_storage {
+        } else if e.reads_storage || e.reads_transient {
             Purity::ReadsState
         } else if e.reads_environment {
             Purity::ReadsEnvironment
